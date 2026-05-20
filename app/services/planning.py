@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, PublishJob, QualityReport
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, PublishJob, QualityReport, StoryArc
 from app.services.production import (
     create_chapter_brief,
     create_publish_job,
@@ -17,6 +17,7 @@ from app.services.production import (
     revise_chapter,
     review_chapter,
 )
+from app.services.story import arcs_for_chapter, list_story_arcs
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,13 @@ class HumanDecisionPackage:
     inspect_count: int
 
 
+@dataclass(frozen=True)
+class ChapterBriefFields:
+    goal: str
+    required_beats: str
+    constraints: str
+
+
 AUTO_ACTIONS = {
     "create_chapter_brief",
     "draft_chapter",
@@ -103,16 +111,46 @@ def create_chapter_plan(
         chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
         if chapter and _latest_brief(session, chapter_id=chapter.id):
             continue
+        fields = _chapter_brief_fields(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            goal_prefix=goal_prefix,
+            required_beats=required_beats,
+            constraints=constraints,
+        )
         brief = create_chapter_brief(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
-            goal=f"{goal_prefix} 第{chapter_number}章",
-            required_beats=required_beats,
-            constraints=constraints,
+            goal=fields.goal,
+            required_beats=fields.required_beats,
+            constraints=fields.constraints,
         )
         created.append(brief)
     return created
+
+
+def create_arc_chapter_plan(
+    session: Session,
+    *,
+    book_id: int,
+    arc_number: int,
+    required_beats: str = "",
+    constraints: str = "",
+) -> list[ChapterBrief]:
+    arc = next((item for item in list_story_arcs(session, book_id=book_id) if item.arc_number == arc_number), None)
+    if not arc:
+        raise ValueError(f"story arc not found: {arc_number}")
+    return create_chapter_plan(
+        session,
+        book_id=book_id,
+        start=arc.start_chapter,
+        count=arc.end_chapter - arc.start_chapter + 1,
+        goal_prefix=arc.title or f"剧情段{arc.arc_number}",
+        required_beats=required_beats,
+        constraints=constraints,
+    )
 
 
 def plan_chapters(session: Session, *, book_id: int, start: int = 1, count: int = 10) -> list[ChapterPlanItem]:
@@ -137,13 +175,21 @@ def run_next_action(
     item = _plan_one(session, book_id=book_id, chapter_number=chapter_number)
     action = item.next_action
     if action == "create_chapter_brief":
+        fields = _chapter_brief_fields(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            goal_prefix=goal_prefix,
+            required_beats=required_beats,
+            constraints=constraints,
+        )
         brief = create_chapter_brief(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
-            goal=f"{goal_prefix} 第{chapter_number}章",
-            required_beats=required_beats,
-            constraints=constraints,
+            goal=fields.goal,
+            required_beats=fields.required_beats,
+            constraints=fields.constraints,
         )
         return RunNextActionResult(chapter_number, action, "executed", "created chapter brief", brief.id)
     if action == "draft_chapter":
@@ -361,6 +407,95 @@ def _publish_action(job: PublishJob | None) -> tuple[str, str]:
     if job.status == "published":
         return "done", "chapter has been published"
     return "inspect_publish_job", f"unhandled publish job status: {job.status}"
+
+
+def _chapter_brief_fields(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    goal_prefix: str,
+    required_beats: str = "",
+    constraints: str = "",
+) -> ChapterBriefFields:
+    arcs = arcs_for_chapter(session, book_id=book_id, chapter_number=chapter_number, limit=1)
+    if not arcs:
+        return ChapterBriefFields(
+            goal=f"{goal_prefix} 第{chapter_number}章",
+            required_beats=required_beats,
+            constraints=constraints,
+        )
+    arc = arcs[0]
+    phase = _arc_phase(arc, chapter_number)
+    goal_parts = [
+        f"{goal_prefix} 第{chapter_number}章",
+        f"剧情段：{arc.title}",
+        f"阶段：{phase}",
+    ]
+    if arc.goal:
+        goal_parts.append(f"服务目标：{arc.goal}")
+    if phase == "climax" and arc.climax:
+        goal_parts.append(f"逼近/兑现高潮：{arc.climax}")
+    if phase == "resolution" and arc.turn:
+        goal_parts.append(f"落到转折：{arc.turn}")
+
+    beat_parts = [
+        f"剧情段阶段:{phase}",
+        "压力",
+        "选择",
+        "代价",
+        "信息增量",
+        "章末钩子",
+    ]
+    if arc.goal:
+        beat_parts.append(f"推进剧情段目标:{arc.goal}")
+    if arc.climax:
+        beat_parts.append(f"预埋或推进高潮:{arc.climax}")
+    if arc.turn:
+        beat_parts.append(f"保持转折方向:{arc.turn}")
+    beat_parts.extend(_split_csv(required_beats))
+
+    constraint_parts = [
+        f"保持在第{arc.start_chapter}-{arc.end_chapter}章剧情段边界内",
+        "不得偏离 Story Bible 和已登记 Canon",
+    ]
+    constraint_parts.extend(_split_csv(constraints))
+    return ChapterBriefFields(
+        goal="；".join(goal_parts),
+        required_beats="，".join(_dedupe(beat_parts)),
+        constraints="，".join(_dedupe(constraint_parts)),
+    )
+
+
+def _arc_phase(arc: StoryArc, chapter_number: int) -> str:
+    total = max(1, arc.end_chapter - arc.start_chapter + 1)
+    index = chapter_number - arc.start_chapter + 1
+    ratio = index / total
+    if index == 1:
+        return "setup"
+    if ratio < 0.45:
+        return "development"
+    if ratio < 0.75:
+        return "midpoint"
+    if chapter_number < arc.end_chapter:
+        return "climax"
+    return "resolution"
+
+
+def _split_csv(value: str) -> list[str]:
+    normalized = value.replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
+    return [item.strip() for item in normalized.split(",") if item.strip()]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _chapter(session: Session, *, book_id: int, chapter_number: int) -> Chapter | None:

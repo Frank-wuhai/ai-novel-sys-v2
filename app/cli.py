@@ -37,7 +37,14 @@ from app.services.production import (
     review_chapter,
     seed_prompts,
 )
-from app.services.planning import build_human_decision_package, create_chapter_plan, plan_chapters, run_book_cycle, run_next_action
+from app.services.planning import (
+    build_human_decision_package,
+    create_arc_chapter_plan,
+    create_chapter_plan,
+    plan_chapters,
+    run_book_cycle,
+    run_next_action,
+)
 from app.services.evidence import (
     add_evidence_source,
     add_market_signal,
@@ -149,6 +156,12 @@ def main() -> None:
     p.add_argument("--start", type=int, required=True)
     p.add_argument("--count", type=int, required=True)
     p.add_argument("--goal-prefix", required=True)
+    p.add_argument("--required-beats", default="")
+    p.add_argument("--constraints", default="")
+
+    p = sub.add_parser("create-arc-chapter-plan")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--arc-number", type=int, required=True)
     p.add_argument("--required-beats", default="")
     p.add_argument("--constraints", default="")
 
@@ -475,6 +488,17 @@ def main() -> None:
                     start=args.start,
                     count=args.count,
                     goal_prefix=args.goal_prefix,
+                    required_beats=args.required_beats,
+                    constraints=args.constraints,
+                )
+                print(f"created_brief_count={len(briefs)}")
+                for brief in briefs:
+                    print(f"brief_id={brief.id}\tchapter_id={brief.chapter_id}\tstatus={brief.status}")
+            elif args.cmd == "create-arc-chapter-plan":
+                briefs = create_arc_chapter_plan(
+                    session,
+                    book_id=args.book_id,
+                    arc_number=args.arc_number,
                     required_beats=args.required_beats,
                     constraints=args.constraints,
                 )

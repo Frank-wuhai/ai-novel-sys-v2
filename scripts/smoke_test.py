@@ -75,6 +75,70 @@ def main() -> int:
         ]),
     )
     book_id = extract_id("book_id", run(["create-book", "--title", "Smoke Test Book", "--genre", "玄幻都市", "--platform", "manual"]))
+    story_bible_id = extract_id(
+        "story_bible_id",
+        run([
+            "upsert-story-bible",
+            "--book-id",
+            str(book_id),
+            "--positioning",
+            "玄幻都市有代价能力连载",
+            "--reader-promise",
+            "每章都有压力、选择、代价和新发现",
+            "--main-plot",
+            "林澈追查都市异象源头，并逐步理解能力代价",
+            "--protagonist-arc",
+            "从被动自保到主动承担代价",
+            "--power-curve",
+            "能力只能短期推演，代价逐步加重",
+            "--forbidden-rules",
+            "不得无代价解决危机，不得推翻已登记能力限制",
+            "--style-guide",
+            "节奏紧，章末保留明确钩子",
+            "--status",
+            "active",
+        ]),
+    )
+    run([
+        "create-volume",
+        "--book-id",
+        str(book_id),
+        "--volume-number",
+        "1",
+        "--title",
+        "异象初现",
+        "--summary",
+        "建立能力代价和都市异象主线",
+    ])
+    story_arc_id = extract_id(
+        "story_arc_id",
+        run([
+            "create-story-arc",
+            "--book-id",
+            str(book_id),
+            "--arc-number",
+            "1",
+            "--title",
+            "第一次代价推演",
+            "--start-chapter",
+            "1",
+            "--end-chapter",
+            "5",
+            "--goal",
+            "让林澈确认能力收益与记忆代价绑定",
+            "--climax",
+            "林澈用推演避开危机但忘记关键人名",
+            "--turn",
+            "异象并非偶发事件",
+            "--volume-number",
+            "1",
+        ]),
+    )
+    story_context = run(["show-story-context", "--book-id", str(book_id), "--chapter-number", "1"])
+    if f"story_bible_ids={story_bible_id}" not in story_context or f"story_arc_ids={story_arc_id}" not in story_context:
+        print("story context did not include expected bible and arc refs")
+        print(story_context)
+        return 1
     plan_empty = run(["plan-chapters", "--book-id", str(book_id), "--start", "1", "--count", "1"])
     if "next_action=create_chapter_brief" not in plan_empty:
         print("planner did not request brief for missing chapter")
@@ -99,6 +163,28 @@ def main() -> int:
         print("chapter plan did not create expected briefs")
         print(created_plan)
         return 1
+    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    try:
+        arc_brief = conn.execute(
+            """
+            select cb.goal, cb.required_beats, cb.constraints
+            from chapter_briefs cb
+            join chapters c on c.id = cb.chapter_id
+            where c.book_id=? and c.chapter_number=3
+            order by cb.id desc limit 1
+            """,
+            (book_id,),
+        ).fetchone()
+        if not arc_brief or "剧情段：第一次代价推演" not in arc_brief[0] or "剧情段阶段:" not in arc_brief[1]:
+            print("arc-aware chapter brief was not generated")
+            print(arc_brief)
+            return 1
+        if "保持在第1-5章剧情段边界内" not in arc_brief[2]:
+            print("arc boundary constraint was not generated")
+            print(arc_brief)
+            return 1
+    finally:
+        conn.close()
     plan_ready = run(["plan-chapters", "--book-id", str(book_id), "--start", "3", "--count", "2"])
     if plan_ready.count("next_action=draft_chapter") != 2:
         print("planner did not mark planned chapters as draft-ready")
@@ -208,70 +294,6 @@ def main() -> int:
         "--reader-promise",
         "每个收益都有代价",
     ])
-    story_bible_id = extract_id(
-        "story_bible_id",
-        run([
-            "upsert-story-bible",
-            "--book-id",
-            str(book_id),
-            "--positioning",
-            "玄幻都市有代价能力连载",
-            "--reader-promise",
-            "每章都有压力、选择、代价和新发现",
-            "--main-plot",
-            "林澈追查都市异象源头，并逐步理解能力代价",
-            "--protagonist-arc",
-            "从被动自保到主动承担代价",
-            "--power-curve",
-            "能力只能短期推演，代价逐步加重",
-            "--forbidden-rules",
-            "不得无代价解决危机，不得推翻已登记能力限制",
-            "--style-guide",
-            "节奏紧，章末保留明确钩子",
-            "--status",
-            "active",
-        ]),
-    )
-    run([
-        "create-volume",
-        "--book-id",
-        str(book_id),
-        "--volume-number",
-        "1",
-        "--title",
-        "异象初现",
-        "--summary",
-        "建立能力代价和都市异象主线",
-    ])
-    story_arc_id = extract_id(
-        "story_arc_id",
-        run([
-            "create-story-arc",
-            "--book-id",
-            str(book_id),
-            "--arc-number",
-            "1",
-            "--title",
-            "第一次代价推演",
-            "--start-chapter",
-            "1",
-            "--end-chapter",
-            "5",
-            "--goal",
-            "让林澈确认能力收益与记忆代价绑定",
-            "--climax",
-            "林澈用推演避开危机但忘记关键人名",
-            "--turn",
-            "异象并非偶发事件",
-            "--volume-number",
-            "1",
-        ]),
-    )
-    story_context = run(["show-story-context", "--book-id", str(book_id), "--chapter-number", "1"])
-    if f"story_bible_ids={story_bible_id}" not in story_context or f"story_arc_ids={story_arc_id}" not in story_context:
-        print("story context did not include expected bible and arc refs")
-        print(story_context)
-        return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")

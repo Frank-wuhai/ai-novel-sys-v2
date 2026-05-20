@@ -17,6 +17,7 @@ python -m app.cli create-foundation --book-id 1 --premise "..."
 python -m app.cli upsert-story-bible --book-id 1 --positioning "..." --reader-promise "..." --main-plot "..." --forbidden-rules "..."
 python -m app.cli create-volume --book-id 1 --volume-number 1 --title "第一卷"
 python -m app.cli create-story-arc --book-id 1 --arc-number 1 --title "开局剧情段" --start-chapter 1 --end-chapter 10 --goal "..."
+python -m app.cli create-arc-chapter-plan --book-id 1 --arc-number 1
 python -m app.cli create-chapter-plan --book-id 1 --start 1 --count 5 --goal-prefix "第一卷推进"
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 5
 python -m app.cli run-next-action --book-id 1 --chapter-number 1 --dry-run
@@ -144,6 +145,14 @@ python -m app.cli create-chapter-plan \
   --constraints "保持 Canon 连续性"
 
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 10
+```
+
+When chapters fall inside a Story Arc, `create-chapter-plan` automatically enriches each brief with the arc title, phase, goal, climax/turn direction, and arc boundary constraints.
+
+To plan directly from an existing arc:
+
+```bash
+python -m app.cli create-arc-chapter-plan --book-id 1 --arc-number 1
 ```
 
 `plan-chapters` does not generate prose. It inspects each chapter and reports the next action, such as:
