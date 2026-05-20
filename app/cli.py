@@ -24,6 +24,7 @@ from app.services.canon import (
     format_canon_context,
 )
 from app.services.continuity import record_chapter_continuity
+from app.services.dashboard import build_project_dashboard
 from app.services.llm_queue import (
     enqueue_draft_chapter,
     enqueue_revise_chapter,
@@ -219,6 +220,12 @@ def main() -> None:
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--count", type=int, default=10)
     p.add_argument("--live-llm", action="store_true")
+
+    p = sub.add_parser("project-dashboard")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=20)
+    p.add_argument("--recent-tasks", type=int, default=10)
 
     p = sub.add_parser("draft-chapter")
     p.add_argument("--book-id", type=int, required=True)
@@ -665,6 +672,16 @@ def main() -> None:
                 print(f"passed={report.passed}")
                 for check in report.checks:
                     print(f"check\t{check.name}\tpassed={check.passed}\tdetail={check.detail}")
+            elif args.cmd == "project-dashboard":
+                report = build_project_dashboard(
+                    session,
+                    book_id=args.book_id,
+                    start=args.start,
+                    count=args.count,
+                    recent_tasks=args.recent_tasks,
+                )
+                for line in report.lines:
+                    print(line)
             elif args.cmd == "draft-chapter":
                 version = draft_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number, dry_run=args.dry_run)
                 print(f"version_id={version.id}")

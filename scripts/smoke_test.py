@@ -408,6 +408,20 @@ def main() -> int:
         print("run-book-cycle did not queue generation and stop at wait state")
         print(queued_cycle)
         return 1
+    dashboard = run(["project-dashboard", "--book-id", str(book_id), "--start", "1", "--count", "9"])
+    for expected in (
+        "readiness\tpassed=",
+        "chapter_actions\t",
+        "generation_queue\t",
+        "generation_recent\t",
+        "human_decisions\t",
+        "recommendation\t",
+    ):
+        if expected not in dashboard:
+            print("project-dashboard missing expected section")
+            print(expected)
+            print(dashboard)
+            return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")

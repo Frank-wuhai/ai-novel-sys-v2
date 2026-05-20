@@ -27,6 +27,7 @@ python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli list-generation-queue --status pending
 python -m app.cli run-generation-task --task-id 1
 python -m app.cli run-generation-queue --max-tasks 3
+python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
@@ -243,6 +244,16 @@ python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli retry-generation-task --task-id 1
 ```
+
+## Operator Dashboard
+
+Use the dashboard to see the current operating state of a book range without mutating data:
+
+```bash
+python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
+```
+
+It reports readiness checks, chapter next-action counts, per-chapter state, generation queue state, recent generation usage estimates, human decision counts, and one recommended next command.
 
 ## Human Decision Package
 
