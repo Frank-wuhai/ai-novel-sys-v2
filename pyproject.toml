@@ -1,0 +1,19 @@
+[project]
+name = "ai-novel-system-v2"
+version = "0.1.0"
+description = "Deterministic AI novel production system with browser automation as an external operations layer."
+requires-python = ">=3.11"
+dependencies = [
+  "SQLAlchemy>=2.0",
+  "python-dotenv>=1.0",
+  "pydantic>=2.0",
+  "openai>=2.0",
+  "httpx[socks]>=0.28",
+  "playwright>=1.40",
+]
+
+[project.scripts]
+novel-v2 = "app.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
