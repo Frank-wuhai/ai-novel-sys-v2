@@ -26,6 +26,18 @@ from app.services.prompts import get_prompt_template, render_template, seed_prom
 from app.workflows.state_machine import WorkflowError, move
 
 
+def _llm_usage_payload(response, *, prompt: str) -> dict:
+    return {
+        "prompt_chars": len(prompt),
+        "response_chars": len(response.text),
+        "estimated_prompt_tokens": response.estimated_prompt_tokens,
+        "estimated_response_tokens": response.estimated_response_tokens,
+        "estimated_total_tokens": response.estimated_prompt_tokens + response.estimated_response_tokens,
+        "elapsed_ms": response.elapsed_ms,
+        "usage": response.usage,
+    }
+
+
 def create_book(session: Session, *, title: str, genre: str = "", platform: str = "") -> Book:
     existing = session.scalar(select(Book).where(Book.title == title))
     if existing:
@@ -174,7 +186,10 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                 },
                 ensure_ascii=False,
             ),
-            output_json=json.dumps({"provider": response.provider, "error": str(exc), "raw": response.text[:2000]}, ensure_ascii=False),
+            output_json=json.dumps(
+                {"provider": response.provider, "model": response.model, "error": str(exc), "raw": response.text[:2000], **_llm_usage_payload(response, prompt=prompt)},
+                ensure_ascii=False,
+            ),
         )
         session.add(task)
         session.flush()
@@ -209,6 +224,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                 "version_id": version.id,
                 "provider": response.provider,
                 "model": response.model,
+                **_llm_usage_payload(response, prompt=prompt),
                 "self_check": draft.self_check,
                 "used_brief_points": draft.used_brief_points,
             },
@@ -361,7 +377,10 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 },
                 ensure_ascii=False,
             ),
-            output_json=json.dumps({"provider": response.provider, "error": str(exc), "raw": response.text[:2000]}, ensure_ascii=False),
+            output_json=json.dumps(
+                {"provider": response.provider, "model": response.model, "error": str(exc), "raw": response.text[:2000], **_llm_usage_payload(response, prompt=prompt)},
+                ensure_ascii=False,
+            ),
         )
         session.add(task)
         session.flush()
@@ -398,6 +417,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 "version_id": version.id,
                 "provider": response.provider,
                 "model": response.model,
+                **_llm_usage_payload(response, prompt=prompt),
                 "self_check": draft.self_check,
                 "used_brief_points": draft.used_brief_points,
             },

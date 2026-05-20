@@ -100,6 +100,8 @@ def task_summary(task: GenerationTask) -> str:
             f"child_task={output_data.get('child_generation_task_id', '')}",
             f"provider={output_data.get('provider', '')}",
             f"model={output_data.get('model', '')}",
+            f"estimated_tokens={output_data.get('estimated_total_tokens', '')}",
+            f"elapsed_ms={output_data.get('elapsed_ms', '')}",
         ]
     )
 

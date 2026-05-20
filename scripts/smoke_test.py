@@ -484,7 +484,12 @@ def main() -> int:
         return 1
     draft_task_id = int(task_list.split("\t", 1)[0])
     task_detail = run(["show-generation-task", "--task-id", str(draft_task_id)])
-    if '"prompt_template": "draft_chapter@v3"' not in task_detail or f'"version_id": {v1}' not in task_detail:
+    if (
+        '"prompt_template": "draft_chapter@v3"' not in task_detail
+        or f'"version_id": {v1}' not in task_detail
+        or '"estimated_total_tokens":' not in task_detail
+        or '"elapsed_ms":' not in task_detail
+    ):
         print("show-generation-task did not include expected JSON")
         print(task_detail)
         return 1
@@ -527,6 +532,10 @@ def main() -> int:
             return 1
         if "self_check" not in output_data or "used_brief_points" not in output_data:
             print("structured draft metadata missing from generation task")
+            print(output_json)
+            return 1
+        if not output_data.get("estimated_total_tokens") or "elapsed_ms" not in output_data:
+            print("generation task usage estimate missing")
             print(output_json)
             return 1
     finally:
@@ -651,6 +660,10 @@ def main() -> int:
             return 1
         if revision_output.get("version_id") != revised_version_id:
             print("revision task did not record revised version")
+            print(revision_task[1])
+            return 1
+        if not revision_output.get("estimated_total_tokens") or "elapsed_ms" not in revision_output:
+            print("revision task usage estimate missing")
             print(revision_task[1])
             return 1
     finally:

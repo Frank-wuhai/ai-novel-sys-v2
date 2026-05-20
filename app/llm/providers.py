@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -13,6 +14,12 @@ class LLMResponse:
     text: str
     provider: str
     model: str
+    prompt_chars: int = 0
+    response_chars: int = 0
+    estimated_prompt_tokens: int = 0
+    estimated_response_tokens: int = 0
+    elapsed_ms: int = 0
+    usage: dict | None = None
 
 
 class BaseLLMProvider:
@@ -26,6 +33,7 @@ class DryRunProvider(BaseLLMProvider):
     name = "dry_run"
 
     def generate(self, prompt: str, *, max_tokens: int = 2000) -> LLMResponse:
+        started = time.perf_counter()
         paragraphs = [
             "林澈站在旧楼天台边缘时，异象已经逼近到第三次闪烁。远处的广告牌像被看不见的手拧弯，红光一层层压下来，所有声音都被挤成细线。他知道这一章不能只躲开危机，必须把压力推到选择面前。",
             "本章用于验证最小生产闭环，但正文仍按正式章节节奏推进：开场压力先落地，能力触发随后出现，代价落地必须清晰，章末钩子要把读者推向下一章。dry-run only 只作为审计标记存在，不改变故事内的选择和后果。",
@@ -59,7 +67,17 @@ class DryRunProvider(BaseLLMProvider):
             },
             ensure_ascii=False,
         )
-        return LLMResponse(text=text, provider=self.name, model="dry-run")
+        return LLMResponse(
+            text=text,
+            provider=self.name,
+            model="dry-run",
+            prompt_chars=len(prompt),
+            response_chars=len(text),
+            estimated_prompt_tokens=estimate_tokens(prompt),
+            estimated_response_tokens=estimate_tokens(text),
+            elapsed_ms=_elapsed_ms(started),
+            usage=None,
+        )
 
 
 class ArkOpenAIProvider(BaseLLMProvider):
@@ -71,6 +89,7 @@ class ArkOpenAIProvider(BaseLLMProvider):
         self.client = OpenAI(api_key=settings.ark_api_key, base_url=settings.ark_base_url)
 
     def generate(self, prompt: str, *, max_tokens: int = 2000) -> LLMResponse:
+        started = time.perf_counter()
         result = self.client.chat.completions.create(
             model=settings.model_name,
             messages=[
@@ -80,10 +99,44 @@ class ArkOpenAIProvider(BaseLLMProvider):
             max_tokens=max_tokens,
         )
         text = result.choices[0].message.content or ""
-        return LLMResponse(text=text, provider=self.name, model=settings.model_name)
+        usage = _usage_dict(getattr(result, "usage", None))
+        return LLMResponse(
+            text=text,
+            provider=self.name,
+            model=settings.model_name,
+            prompt_chars=len(prompt),
+            response_chars=len(text),
+            estimated_prompt_tokens=estimate_tokens(prompt),
+            estimated_response_tokens=estimate_tokens(text),
+            elapsed_ms=_elapsed_ms(started),
+            usage=usage,
+        )
 
 
 def get_provider(dry_run: bool) -> BaseLLMProvider:
     if dry_run:
         return DryRunProvider()
     return ArkOpenAIProvider()
+
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
+    non_ascii_chars = len(text) - ascii_chars
+    return max(1, round(ascii_chars / 4 + non_ascii_chars / 1.6))
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, round((time.perf_counter() - started) * 1000))
+
+
+def _usage_dict(usage: object) -> dict | None:
+    if usage is None:
+        return None
+    data = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if value is not None:
+            data[key] = value
+    return data or None

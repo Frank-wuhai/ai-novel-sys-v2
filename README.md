@@ -359,6 +359,16 @@ python -m app.cli audit-evidence --genre "玄幻都市"
 
 Draft generation records the selected `market_signal_ids` and `canon_refs` in `generation_tasks.input_json`, so every generated draft can be traced back to the evidence and Canon available at generation time.
 
+Generation task output records lightweight usage telemetry:
+
+- `prompt_chars`
+- `response_chars`
+- `estimated_prompt_tokens`
+- `estimated_response_tokens`
+- `estimated_total_tokens`
+- `elapsed_ms`
+- provider `usage` when available
+
 `audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.
 
 ## Story Bible And Outline
