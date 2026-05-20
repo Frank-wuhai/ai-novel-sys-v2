@@ -55,6 +55,43 @@ class StoryFoundation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class StoryBible(Base):
+    __tablename__ = "story_bibles"
+    __table_args__ = (UniqueConstraint("book_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    positioning: Mapped[str] = mapped_column(Text, default="")
+    reader_promise: Mapped[str] = mapped_column(Text, default="")
+    main_plot: Mapped[str] = mapped_column(Text, default="")
+    protagonist_arc: Mapped[str] = mapped_column(Text, default="")
+    relationship_arc: Mapped[str] = mapped_column(Text, default="")
+    power_curve: Mapped[str] = mapped_column(Text, default="")
+    forbidden_rules: Mapped[str] = mapped_column(Text, default="")
+    style_guide: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(50), default="draft")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class StoryArc(Base):
+    __tablename__ = "story_arcs"
+    __table_args__ = (UniqueConstraint("book_id", "arc_number"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    volume_id: Mapped[int | None] = mapped_column(ForeignKey("volumes.id"), nullable=True)
+    arc_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    start_chapter: Mapped[int] = mapped_column(Integer, default=1)
+    end_chapter: Mapped[int] = mapped_column(Integer, default=1)
+    goal: Mapped[str] = mapped_column(Text, default="")
+    climax: Mapped[str] = mapped_column(Text, default="")
+    turn: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(50), default="planning")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class Character(Base):
     __tablename__ = "characters"
 
@@ -260,4 +297,3 @@ class MarketSignal(Base):
     signal_text: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
-

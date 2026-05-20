@@ -208,6 +208,70 @@ def main() -> int:
         "--reader-promise",
         "每个收益都有代价",
     ])
+    story_bible_id = extract_id(
+        "story_bible_id",
+        run([
+            "upsert-story-bible",
+            "--book-id",
+            str(book_id),
+            "--positioning",
+            "玄幻都市有代价能力连载",
+            "--reader-promise",
+            "每章都有压力、选择、代价和新发现",
+            "--main-plot",
+            "林澈追查都市异象源头，并逐步理解能力代价",
+            "--protagonist-arc",
+            "从被动自保到主动承担代价",
+            "--power-curve",
+            "能力只能短期推演，代价逐步加重",
+            "--forbidden-rules",
+            "不得无代价解决危机，不得推翻已登记能力限制",
+            "--style-guide",
+            "节奏紧，章末保留明确钩子",
+            "--status",
+            "active",
+        ]),
+    )
+    run([
+        "create-volume",
+        "--book-id",
+        str(book_id),
+        "--volume-number",
+        "1",
+        "--title",
+        "异象初现",
+        "--summary",
+        "建立能力代价和都市异象主线",
+    ])
+    story_arc_id = extract_id(
+        "story_arc_id",
+        run([
+            "create-story-arc",
+            "--book-id",
+            str(book_id),
+            "--arc-number",
+            "1",
+            "--title",
+            "第一次代价推演",
+            "--start-chapter",
+            "1",
+            "--end-chapter",
+            "5",
+            "--goal",
+            "让林澈确认能力收益与记忆代价绑定",
+            "--climax",
+            "林澈用推演避开危机但忘记关键人名",
+            "--turn",
+            "异象并非偶发事件",
+            "--volume-number",
+            "1",
+        ]),
+    )
+    story_context = run(["show-story-context", "--book-id", str(book_id), "--chapter-number", "1"])
+    if f"story_bible_ids={story_bible_id}" not in story_context or f"story_arc_ids={story_arc_id}" not in story_context:
+        print("story context did not include expected bible and arc refs")
+        print(story_context)
+        return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")
@@ -287,6 +351,8 @@ def main() -> int:
             print(input_json)
             return 1
         expected_refs = {
+            "story_bible_ids": [story_bible_id],
+            "story_arc_ids": [story_arc_id],
             "character_ids": [character_id],
             "character_state_ids": [state_id],
             "world_rule_ids": [world_rule_id],

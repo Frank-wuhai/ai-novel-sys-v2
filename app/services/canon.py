@@ -12,6 +12,7 @@ from app.models.entities import (
     PowerSystem,
     WorldRule,
 )
+from app.services.story import format_story_control_context
 
 
 def add_character(
@@ -115,8 +116,16 @@ def add_foreshadow(
     return foreshadow
 
 
-def format_canon_context(session: Session, *, book_id: int, limit: int = 8) -> tuple[str, dict[str, list[int]]]:
+def format_canon_context(
+    session: Session,
+    *,
+    book_id: int,
+    limit: int = 8,
+    chapter_number: int | None = None,
+) -> tuple[str, dict[str, list[int]]]:
     refs: dict[str, list[int]] = {
+        "story_bible_ids": [],
+        "story_arc_ids": [],
         "character_ids": [],
         "character_state_ids": [],
         "world_rule_ids": [],
@@ -125,6 +134,11 @@ def format_canon_context(session: Session, *, book_id: int, limit: int = 8) -> t
         "foreshadow_ids": [],
     }
     sections: list[str] = []
+    story_context, story_refs = format_story_control_context(session, book_id=book_id, chapter_number=chapter_number)
+    if "未登记 Story Bible/Arc" not in story_context:
+        sections.append(story_context)
+        refs["story_bible_ids"] = story_refs["story_bible_ids"]
+        refs["story_arc_ids"] = story_refs["story_arc_ids"]
 
     characters = list(session.scalars(select(Character).where(Character.book_id == book_id).order_by(Character.id).limit(limit)))
     if characters:

@@ -48,6 +48,16 @@ from app.services.evidence import (
 )
 from app.services.prompts import get_prompt_template
 from app.services.readiness import check_production_readiness
+from app.services.story import (
+    create_story_arc,
+    create_volume,
+    format_outline,
+    format_story_control_context,
+    get_story_bible,
+    list_story_arcs,
+    list_volumes,
+    upsert_story_bible,
+)
 
 
 def _parse_id_text(value: str, *, field_name: str) -> tuple[int, str]:
@@ -79,6 +89,53 @@ def main() -> None:
     p.add_argument("--world-engine", default="")
     p.add_argument("--protagonist-engine", default="")
     p.add_argument("--conflict-engine", default="")
+
+    p = sub.add_parser("upsert-story-bible")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--positioning", default="")
+    p.add_argument("--reader-promise", default="")
+    p.add_argument("--main-plot", default="")
+    p.add_argument("--protagonist-arc", default="")
+    p.add_argument("--relationship-arc", default="")
+    p.add_argument("--power-curve", default="")
+    p.add_argument("--forbidden-rules", default="")
+    p.add_argument("--style-guide", default="")
+    p.add_argument("--status", default="draft")
+
+    p = sub.add_parser("show-story-bible")
+    p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("create-volume")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--volume-number", type=int, required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--summary", default="")
+    p.add_argument("--status", default="planning")
+
+    p = sub.add_parser("list-volumes")
+    p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("create-story-arc")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--arc-number", type=int, required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--start-chapter", type=int, required=True)
+    p.add_argument("--end-chapter", type=int, required=True)
+    p.add_argument("--goal", default="")
+    p.add_argument("--climax", default="")
+    p.add_argument("--turn", default="")
+    p.add_argument("--volume-number", type=int, default=0)
+    p.add_argument("--status", default="planning")
+
+    p = sub.add_parser("list-story-arcs")
+    p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("show-outline")
+    p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("show-story-context")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, default=0)
 
     p = sub.add_parser("create-chapter-brief")
     p.add_argument("--book-id", type=int, required=True)
@@ -321,6 +378,86 @@ def main() -> None:
                     conflict_engine=args.conflict_engine,
                 )
                 print(f"foundation_id={foundation.id}")
+            elif args.cmd == "upsert-story-bible":
+                bible = upsert_story_bible(
+                    session,
+                    book_id=args.book_id,
+                    positioning=args.positioning,
+                    reader_promise=args.reader_promise,
+                    main_plot=args.main_plot,
+                    protagonist_arc=args.protagonist_arc,
+                    relationship_arc=args.relationship_arc,
+                    power_curve=args.power_curve,
+                    forbidden_rules=args.forbidden_rules,
+                    style_guide=args.style_guide,
+                    status=args.status,
+                )
+                print(f"story_bible_id={bible.id}")
+                print(f"status={bible.status}")
+            elif args.cmd == "show-story-bible":
+                bible = get_story_bible(session, book_id=args.book_id)
+                if not bible:
+                    raise ValueError("story bible not found")
+                print(f"id={bible.id}")
+                print(f"book_id={bible.book_id}")
+                print(f"status={bible.status}")
+                print(f"positioning={bible.positioning}")
+                print(f"reader_promise={bible.reader_promise}")
+                print(f"main_plot={bible.main_plot}")
+                print(f"protagonist_arc={bible.protagonist_arc}")
+                print(f"relationship_arc={bible.relationship_arc}")
+                print(f"power_curve={bible.power_curve}")
+                print(f"forbidden_rules={bible.forbidden_rules}")
+                print(f"style_guide={bible.style_guide}")
+            elif args.cmd == "create-volume":
+                volume = create_volume(
+                    session,
+                    book_id=args.book_id,
+                    volume_number=args.volume_number,
+                    title=args.title,
+                    summary=args.summary,
+                    status=args.status,
+                )
+                print(f"volume_id={volume.id}")
+                print(f"volume_number={volume.volume_number}")
+                print(f"status={volume.status}")
+            elif args.cmd == "list-volumes":
+                for volume in list_volumes(session, book_id=args.book_id):
+                    print(f"{volume.id}\tvolume={volume.volume_number}\t{volume.title}\t{volume.status}\t{volume.summary}")
+            elif args.cmd == "create-story-arc":
+                arc = create_story_arc(
+                    session,
+                    book_id=args.book_id,
+                    arc_number=args.arc_number,
+                    title=args.title,
+                    start_chapter=args.start_chapter,
+                    end_chapter=args.end_chapter,
+                    goal=args.goal,
+                    climax=args.climax,
+                    turn=args.turn,
+                    volume_number=args.volume_number or None,
+                    status=args.status,
+                )
+                print(f"story_arc_id={arc.id}")
+                print(f"arc_number={arc.arc_number}")
+                print(f"chapters={arc.start_chapter}-{arc.end_chapter}")
+                print(f"status={arc.status}")
+            elif args.cmd == "list-story-arcs":
+                for arc in list_story_arcs(session, book_id=args.book_id):
+                    print(
+                        f"{arc.id}\tarc={arc.arc_number}\tchapters={arc.start_chapter}-{arc.end_chapter}\t{arc.title}\t{arc.status}\t{arc.goal}"
+                    )
+            elif args.cmd == "show-outline":
+                print(format_outline(session, book_id=args.book_id))
+            elif args.cmd == "show-story-context":
+                context, refs = format_story_control_context(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number or None,
+                )
+                print(f"story_bible_ids={','.join(str(item) for item in refs['story_bible_ids'])}")
+                print(f"story_arc_ids={','.join(str(item) for item in refs['story_arc_ids'])}")
+                print(context)
             elif args.cmd == "create-chapter-brief":
                 brief = create_chapter_brief(
                     session,

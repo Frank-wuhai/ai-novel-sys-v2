@@ -87,6 +87,43 @@ def main() -> int:
     run(["add-character", "--book-id", str(book_id), "--name", "沈星", "--role", "主角"])
     run(["add-world-rule", "--book-id", str(book_id), "--category", "科技边界", "--rule", "技术突破必须有成本。"])
     run(["add-power-system", "--book-id", str(book_id), "--name", "星图演算", "--rules", "只能模拟局部航线。", "--status", "active"])
+    run(
+        [
+            "upsert-story-bible",
+            "--book-id",
+            str(book_id),
+            "--positioning",
+            "科幻冒险连载",
+            "--reader-promise",
+            "技术突破总伴随代价",
+            "--main-plot",
+            "主角用星图演算寻找失落航线",
+            "--forbidden-rules",
+            "不得无成本解决航行危机",
+            "--status",
+            "active",
+        ]
+    )
+    run(["create-volume", "--book-id", str(book_id), "--volume-number", "1", "--title", "失落航线"])
+    run(
+        [
+            "create-story-arc",
+            "--book-id",
+            str(book_id),
+            "--arc-number",
+            "1",
+            "--title",
+            "星图代价",
+            "--start-chapter",
+            "1",
+            "--end-chapter",
+            "3",
+            "--goal",
+            "建立星图演算的收益和代价",
+            "--volume-number",
+            "1",
+        ]
+    )
     run(["create-chapter-plan", "--book-id", str(book_id), "--start", "1", "--count", "1", "--goal-prefix", "回归测试"])
 
     wrong_genre_report = run(["production-readiness", "--book-id", str(book_id), "--start", "1", "--count", "1"])

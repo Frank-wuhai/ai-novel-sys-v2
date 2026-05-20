@@ -14,6 +14,9 @@ python -m app.cli add-character --book-id 1 --name "主角" --role "protagonist"
 python -m app.cli add-world-rule --book-id 1 --category "能力代价" --rule "..."
 python -m app.cli add-power-system --book-id 1 --name "..." --rules "..." --costs "..." --limits "..."
 python -m app.cli create-foundation --book-id 1 --premise "..."
+python -m app.cli upsert-story-bible --book-id 1 --positioning "..." --reader-promise "..." --main-plot "..." --forbidden-rules "..."
+python -m app.cli create-volume --book-id 1 --volume-number 1 --title "第一卷"
+python -m app.cli create-story-arc --book-id 1 --arc-number 1 --title "开局剧情段" --start-chapter 1 --end-chapter 10 --goal "..."
 python -m app.cli create-chapter-plan --book-id 1 --start 1 --count 5 --goal-prefix "第一卷推进"
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 5
 python -m app.cli run-next-action --book-id 1 --chapter-number 1 --dry-run
@@ -50,6 +53,9 @@ python -m app.cli list-evidence-sources
 python -m app.cli list-market-signals --genre "玄幻都市" --usable-only
 python -m app.cli show-evidence-context --genre "玄幻都市"
 python -m app.cli show-canon-context --book-id 1
+python -m app.cli show-story-bible --book-id 1
+python -m app.cli show-outline --book-id 1
+python -m app.cli show-story-context --book-id 1 --chapter-number 1
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 10
 ```
 
@@ -220,6 +226,7 @@ python -m app.cli production-readiness --book-id 1 --start 1 --count 10
 It checks:
 
 - story foundation
+- story bible and arc coverage
 - usable evidence
 - Canon coverage
 - chapter queue state
@@ -307,6 +314,45 @@ python -m app.cli audit-evidence --genre "玄幻都市"
 Draft generation records the selected `market_signal_ids` and `canon_refs` in `generation_tasks.input_json`, so every generated draft can be traced back to the evidence and Canon available at generation time.
 
 `audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.
+
+## Story Bible And Outline
+
+Story Bible stores the long-range control layer above chapter briefs:
+
+```bash
+python -m app.cli upsert-story-bible \
+  --book-id 1 \
+  --positioning "玄幻都市有代价能力连载" \
+  --reader-promise "每章都有压力、选择、代价和新发现" \
+  --main-plot "主角追查异象源头并理解能力代价" \
+  --protagonist-arc "从被动自保到主动承担代价" \
+  --power-curve "能力收益逐步变强，代价同步加重" \
+  --forbidden-rules "不得无代价解决危机" \
+  --style-guide "节奏紧，章末保留明确钩子"
+
+python -m app.cli create-volume --book-id 1 --volume-number 1 --title "异象初现"
+
+python -m app.cli create-story-arc \
+  --book-id 1 \
+  --arc-number 1 \
+  --title "第一次代价推演" \
+  --start-chapter 1 \
+  --end-chapter 10 \
+  --goal "建立能力收益与代价绑定" \
+  --climax "主角赢下危机但付出记忆代价" \
+  --turn "异象并非偶发事件" \
+  --volume-number 1
+```
+
+Use these inspection commands before drafting:
+
+```bash
+python -m app.cli show-story-bible --book-id 1
+python -m app.cli show-outline --book-id 1
+python -m app.cli show-story-context --book-id 1 --chapter-number 1
+```
+
+Draft generation injects Story Bible and the matching Story Arc through Canon context, and records their IDs in `generation_tasks.input_json.canon_refs`.
 
 ## Canon Layer
 

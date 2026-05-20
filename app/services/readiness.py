@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.llm.providers import ArkOpenAIProvider
-from app.models.entities import Book, Character, EvidenceSource, PowerSystem, StoryFoundation, WorldRule
+from app.models.entities import Book, Character, EvidenceSource, PowerSystem, StoryArc, StoryBible, StoryFoundation, WorldRule
 from app.services.evidence import list_market_signals
 from app.services.planning import AUTO_ACTIONS, build_human_decision_package, plan_chapters
 
@@ -35,6 +35,7 @@ def check_production_readiness(
 ) -> ProductionReadinessReport:
     checks = [
         _foundation_check(session, book_id),
+        _story_bible_check(session, book_id, start, count),
         _evidence_check(session, book_id),
         _canon_check(session, book_id),
         _chapter_queue_check(session, book_id, start, count),
@@ -56,6 +57,34 @@ def _foundation_check(session: Session, book_id: int) -> ReadinessCheck:
     if missing:
         return ReadinessCheck("foundation", False, "missing fields: " + ",".join(missing))
     return ReadinessCheck("foundation", True, f"foundation_id={foundation.id}")
+
+
+def _story_bible_check(session: Session, book_id: int, start: int, count: int) -> ReadinessCheck:
+    bible = session.scalar(select(StoryBible).where(StoryBible.book_id == book_id))
+    if not bible:
+        return ReadinessCheck("story_bible", False, "missing story bible")
+    missing = []
+    if not bible.positioning:
+        missing.append("positioning")
+    if not bible.reader_promise:
+        missing.append("reader_promise")
+    if not bible.main_plot:
+        missing.append("main_plot")
+    if not bible.forbidden_rules:
+        missing.append("forbidden_rules")
+    if missing:
+        return ReadinessCheck("story_bible", False, "missing fields: " + ",".join(missing))
+    end = start + count - 1
+    arc_count = session.scalar(
+        select(func.count(StoryArc.id)).where(
+            StoryArc.book_id == book_id,
+            StoryArc.start_chapter <= end,
+            StoryArc.end_chapter >= start,
+        )
+    )
+    if not arc_count:
+        return ReadinessCheck("story_bible", False, f"no story arcs covering chapters {start}-{end}")
+    return ReadinessCheck("story_bible", True, f"story_bible_id={bible.id} covering_arcs={arc_count}")
 
 
 def _evidence_check(session: Session, book_id: int) -> ReadinessCheck:

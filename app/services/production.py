@@ -140,7 +140,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
     seed_prompt_templates(session)
     template = get_prompt_template(session, name="draft_chapter", version="v3")
     market_evidence, market_signal_ids = format_market_evidence_context(session, genre=book.genre)
-    canon_context, canon_refs = format_canon_context(session, book_id=book_id)
+    canon_context, canon_refs = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
     prompt = render_template(
         template,
         book_title=book.title,
@@ -323,7 +323,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     seed_prompt_templates(session)
     template = get_prompt_template(session, name="revise_chapter", version="v1")
     market_evidence, market_signal_ids = format_market_evidence_context(session, genre=book.genre)
-    canon_context, canon_refs = format_canon_context(session, book_id=book_id)
+    canon_context, canon_refs = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
     prompt = render_template(
         template,
         book_title=book.title,
