@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, PublishJob, QualityReport, StoryArc
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PublishJob, QualityReport, StoryArc
+from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REVISE, enqueue_draft_chapter, enqueue_revise_chapter
 from app.services.production import (
     create_chapter_brief,
     create_publish_job,
@@ -171,6 +173,7 @@ def run_next_action(
     constraints: str = "",
     platform: str = "manual",
     dry_run: bool = True,
+    queue_generation: bool = False,
 ) -> RunNextActionResult:
     item = _plan_one(session, book_id=book_id, chapter_number=chapter_number)
     action = item.next_action
@@ -193,6 +196,9 @@ def run_next_action(
         )
         return RunNextActionResult(chapter_number, action, "executed", "created chapter brief", brief.id)
     if action == "draft_chapter":
+        if queue_generation:
+            task = enqueue_draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+            return RunNextActionResult(chapter_number, "enqueue_draft_chapter", "executed", "queued draft generation task", task.id)
         version = draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
         return RunNextActionResult(chapter_number, action, "executed", "created draft version", version.id)
     if action == "review_chapter":
@@ -202,6 +208,9 @@ def run_next_action(
         brief = create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
         return RunNextActionResult(chapter_number, action, "executed", "created revision brief", brief.id)
     if action == "revise_chapter":
+        if queue_generation:
+            task = enqueue_revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+            return RunNextActionResult(chapter_number, "enqueue_revise_chapter", "executed", "queued revision generation task", task.id)
         version = revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
         return RunNextActionResult(chapter_number, action, "executed", "created revised draft version", version.id)
     if action == "create_publish_job":
@@ -243,6 +252,7 @@ def run_book_cycle(
     constraints: str = "",
     platform: str = "manual",
     dry_run: bool = True,
+    queue_generation: bool = False,
 ) -> BookCycleResult:
     if max_steps < 1:
         raise ValueError("max_steps must be >= 1")
@@ -261,13 +271,18 @@ def run_book_cycle(
             constraints=constraints,
             platform=platform,
             dry_run=dry_run,
+            queue_generation=queue_generation,
         )
         if result.status != "executed":
             break
         executed.append(result)
 
     final_items = plan_chapters(session, book_id=book_id, start=start, count=count)
-    blocked = [item for item in final_items if item.next_action in MANUAL_ACTIONS or item.next_action.startswith("inspect")]
+    blocked = [
+        item
+        for item in final_items
+        if item.next_action in MANUAL_ACTIONS or item.next_action.startswith("inspect") or item.next_action == "wait_generation_task"
+    ]
     done = [item for item in final_items if item.next_action == "done"]
     return BookCycleResult(executed=executed, blocked=blocked, done=done)
 
@@ -360,12 +375,19 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     if not brief:
         action, reason = "create_chapter_brief", "chapter exists but brief is missing"
     elif not version:
-        action, reason = "draft_chapter", "brief is ready and no chapter version exists"
+        queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
+        if queue_task:
+            action, reason = "wait_generation_task", f"draft generation task {queue_task.id} is {queue_task.status}"
+        else:
+            action, reason = "draft_chapter", "brief is ready and no chapter version exists"
     elif version.status == "draft":
         action, reason = "review_chapter", "latest version is draft"
     elif version.status == "needs_revision":
         revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
-        if revision_brief:
+        queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
+        if queue_task:
+            action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
+        elif revision_brief:
             action, reason = "revise_chapter", "latest version failed quality and revision brief exists"
         else:
             action, reason = "create_revision_brief", "latest version failed quality"
@@ -524,3 +546,29 @@ def _latest_quality(session: Session, *, version_id: int) -> QualityReport | Non
 
 def _latest_publish_job(session: Session, *, version_id: int) -> PublishJob | None:
     return session.scalar(select(PublishJob).where(PublishJob.chapter_version_id == version_id).order_by(PublishJob.id.desc()))
+
+
+def _active_generation_queue_task(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    queue_type: str,
+) -> GenerationTask | None:
+    tasks = session.scalars(
+        select(GenerationTask)
+        .where(
+            GenerationTask.book_id == book_id,
+            GenerationTask.task_type == queue_type,
+            GenerationTask.status.in_(["pending", "running"]),
+        )
+        .order_by(GenerationTask.id)
+    )
+    for task in tasks:
+        try:
+            input_data = json.loads(task.input_json or "{}")
+        except json.JSONDecodeError:
+            input_data = {}
+        if input_data.get("chapter_number") == chapter_number:
+            return task
+    return None

@@ -29,6 +29,7 @@ from app.services.llm_queue import (
     enqueue_revise_chapter,
     list_generation_queue,
     retry_generation_queue_task,
+    run_generation_queue,
     run_generation_queue_task,
 )
 from app.services.production import (
@@ -194,6 +195,7 @@ def main() -> None:
     p.add_argument("--constraints", default="")
     p.add_argument("--platform", default="manual")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--queue-generation", action="store_true")
 
     p = sub.add_parser("run-book-cycle")
     p.add_argument("--book-id", type=int, required=True)
@@ -205,6 +207,7 @@ def main() -> None:
     p.add_argument("--constraints", default="")
     p.add_argument("--platform", default="manual")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--queue-generation", action="store_true")
 
     p = sub.add_parser("human-decision-package")
     p.add_argument("--book-id", type=int, required=True)
@@ -226,11 +229,13 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
+    p.add_argument("--max-attempts", type=int, default=3)
 
     p = sub.add_parser("enqueue-revision")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
+    p.add_argument("--max-attempts", type=int, default=3)
 
     p = sub.add_parser("list-generation-queue")
     p.add_argument("--status", default="")
@@ -238,6 +243,9 @@ def main() -> None:
 
     p = sub.add_parser("run-generation-task")
     p.add_argument("--task-id", type=int, default=0)
+
+    p = sub.add_parser("run-generation-queue")
+    p.add_argument("--max-tasks", type=int, default=1)
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
@@ -590,6 +598,7 @@ def main() -> None:
                     constraints=args.constraints,
                     platform=args.platform,
                     dry_run=args.dry_run,
+                    queue_generation=args.queue_generation,
                 )
                 print(f"chapter_number={result.chapter_number}")
                 print(f"action={result.action}")
@@ -609,6 +618,7 @@ def main() -> None:
                     constraints=args.constraints,
                     platform=args.platform,
                     dry_run=args.dry_run,
+                    queue_generation=args.queue_generation,
                 )
                 print(f"executed_count={len(result.executed)}")
                 for item in result.executed:
@@ -665,6 +675,7 @@ def main() -> None:
                     book_id=args.book_id,
                     chapter_number=args.chapter_number,
                     dry_run=not args.live_llm,
+                    max_attempts=args.max_attempts,
                 )
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
@@ -675,6 +686,7 @@ def main() -> None:
                     book_id=args.book_id,
                     chapter_number=args.chapter_number,
                     dry_run=not args.live_llm,
+                    max_attempts=args.max_attempts,
                 )
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
@@ -689,6 +701,21 @@ def main() -> None:
                 print(f"version_id={result.version_id or ''}")
                 print(f"child_generation_task_id={result.child_generation_task_id or ''}")
                 print(f"output_json={result.task.output_json}")
+            elif args.cmd == "run-generation-queue":
+                batch = run_generation_queue(session, max_tasks=args.max_tasks)
+                print(f"executed_count={len(batch.results)}")
+                for result in batch.results:
+                    print(
+                        "\t".join(
+                            [
+                                "executed",
+                                f"generation_task_id={result.task.id}",
+                                f"status={result.task.status}",
+                                f"version_id={result.version_id or ''}",
+                                f"child_generation_task_id={result.child_generation_task_id or ''}",
+                            ]
+                        )
+                    )
             elif args.cmd == "retry-generation-task":
                 task = retry_generation_queue_task(session, task_id=args.task_id)
                 print(f"generation_task_id={task.id}")

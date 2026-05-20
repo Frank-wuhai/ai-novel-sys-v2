@@ -23,15 +23,21 @@ class QueueRunResult:
     child_generation_task_id: int | None
 
 
+@dataclass(frozen=True)
+class QueueBatchResult:
+    results: list[QueueRunResult]
+
+
 def enqueue_draft_chapter(
     session: Session,
     *,
     book_id: int,
     chapter_number: int,
     dry_run: bool = True,
+    max_attempts: int = 3,
 ) -> GenerationTask:
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
-    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_DRAFT)
+    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_DRAFT, max_attempts=max_attempts)
 
 
 def enqueue_revise_chapter(
@@ -40,9 +46,10 @@ def enqueue_revise_chapter(
     book_id: int,
     chapter_number: int,
     dry_run: bool = True,
+    max_attempts: int = 3,
 ) -> GenerationTask:
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
-    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_REVISE)
+    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_REVISE, max_attempts=max_attempts)
 
 
 def list_generation_queue(
@@ -69,14 +76,19 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     input_data = _loads_json(task.input_json)
     chapter_number = int(input_data.get("chapter_number") or 0)
     dry_run = bool(input_data.get("dry_run", True))
+    attempt = int(input_data.get("attempt") or 0) + 1
+    max_attempts = int(input_data.get("max_attempts") or 3)
+    input_data["attempt"] = attempt
     if chapter_number < 1:
         task.status = "failed"
-        task.output_json = json.dumps({"error": "chapter_number is required"}, ensure_ascii=False)
+        task.input_json = _dumps_json(input_data)
+        task.output_json = _dumps_json({"error_category": "validation", "error": "chapter_number is required", "attempt": attempt})
         session.flush()
         return QueueRunResult(task=task, version_id=None, child_generation_task_id=None)
 
     before_task_id = session.scalar(select(func.max(GenerationTask.id))) or 0
     task.status = "running"
+    task.input_json = _dumps_json(input_data)
     session.flush()
     try:
         if task.task_type == QUEUE_DRAFT:
@@ -86,20 +98,30 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
         else:
             raise ValueError(f"unsupported queue type: {task.task_type}")
     except Exception as exc:
-        task.status = "failed"
-        task.output_json = json.dumps({"error_type": type(exc).__name__, "error": str(exc)}, ensure_ascii=False)
+        task.status = "failed" if attempt >= max_attempts else "pending"
+        task.output_json = _dumps_json(
+            {
+                "error_category": _error_category(exc),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "retryable": attempt < max_attempts,
+            }
+        )
         session.flush()
         return QueueRunResult(task=task, version_id=None, child_generation_task_id=None)
 
     child_task = _latest_child_generation_task(session, after_id=before_task_id, version_id=version.id)
     task.status = "completed"
-    task.output_json = json.dumps(
+    task.output_json = _dumps_json(
         {
             "version_id": version.id,
             "child_generation_task_id": child_task.id if child_task else None,
             "dry_run": dry_run,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
         },
-        ensure_ascii=False,
     )
     session.flush()
     return QueueRunResult(
@@ -107,6 +129,20 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
         version_id=version.id,
         child_generation_task_id=child_task.id if child_task else None,
     )
+
+
+def run_generation_queue(session: Session, *, max_tasks: int = 1) -> QueueBatchResult:
+    if max_tasks < 1:
+        raise ValueError("max_tasks must be >= 1")
+    results: list[QueueRunResult] = []
+    seen_task_ids: set[int] = set()
+    for _ in range(max_tasks):
+        task = _next_pending_task(exclude_task_ids=seen_task_ids, session=session)
+        if not task:
+            break
+        seen_task_ids.add(task.id)
+        results.append(run_generation_queue_task(session, task_id=task.id))
+    return QueueBatchResult(results=results)
 
 
 def retry_generation_queue_task(session: Session, *, task_id: int) -> GenerationTask:
@@ -117,6 +153,9 @@ def retry_generation_queue_task(session: Session, *, task_id: int) -> Generation
         raise ValueError(f"not a generation queue task: {task.task_type}")
     if task.status != "failed":
         raise ValueError(f"only failed generation queue tasks can retry, got {task.status}")
+    input_data = _loads_json(task.input_json)
+    input_data["attempt"] = 0
+    task.input_json = _dumps_json(input_data)
     task.status = "pending"
     task.output_json = "{}"
     session.flush()
@@ -130,12 +169,13 @@ def _enqueue(
     chapter_number: int,
     dry_run: bool,
     queue_type: str,
+    max_attempts: int,
 ) -> GenerationTask:
     task = GenerationTask(
         book_id=book_id,
         task_type=queue_type,
         status="pending",
-        input_json=json.dumps({"chapter_number": chapter_number, "dry_run": dry_run}, ensure_ascii=False),
+        input_json=_dumps_json({"chapter_number": chapter_number, "dry_run": dry_run, "attempt": 0, "max_attempts": max_attempts}),
         output_json="{}",
     )
     session.add(task)
@@ -156,12 +196,15 @@ def _guard_active_queue_task(session: Session, *, book_id: int, chapter_number: 
             raise ValueError(f"active generation queue task already exists: {task.id} ({task.status})")
 
 
-def _next_pending_task(session: Session) -> GenerationTask | None:
-    return session.scalar(
+def _next_pending_task(session: Session, *, exclude_task_ids: set[int] | None = None) -> GenerationTask | None:
+    stmt = (
         select(GenerationTask)
         .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "pending")
         .order_by(GenerationTask.id)
     )
+    if exclude_task_ids:
+        stmt = stmt.where(GenerationTask.id.not_in(exclude_task_ids))
+    return session.scalar(stmt)
 
 
 def _latest_child_generation_task(session: Session, *, after_id: int, version_id: int) -> GenerationTask | None:
@@ -179,3 +222,16 @@ def _loads_json(value: str) -> dict:
     except json.JSONDecodeError:
         return {"raw": value}
     return data if isinstance(data, dict) else {"value": data}
+
+
+def _dumps_json(value: dict) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _error_category(exc: Exception) -> str:
+    text = str(exc).lower()
+    if isinstance(exc, ValueError):
+        return "validation"
+    if "api" in text or "timeout" in text or "connection" in text or "rate" in text:
+        return "provider"
+    return "execution"

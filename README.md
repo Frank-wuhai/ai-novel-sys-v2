@@ -22,14 +22,16 @@ python -m app.cli create-chapter-plan --book-id 1 --start 1 --count 5 --goal-pre
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 5
 python -m app.cli run-next-action --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run
-python -m app.cli enqueue-draft --book-id 1 --chapter-number 1
+python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run --queue-generation
+python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli list-generation-queue --status pending
 python -m app.cli run-generation-task --task-id 1
+python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
 python -m app.cli draft-chapter --book-id 1 --chapter-number 1 --dry-run
-python -m app.cli enqueue-revision --book-id 1 --chapter-number 1
+python -m app.cli enqueue-revision --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli retry-generation-task --task-id 1
 python -m app.cli review-chapter --book-id 1 --chapter-number 1
 python -m app.cli create-revision-brief --book-id 1 --chapter-number 1
@@ -221,6 +223,26 @@ python -m app.cli run-book-cycle \
 ```
 
 The cycle re-plans after every executed step. It stops when there are no safe actions left in range or when `--max-steps` is reached, then prints executed, blocked, and done chapters.
+
+Use `--queue-generation` when you want planner cycles to enqueue draft/revision tasks instead of calling the LLM synchronously:
+
+```bash
+python -m app.cli run-book-cycle \
+  --book-id 1 \
+  --start 1 \
+  --count 10 \
+  --max-steps 20 \
+  --dry-run \
+  --queue-generation
+```
+
+Queued generation tasks track attempts and retryable failures:
+
+```bash
+python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
+python -m app.cli run-generation-queue --max-tasks 3
+python -m app.cli retry-generation-task --task-id 1
+```
 
 ## Human Decision Package
 

@@ -335,17 +335,78 @@ def main() -> int:
         return 1
     queued_revision_id = extract_id(
         "generation_task_id",
-        run(["enqueue-revision", "--book-id", str(book_id), "--chapter-number", "6"]),
+        run(["enqueue-revision", "--book-id", str(book_id), "--chapter-number", "6", "--max-attempts", "2"]),
     )
+    retryable_revision = run(["run-generation-task", "--task-id", str(queued_revision_id)])
+    if "status=pending" not in retryable_revision or '"retryable": true' not in retryable_revision:
+        print("queued revision task did not remain pending after retryable failure")
+        print(retryable_revision)
+        return 1
     failed_revision = run(["run-generation-task", "--task-id", str(queued_revision_id)])
-    if "status=failed" not in failed_revision or "latest chapter version must be needs_revision before revise" not in failed_revision:
-        print("queued revision task did not fail with expected reason")
+    if (
+        "status=failed" not in failed_revision
+        or '"error_category": "validation"' not in failed_revision
+        or "latest chapter version must be needs_revision before revise" not in failed_revision
+    ):
+        print("queued revision task did not fail with expected final reason")
         print(failed_revision)
         return 1
     retry_revision = run(["retry-generation-task", "--task-id", str(queued_revision_id)])
     if "status=pending" not in retry_revision:
         print("retry-generation-task did not reset failed task")
         print(retry_revision)
+        return 1
+    run(["run-generation-task", "--task-id", str(queued_revision_id)])
+    run(["run-generation-task", "--task-id", str(queued_revision_id)])
+    for chapter_number in (7, 8):
+        run([
+            "create-chapter-brief",
+            "--book-id",
+            str(book_id),
+            "--chapter-number",
+            str(chapter_number),
+            "--goal",
+            f"验证批量队列生成 {chapter_number}",
+            "--required-beats",
+            "压力,选择,代价,钩子",
+            "--constraints",
+            "dry-run only",
+        ])
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", str(chapter_number)])
+    batch_run = run(["run-generation-queue", "--max-tasks", "2"])
+    if "executed_count=2" not in batch_run or batch_run.count("status=completed") != 2:
+        print("run-generation-queue did not complete two queued tasks")
+        print(batch_run)
+        return 1
+    run([
+        "create-chapter-brief",
+        "--book-id",
+        str(book_id),
+        "--chapter-number",
+        "9",
+        "--goal",
+        "验证循环入队生成",
+        "--required-beats",
+        "压力,选择,代价,钩子",
+        "--constraints",
+        "dry-run only",
+    ])
+    queued_cycle = run([
+        "run-book-cycle",
+        "--book-id",
+        str(book_id),
+        "--start",
+        "9",
+        "--count",
+        "1",
+        "--max-steps",
+        "1",
+        "--dry-run",
+        "--queue-generation",
+    ])
+    if "action=enqueue_draft_chapter" not in queued_cycle or "next_action=wait_generation_task" not in queued_cycle:
+        print("run-book-cycle did not queue generation and stop at wait state")
+        print(queued_cycle)
         return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
