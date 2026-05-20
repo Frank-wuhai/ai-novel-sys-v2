@@ -419,6 +419,11 @@ def main() -> int:
             "brief_coverage",
             "canon_consistency",
             "reader_momentum",
+            "conflict_pressure",
+            "choice_and_cost",
+            "hook_strength",
+            "prose_density",
+            "arc_alignment",
             "setting_risk",
             "platform_risk",
         }

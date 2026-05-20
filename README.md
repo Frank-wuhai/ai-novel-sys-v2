@@ -96,10 +96,15 @@ Current deterministic dimensions:
 - `brief_coverage`: chapter goal, required beats, and constraints coverage
 - `canon_consistency`: visible use of registered Canon context
 - `reader_momentum`: pressure, choice, cost, discovery, and hook markers
+- `conflict_pressure`: visible conflict, danger, obstruction, or escalation
+- `choice_and_cost`: meaningful choice with cost, consequence, or tradeoff
+- `hook_strength`: end-of-chapter mystery, turn, discovery, or unresolved pressure
+- `prose_density`: guards against thin, repetitive, or filler-heavy prose
+- `arc_alignment`: visible alignment with Story Arc phase, goal, climax/turn, and boundaries
 - `setting_risk`: obvious rule-breaking phrases such as no-cost/infinite-use power
 - `platform_risk`: system/meta leakage markers
 
-The chapter passes only when there are no blocking issues, total score is at least `70`, and every dimension is at least `50`.
+The chapter passes only when there are no issues, total score is at least `70`, and every dimension is at least `50`.
 
 ## Revision Loop
 
