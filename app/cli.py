@@ -24,6 +24,13 @@ from app.services.canon import (
     format_canon_context,
 )
 from app.services.continuity import record_chapter_continuity
+from app.services.llm_queue import (
+    enqueue_draft_chapter,
+    enqueue_revise_chapter,
+    list_generation_queue,
+    retry_generation_queue_task,
+    run_generation_queue_task,
+)
 from app.services.production import (
     approve_chapter,
     create_book,
@@ -214,6 +221,26 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--dry-run", action="store_true")
+
+    p = sub.add_parser("enqueue-draft")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--live-llm", action="store_true")
+
+    p = sub.add_parser("enqueue-revision")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--live-llm", action="store_true")
+
+    p = sub.add_parser("list-generation-queue")
+    p.add_argument("--status", default="")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("run-generation-task")
+    p.add_argument("--task-id", type=int, default=0)
+
+    p = sub.add_parser("retry-generation-task")
+    p.add_argument("--task-id", type=int, required=True)
 
     p = sub.add_parser("create-manual-chapter-version")
     p.add_argument("--book-id", type=int, required=True)
@@ -632,6 +659,40 @@ def main() -> None:
                 version = draft_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number, dry_run=args.dry_run)
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
+            elif args.cmd == "enqueue-draft":
+                task = enqueue_draft_chapter(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    dry_run=not args.live_llm,
+                )
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+                print(f"task_type={task.task_type}")
+            elif args.cmd == "enqueue-revision":
+                task = enqueue_revise_chapter(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    dry_run=not args.live_llm,
+                )
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+                print(f"task_type={task.task_type}")
+            elif args.cmd == "list-generation-queue":
+                for task in list_generation_queue(session, status=args.status, limit=args.limit):
+                    print(task_summary(task))
+            elif args.cmd == "run-generation-task":
+                result = run_generation_queue_task(session, task_id=args.task_id or None)
+                print(f"generation_task_id={result.task.id}")
+                print(f"status={result.task.status}")
+                print(f"version_id={result.version_id or ''}")
+                print(f"child_generation_task_id={result.child_generation_task_id or ''}")
+                print(f"output_json={result.task.output_json}")
+            elif args.cmd == "retry-generation-task":
+                task = retry_generation_queue_task(session, task_id=args.task_id)
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
             elif args.cmd == "create-manual-chapter-version":
                 version = create_manual_chapter_version(
                     session,

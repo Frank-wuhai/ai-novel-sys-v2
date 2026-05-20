@@ -294,6 +294,59 @@ def main() -> int:
         "--reader-promise",
         "每个收益都有代价",
     ])
+    run([
+        "create-chapter-brief",
+        "--book-id",
+        str(book_id),
+        "--chapter-number",
+        "6",
+        "--goal",
+        "验证队列草稿生成",
+        "--required-beats",
+        "压力,选择,代价,钩子",
+        "--constraints",
+        "dry-run only",
+    ])
+    queued_draft_id = extract_id(
+        "generation_task_id",
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"]),
+    )
+    duplicate_queue = run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"], expect=1)
+    if "active generation queue task already exists" not in duplicate_queue:
+        print("active queue guard did not reject duplicate draft task")
+        print(duplicate_queue)
+        return 1
+    queue_before = run(["list-generation-queue", "--status", "pending"])
+    if f"{queued_draft_id}\tbook={book_id}\ttype=queue_draft_chapter\tstatus=pending\tchapter=6" not in queue_before:
+        print("queued draft task was not listed as pending")
+        print(queue_before)
+        return 1
+    queued_run = run(["run-generation-task", "--task-id", str(queued_draft_id)])
+    queued_version_id = extract_id("version_id", queued_run)
+    child_task_id = extract_id("child_generation_task_id", queued_run)
+    if "status=completed" not in queued_run or queued_version_id < 1 or child_task_id < 1:
+        print("queued draft task did not complete with version and child generation task")
+        print(queued_run)
+        return 1
+    queue_task_detail = run(["show-generation-task", "--task-id", str(queued_draft_id)])
+    if '"child_generation_task_id":' not in queue_task_detail or f'"version_id": {queued_version_id}' not in queue_task_detail:
+        print("queue task audit did not record child task and version")
+        print(queue_task_detail)
+        return 1
+    queued_revision_id = extract_id(
+        "generation_task_id",
+        run(["enqueue-revision", "--book-id", str(book_id), "--chapter-number", "6"]),
+    )
+    failed_revision = run(["run-generation-task", "--task-id", str(queued_revision_id)])
+    if "status=failed" not in failed_revision or "latest chapter version must be needs_revision before revise" not in failed_revision:
+        print("queued revision task did not fail with expected reason")
+        print(failed_revision)
+        return 1
+    retry_revision = run(["retry-generation-task", "--task-id", str(queued_revision_id)])
+    if "status=pending" not in retry_revision:
+        print("retry-generation-task did not reset failed task")
+        print(retry_revision)
+        return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")

@@ -22,10 +22,15 @@ python -m app.cli create-chapter-plan --book-id 1 --start 1 --count 5 --goal-pre
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 5
 python -m app.cli run-next-action --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run
+python -m app.cli enqueue-draft --book-id 1 --chapter-number 1
+python -m app.cli list-generation-queue --status pending
+python -m app.cli run-generation-task --task-id 1
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
 python -m app.cli draft-chapter --book-id 1 --chapter-number 1 --dry-run
+python -m app.cli enqueue-revision --book-id 1 --chapter-number 1
+python -m app.cli retry-generation-task --task-id 1
 python -m app.cli review-chapter --book-id 1 --chapter-number 1
 python -m app.cli create-revision-brief --book-id 1 --chapter-number 1
 python -m app.cli revise-chapter --book-id 1 --chapter-number 1 --dry-run

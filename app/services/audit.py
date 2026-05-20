@@ -88,6 +88,7 @@ def task_output_version_id(task: GenerationTask) -> int | None:
 def task_summary(task: GenerationTask) -> str:
     input_data = _loads_json(task.input_json)
     output_data = _loads_json(task.output_json)
+    version_id = output_data.get("version_id") or output_data.get("child_version_id")
     return "\t".join(
         [
             f"{task.id}",
@@ -95,7 +96,8 @@ def task_summary(task: GenerationTask) -> str:
             f"type={task.task_type}",
             f"status={task.status}",
             f"chapter={input_data.get('chapter_number', '')}",
-            f"version={output_data.get('version_id', '')}",
+            f"version={version_id or ''}",
+            f"child_task={output_data.get('child_generation_task_id', '')}",
             f"provider={output_data.get('provider', '')}",
             f"model={output_data.get('model', '')}",
         ]
