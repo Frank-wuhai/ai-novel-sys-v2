@@ -47,6 +47,11 @@ python -m app.cli list-books
 python -m app.cli show-book --book-id 1
 python -m app.cli list-chapters --book-id 1
 python -m app.cli show-chapter --book-id 1 --chapter-number 1
+python -m app.cli list-versions --book-id 1 --chapter-number 1
+python -m app.cli show-version --version-id 1
+python -m app.cli list-generation-tasks --book-id 1
+python -m app.cli show-generation-task --task-id 1
+python -m app.cli compare-chapter-versions --left-version-id 1 --right-version-id 2
 python -m app.cli list-publish-jobs
 python -m app.cli list-prompts
 python -m app.cli show-prompt --name draft_chapter --version v1

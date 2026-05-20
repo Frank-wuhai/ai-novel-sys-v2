@@ -5,6 +5,15 @@ import sys
 
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
+from app.services.audit import (
+    compare_versions,
+    get_generation_task,
+    get_version_audit,
+    list_chapter_versions,
+    list_generation_tasks,
+    pretty_json,
+    task_summary,
+)
 from app.services.canon import (
     add_character,
     add_character_state,
@@ -245,6 +254,27 @@ def main() -> None:
     p = sub.add_parser("show-chapter")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
+
+    p = sub.add_parser("list-versions")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+
+    p = sub.add_parser("show-version")
+    p.add_argument("--version-id", type=int, required=True)
+    p.add_argument("--content", action="store_true")
+
+    p = sub.add_parser("compare-chapter-versions")
+    p.add_argument("--left-version-id", type=int, required=True)
+    p.add_argument("--right-version-id", type=int, required=True)
+
+    p = sub.add_parser("list-generation-tasks")
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--task-type", default="")
+    p.add_argument("--status", default="")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("show-generation-task")
+    p.add_argument("--task-id", type=int, required=True)
 
     p = sub.add_parser("list-publish-jobs")
     p.add_argument("--status", default="")
@@ -672,6 +702,54 @@ def main() -> None:
                     print(f"latest_content_chars={len(latest.content)}")
                 else:
                     print("latest_version_id=")
+            elif args.cmd == "list-versions":
+                for version in list_chapter_versions(session, book_id=args.book_id, chapter_number=args.chapter_number):
+                    print(
+                        f"{version.id}\tversion={version.version_number}\tstatus={version.status}\tsource={version.source}\tchars={len(version.content)}\ttitle={version.title}"
+                    )
+            elif args.cmd == "show-version":
+                audit = get_version_audit(session, version_id=args.version_id)
+                version = audit.version
+                print(f"id={version.id}")
+                print(f"chapter_id={version.chapter_id}")
+                print(f"chapter_number={audit.chapter.chapter_number}")
+                print(f"version_number={version.version_number}")
+                print(f"title={version.title}")
+                print(f"status={version.status}")
+                print(f"source={version.source}")
+                print(f"content_chars={len(version.content)}")
+                if audit.latest_quality:
+                    print(f"quality_report_id={audit.latest_quality.id}")
+                    print(f"quality_passed={audit.latest_quality.passed}")
+                    print(f"quality_score={audit.latest_quality.score}")
+                    print(f"quality_report={audit.latest_quality.report}")
+                else:
+                    print("quality_report_id=")
+                print("generation_task_ids=" + ",".join(str(task.id) for task in audit.generation_tasks))
+                if args.content:
+                    print("content:")
+                    print(version.content)
+            elif args.cmd == "compare-chapter-versions":
+                print(compare_versions(session, left_version_id=args.left_version_id, right_version_id=args.right_version_id))
+            elif args.cmd == "list-generation-tasks":
+                for task in list_generation_tasks(
+                    session,
+                    book_id=args.book_id or None,
+                    task_type=args.task_type,
+                    status=args.status,
+                    limit=args.limit,
+                ):
+                    print(task_summary(task))
+            elif args.cmd == "show-generation-task":
+                task = get_generation_task(session, task_id=args.task_id)
+                print(f"id={task.id}")
+                print(f"book_id={task.book_id}")
+                print(f"task_type={task.task_type}")
+                print(f"status={task.status}")
+                print("input_json=")
+                print(pretty_json(task.input_json))
+                print("output_json=")
+                print(pretty_json(task.output_json))
             elif args.cmd == "list-publish-jobs":
                 for job in list_publish_jobs(session, status=args.status):
                     print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}")

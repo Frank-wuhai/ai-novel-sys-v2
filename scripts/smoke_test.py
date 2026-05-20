@@ -353,6 +353,27 @@ def main() -> int:
     if "next_action=review_chapter" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "1", "--count", "1"]):
         print("planner did not request review after draft")
         return 1
+    version_list = run(["list-versions", "--book-id", str(book_id), "--chapter-number", "1"])
+    if f"{v1}\tversion=1\tstatus=draft" not in version_list:
+        print("list-versions did not show drafted version")
+        print(version_list)
+        return 1
+    version_detail = run(["show-version", "--version-id", str(v1)])
+    if f"id={v1}" not in version_detail or "generation_task_ids=" not in version_detail:
+        print("show-version did not include version audit details")
+        print(version_detail)
+        return 1
+    task_list = run(["list-generation-tasks", "--book-id", str(book_id), "--task-type", "draft_chapter", "--limit", "1"])
+    if f"type=draft_chapter" not in task_list or f"version={v1}" not in task_list:
+        print("list-generation-tasks did not show draft task")
+        print(task_list)
+        return 1
+    draft_task_id = int(task_list.split("\t", 1)[0])
+    task_detail = run(["show-generation-task", "--task-id", str(draft_task_id)])
+    if '"prompt_template": "draft_chapter@v3"' not in task_detail or f'"version_id": {v1}' not in task_detail:
+        print("show-generation-task did not include expected JSON")
+        print(task_detail)
+        return 1
     conn = sqlite3.connect(ROOT / "data/test-novel.db")
     try:
         prompt_count = conn.execute("select count(*) from prompt_templates where name='draft_chapter' and version='v1'").fetchone()[0]
@@ -484,6 +505,17 @@ def main() -> int:
     if revised_version_id <= failed_version_id:
         print("revision did not create a newer chapter version")
         print(f"failed={failed_version_id} revised={revised_version_id}")
+        return 1
+    version_diff = run([
+        "compare-chapter-versions",
+        "--left-version-id",
+        str(failed_version_id),
+        "--right-version-id",
+        str(revised_version_id),
+    ])
+    if f"--- version#{failed_version_id}" not in version_diff or f"+++ version#{revised_version_id}" not in version_diff:
+        print("version diff did not include expected headers")
+        print(version_diff)
         return 1
     conn = sqlite3.connect(ROOT / "data/test-novel.db")
     try:
