@@ -1,9 +1,24 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import EvidenceSource, MarketSignal
+
+
+@dataclass(frozen=True)
+class EvidenceAuditItem:
+    signal_id: int
+    genre: str
+    confidence: int
+    source_key: str
+    source_status: str
+    source_reliability: int | None
+    usable: bool
+    reasons: list[str]
+    signal_text: str
 
 
 def add_evidence_source(
@@ -105,6 +120,52 @@ def format_market_evidence_context(session: Session, *, genre: str, limit: int =
                 source_label = source.source_id
         lines.append(f"- signal#{signal.id} source={source_label} confidence={signal.confidence}: {signal.signal_text}")
     return "\n".join(lines), ids
+
+
+def audit_market_evidence(
+    session: Session,
+    *,
+    genre: str = "",
+    min_confidence: int = 0,
+) -> list[EvidenceAuditItem]:
+    signals = list_market_signals(session, genre=genre, min_confidence=min_confidence)
+    return [_audit_signal(session, signal) for signal in signals]
+
+
+def _audit_signal(session: Session, signal: MarketSignal) -> EvidenceAuditItem:
+    reasons: list[str] = []
+    source_key = ""
+    source_status = "missing"
+    source_reliability: int | None = None
+
+    if signal.confidence < 60:
+        reasons.append(f"confidence_below_60:{signal.confidence}")
+    if not signal.source_id:
+        reasons.append("missing_source")
+    else:
+        source = session.get(EvidenceSource, signal.source_id)
+        if not source:
+            reasons.append(f"source_not_found:{signal.source_id}")
+        else:
+            source_key = source.source_id
+            source_status = source.status
+            source_reliability = source.reliability
+            if source.status != "verified":
+                reasons.append(f"source_status_not_verified:{source.status}")
+            if source.reliability < 3:
+                reasons.append(f"source_reliability_below_3:{source.reliability}")
+
+    return EvidenceAuditItem(
+        signal_id=signal.id,
+        genre=signal.genre,
+        confidence=signal.confidence,
+        source_key=source_key,
+        source_status=source_status,
+        source_reliability=source_reliability,
+        usable=not reasons,
+        reasons=reasons,
+        signal_text=signal.signal_text,
+    )
 
 
 def _is_usable_signal(session: Session, signal: MarketSignal) -> bool:

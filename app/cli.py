@@ -41,6 +41,7 @@ from app.services.planning import build_human_decision_package, create_chapter_p
 from app.services.evidence import (
     add_evidence_source,
     add_market_signal,
+    audit_market_evidence,
     format_market_evidence_context,
     list_evidence_sources,
     list_market_signals,
@@ -225,6 +226,10 @@ def main() -> None:
     p = sub.add_parser("show-evidence-context")
     p.add_argument("--genre", required=True)
     p.add_argument("--limit", type=int, default=5)
+
+    p = sub.add_parser("audit-evidence")
+    p.add_argument("--genre", default="")
+    p.add_argument("--min-confidence", type=int, default=0)
 
     p = sub.add_parser("add-character")
     p.add_argument("--book-id", type=int, required=True)
@@ -579,6 +584,25 @@ def main() -> None:
                 context, signal_ids = format_market_evidence_context(session, genre=args.genre, limit=args.limit)
                 print(f"market_signal_ids={','.join(str(item) for item in signal_ids)}")
                 print(context)
+            elif args.cmd == "audit-evidence":
+                for item in audit_market_evidence(session, genre=args.genre, min_confidence=args.min_confidence):
+                    reliability = "" if item.source_reliability is None else str(item.source_reliability)
+                    reasons = ",".join(item.reasons) if item.reasons else "usable"
+                    print(
+                        "\t".join(
+                            [
+                                f"signal_id={item.signal_id}",
+                                f"genre={item.genre}",
+                                f"confidence={item.confidence}",
+                                f"source={item.source_key}",
+                                f"source_status={item.source_status}",
+                                f"source_reliability={reliability}",
+                                f"usable={item.usable}",
+                                f"reasons={reasons}",
+                                f"signal={item.signal_text}",
+                            ]
+                        )
+                    )
             elif args.cmd == "add-character":
                 character = add_character(
                     session,

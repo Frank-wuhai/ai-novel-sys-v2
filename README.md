@@ -301,9 +301,12 @@ Evidence and market signals are stored separately from prose:
 python -m app.cli add-evidence-source --source-id "fanqie-rank-20260520" --title "..." --url "..." --reliability 4 --status verified
 python -m app.cli add-market-signal --source-id "fanqie-rank-20260520" --genre "玄幻都市" --signal "..." --confidence 75
 python -m app.cli show-evidence-context --genre "玄幻都市"
+python -m app.cli audit-evidence --genre "玄幻都市"
 ```
 
 Draft generation records the selected `market_signal_ids` and `canon_refs` in `generation_tasks.input_json`, so every generated draft can be traced back to the evidence and Canon available at generation time.
+
+`audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.
 
 ## Canon Layer
 

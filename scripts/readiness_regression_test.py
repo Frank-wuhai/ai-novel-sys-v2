@@ -93,6 +93,12 @@ def main() -> int:
     assert_contains(wrong_genre_report, "check\tevidence\tpassed=False")
     assert_contains(wrong_genre_report, "no usable market signals for genre=科幻")
 
+    wrong_genre_audit = run(["audit-evidence", "--genre", "科幻"])
+    if wrong_genre_audit:
+        print("wrong-genre signal appeared in 科幻 audit output")
+        print(wrong_genre_audit)
+        raise SystemExit(1)
+
     run(
         [
             "add-evidence-source",
@@ -122,6 +128,31 @@ def main() -> int:
     right_genre_report = run(["production-readiness", "--book-id", str(book_id), "--start", "1", "--count", "1"])
     assert_contains(right_genre_report, "check\tevidence\tpassed=True")
     assert_contains(right_genre_report, "genre=科幻 usable_market_signals=1")
+
+    right_genre_audit = run(["audit-evidence", "--genre", "科幻"])
+    assert_contains(right_genre_audit, "usable=True")
+    assert_contains(right_genre_audit, "reasons=usable")
+    assert_contains(right_genre_audit, "source=right-genre-source")
+
+    run(["add-evidence-source", "--source-id", "candidate-source", "--reliability", "2", "--status", "candidate"])
+    run(
+        [
+            "add-market-signal",
+            "--source-id",
+            "candidate-source",
+            "--genre",
+            "科幻",
+            "--signal",
+            "候选证据不能直接用于生产。",
+            "--confidence",
+            "55",
+        ]
+    )
+    unusable_audit = run(["audit-evidence", "--genre", "科幻"])
+    assert_contains(unusable_audit, "usable=False")
+    assert_contains(unusable_audit, "confidence_below_60:55")
+    assert_contains(unusable_audit, "source_status_not_verified:candidate")
+    assert_contains(unusable_audit, "source_reliability_below_3:2")
     print("readiness-regression-test: PASS")
     print(f"database={TEST_DB}")
     print(f"book_id={book_id}")
