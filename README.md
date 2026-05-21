@@ -39,6 +39,7 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
+python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
@@ -310,6 +311,14 @@ python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
 ```
 
 The snapshot includes book metadata, readiness checks, chapter actions, queue status, recent generation usage, human decision items, and the recommended next command.
+
+For a lightweight local web operator console:
+
+```bash
+python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
+```
+
+Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, human decisions, and the recommended next command. The first version is read-only; use the CLI commands it shows for mutations.
 
 ## Human Decision Package
 

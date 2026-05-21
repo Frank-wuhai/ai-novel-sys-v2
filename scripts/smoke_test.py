@@ -554,6 +554,11 @@ def main() -> int:
         print("project-snapshot-json missing expected structured fields")
         print(snapshot)
         return 1
+    dashboard_self_test = run_script(["scripts/run_local_dashboard.py", "--database-url", TEST_DB, "--self-test"])
+    if "dashboard_self_test=PASS" not in dashboard_self_test or "book_count=1" not in dashboard_self_test:
+        print("local dashboard self-test did not pass")
+        print(dashboard_self_test)
+        return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")
