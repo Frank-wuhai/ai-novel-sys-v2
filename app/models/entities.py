@@ -277,6 +277,19 @@ class PlatformFeedback(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class FeedbackAdjustment(Base):
+    __tablename__ = "feedback_adjustments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    chapter_id: Mapped[int | None] = mapped_column(ForeignKey("chapters.id"), nullable=True)
+    target_chapter_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    feedback_ids: Mapped[str] = mapped_column(Text, default="")
+    adjustment_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="ready")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class EvidenceSource(Base):
     __tablename__ = "evidence_sources"
 

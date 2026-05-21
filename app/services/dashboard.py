@@ -111,6 +111,91 @@ def build_project_dashboard(
     return DashboardReport(lines=lines)
 
 
+def build_project_snapshot(
+    session: Session,
+    *,
+    book_id: int,
+    start: int = 1,
+    count: int = 20,
+    recent_tasks: int = 10,
+) -> dict:
+    book = session.get(Book, book_id)
+    if not book:
+        raise ValueError(f"book not found: {book_id}")
+    readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
+    decisions = build_human_decision_package(session, book_id=book_id, start=start, count=count)
+    queue_tasks = _queue_tasks(session, book_id=book_id)
+    tasks = _recent_tasks(session, book_id=book_id, limit=recent_tasks)
+    task_stats = _task_stats(tasks)
+    next_counts = Counter(item.next_action for item in plan_items)
+    queue_counts = Counter(task.status for task in queue_tasks)
+
+    return {
+        "book": {
+            "id": book.id,
+            "title": book.title,
+            "genre": book.genre,
+            "platform": book.target_platform,
+            "status": book.status,
+        },
+        "range": {"start": start, "count": count, "end": start + count - 1},
+        "readiness": {
+            "passed": readiness.passed,
+            "checks": [
+                {"name": check.name, "passed": check.passed, "detail": check.detail}
+                for check in readiness.checks
+            ],
+        },
+        "chapter_actions": dict(sorted(next_counts.items())),
+        "chapters": [
+            {
+                "number": item.chapter_number,
+                "chapter_id": item.chapter_id,
+                "brief_id": item.brief_id,
+                "version_id": item.latest_version_id,
+                "version_status": item.latest_version_status,
+                "quality_passed": item.latest_quality_passed,
+                "publish_job_id": item.publish_job_id,
+                "publish_status": item.publish_job_status,
+                "next_action": item.next_action,
+                "reason": item.reason,
+            }
+            for item in plan_items
+        ],
+        "generation_queue": {
+            "counts": dict(sorted(queue_counts.items())),
+            "tasks": [_task_snapshot(task) for task in queue_tasks[:10]],
+        },
+        "generation_recent": {
+            "count": len(tasks),
+            "completed": task_stats["completed"],
+            "failed": task_stats["failed"],
+            "estimated_tokens": task_stats["estimated_tokens"],
+            "elapsed_ms": task_stats["elapsed_ms"],
+        },
+        "human_decisions": {
+            "continuity": decisions.continuity_count,
+            "approval": decisions.approval_count,
+            "publish": decisions.publish_count,
+            "inspect": decisions.inspect_count,
+            "items": [
+                {
+                    "type": item.decision_type,
+                    "chapter": item.chapter_number,
+                    "chapter_id": item.chapter_id,
+                    "version_id": item.version_id,
+                    "publish_job_id": item.publish_job_id,
+                    "reason": item.reason,
+                    "command_hint": item.command_hint,
+                }
+                for item in decisions.items
+            ],
+        },
+        "recommendation": _recommend_next(book_id=book_id, plan_items=plan_items, queue_tasks=queue_tasks),
+    }
+
+
 def _recommend_next(*, book_id: int, plan_items, queue_tasks: list[GenerationTask]) -> str:
     pending_queue = [task for task in queue_tasks if task.status == "pending"]
     failed_queue = [task for task in queue_tasks if task.status == "failed"]
@@ -162,6 +247,20 @@ def _task_stats(tasks: list[GenerationTask]) -> dict[str, int]:
         "failed": failed,
         "estimated_tokens": estimated_tokens,
         "elapsed_ms": elapsed_ms,
+    }
+
+
+def _task_snapshot(task: GenerationTask) -> dict:
+    input_data = _loads_json(task.input_json)
+    output_data = _loads_json(task.output_json)
+    return {
+        "id": task.id,
+        "type": task.task_type,
+        "status": task.status,
+        "chapter": input_data.get("chapter_number"),
+        "attempt": input_data.get("attempt"),
+        "max_attempts": input_data.get("max_attempts"),
+        "error_category": output_data.get("error_category", ""),
     }
 
 

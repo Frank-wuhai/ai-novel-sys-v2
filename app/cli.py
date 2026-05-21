@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 
@@ -26,7 +27,7 @@ from app.services.canon import (
     format_canon_context,
 )
 from app.services.continuity import record_chapter_continuity
-from app.services.dashboard import build_project_dashboard
+from app.services.dashboard import build_project_dashboard, build_project_snapshot
 from app.services.llm_queue import (
     enqueue_draft_chapter,
     enqueue_revise_chapter,
@@ -74,7 +75,10 @@ from app.services.evidence import (
     list_market_signals,
 )
 from app.services.feedback import (
+    apply_feedback_adjustment_to_brief,
     convert_feedback_to_market_signal,
+    create_feedback_adjustment,
+    list_feedback_adjustments,
     list_platform_feedback,
     record_platform_feedback,
     summarize_platform_feedback,
@@ -230,6 +234,12 @@ def main() -> None:
     p.add_argument("--live-llm", action="store_true")
 
     p = sub.add_parser("project-dashboard")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=20)
+    p.add_argument("--recent-tasks", type=int, default=10)
+
+    p = sub.add_parser("project-snapshot-json")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--count", type=int, default=20)
@@ -417,6 +427,21 @@ def main() -> None:
     p.add_argument("--confidence", type=int, default=65)
     p.add_argument("--source-status", default="verified")
     p.add_argument("--source-reliability", type=int, default=3)
+
+    p = sub.add_parser("create-feedback-adjustment")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--target-chapter-number", type=int, required=True)
+    p.add_argument("--feedback-id", type=int, action="append", default=[])
+    p.add_argument("--adjustment-text", default="")
+    p.add_argument("--apply-to-brief", action="store_true")
+
+    p = sub.add_parser("list-feedback-adjustments")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--status", default="")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("apply-feedback-adjustment")
+    p.add_argument("--adjustment-id", type=int, required=True)
 
     p = sub.add_parser("add-character")
     p.add_argument("--book-id", type=int, required=True)
@@ -727,6 +752,15 @@ def main() -> None:
                 )
                 for line in report.lines:
                     print(line)
+            elif args.cmd == "project-snapshot-json":
+                snapshot = build_project_snapshot(
+                    session,
+                    book_id=args.book_id,
+                    start=args.start,
+                    count=args.count,
+                    recent_tasks=args.recent_tasks,
+                )
+                print(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True))
             elif args.cmd == "budget-check":
                 report = check_token_budget(session, book_id=args.book_id, token_budget=args.token_budget)
                 print(f"passed={report.passed}")
@@ -1107,6 +1141,48 @@ def main() -> None:
                 )
                 print(f"evidence_source_id={source_id}")
                 print(f"market_signal_id={signal_id}")
+            elif args.cmd == "create-feedback-adjustment":
+                adjustment = create_feedback_adjustment(
+                    session,
+                    book_id=args.book_id,
+                    target_chapter_number=args.target_chapter_number,
+                    feedback_ids=args.feedback_id,
+                    adjustment_text=args.adjustment_text,
+                )
+                print(f"feedback_adjustment_id={adjustment.id}")
+                print(f"book_id={adjustment.book_id}")
+                print(f"target_chapter_number={adjustment.target_chapter_number}")
+                print(f"feedback_ids={adjustment.feedback_ids}")
+                print(f"status={adjustment.status}")
+                print(f"adjustment_text={adjustment.adjustment_text}")
+                if args.apply_to_brief:
+                    brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id)
+                    print(f"brief_id={brief.id}")
+                    print(f"applied_status=applied")
+            elif args.cmd == "list-feedback-adjustments":
+                for adjustment in list_feedback_adjustments(
+                    session,
+                    book_id=args.book_id,
+                    status=args.status,
+                    limit=args.limit,
+                ):
+                    print(
+                        "\t".join(
+                            [
+                                str(adjustment.id),
+                                f"book={adjustment.book_id}",
+                                f"target_chapter={adjustment.target_chapter_number}",
+                                f"feedback_ids={adjustment.feedback_ids}",
+                                f"status={adjustment.status}",
+                                f"text={adjustment.adjustment_text}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "apply-feedback-adjustment":
+                brief = apply_feedback_adjustment_to_brief(session, adjustment_id=args.adjustment_id)
+                print(f"brief_id={brief.id}")
+                print(f"chapter_id={brief.chapter_id}")
+                print(f"status={brief.status}")
             elif args.cmd == "add-character":
                 character = add_character(
                     session,

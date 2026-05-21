@@ -13,6 +13,7 @@ python -m app.cli create-book --title "Demo" --genre "玄幻都市" --platform "
 python -m app.cli record-feedback --book-id 1 --platform "番茄小说" --metric-name "comment" --metric-value "..." --raw-text "..."
 python -m app.cli feedback-summary --book-id 1
 python -m app.cli feedback-to-market-signal --feedback-id 1 --genre "玄幻都市" --signal "..." --confidence 70
+python -m app.cli create-feedback-adjustment --book-id 1 --target-chapter-number 3 --feedback-id 1 --apply-to-brief
 python -m app.cli add-character --book-id 1 --name "主角" --role "protagonist"
 python -m app.cli add-world-rule --book-id 1 --category "能力代价" --rule "..."
 python -m app.cli add-power-system --book-id 1 --name "..." --rules "..." --costs "..." --limits "..."
@@ -33,6 +34,7 @@ python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
+python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
@@ -73,11 +75,13 @@ python -m app.cli list-market-signals --genre "玄幻都市" --usable-only
 python -m app.cli show-evidence-context --genre "玄幻都市"
 python -m app.cli list-feedback --book-id 1
 python -m app.cli feedback-summary --book-id 1
+python -m app.cli list-feedback-adjustments --book-id 1
 python -m app.cli show-canon-context --book-id 1
 python -m app.cli show-story-bible --book-id 1
 python -m app.cli show-outline --book-id 1
 python -m app.cli show-story-context --book-id 1 --chapter-number 1
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 10
+python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 10
 ```
 
 ## Architecture Boundary
@@ -268,6 +272,14 @@ python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 
 It reports readiness checks, chapter next-action counts, per-chapter state, generation queue state, recent generation usage estimates, human decision counts, and one recommended next command.
 
+Use the JSON snapshot when another process needs the same state in a structured form:
+
+```bash
+python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
+```
+
+The snapshot includes book metadata, readiness checks, chapter actions, queue status, recent generation usage, human decision items, and the recommended next command.
+
 ## Human Decision Package
 
 Use the decision package after a book cycle to see exactly what requires human judgment:
@@ -434,6 +446,22 @@ python -m app.cli feedback-to-market-signal \
 ```
 
 This creates an evidence source named `feedback-<id>` and a linked market signal. The signal still passes through the normal evidence usability checks before it can affect future drafts.
+
+To turn feedback into a concrete next-chapter adjustment, create a feedback adjustment:
+
+```bash
+python -m app.cli create-feedback-adjustment \
+  --book-id 1 \
+  --target-chapter-number 4 \
+  --feedback-id 1 \
+  --feedback-id 2 \
+  --adjustment-text "下一章强化章末悬念，并提前给出能力代价的可感知压力。"
+
+python -m app.cli list-feedback-adjustments --book-id 1 --status ready
+python -m app.cli apply-feedback-adjustment --adjustment-id 1
+```
+
+`apply-feedback-adjustment` writes a new latest `chapter_brief` for the target chapter. It preserves the existing goal, adds `回应读者反馈` to required beats, and appends the adjustment text to constraints. Use `--apply-to-brief` on `create-feedback-adjustment` when you want to create and apply in one step.
 
 ## Story Bible And Outline
 

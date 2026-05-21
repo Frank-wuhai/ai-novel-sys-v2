@@ -449,6 +449,19 @@ def main() -> int:
             print(expected)
             print(dashboard)
             return 1
+    snapshot = json.loads(run(["project-snapshot-json", "--book-id", str(book_id), "--start", "1", "--count", "9"]))
+    if (
+        snapshot["book"]["id"] != book_id
+        or snapshot["range"] != {"start": 1, "count": 9, "end": 9}
+        or "readiness" not in snapshot
+        or "chapters" not in snapshot
+        or "generation_queue" not in snapshot
+        or "human_decisions" not in snapshot
+        or "recommendation" not in snapshot
+    ):
+        print("project-snapshot-json missing expected structured fields")
+        print(snapshot)
+        return 1
     auto_draft = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=draft_chapter" not in auto_draft or "status=executed" not in auto_draft:
         print("run-next-action did not draft ready chapter")
@@ -628,6 +641,39 @@ def main() -> int:
         print("feedback-derived market signal was not auditable")
         print(feedback_audit)
         return 1
+    adjustment_output = run([
+        "create-feedback-adjustment",
+        "--book-id",
+        str(book_id),
+        "--target-chapter-number",
+        "3",
+        "--feedback-id",
+        str(feedback_id),
+        "--apply-to-brief",
+    ])
+    adjustment_id = extract_id("feedback_adjustment_id", adjustment_output)
+    adjustment_brief_id = extract_id("brief_id", adjustment_output)
+    if "applied_status=applied" not in adjustment_output or "读者反馈：章末钩子可以更明确。" not in adjustment_output:
+        print("create-feedback-adjustment did not create and apply expected adjustment")
+        print(adjustment_output)
+        return 1
+    adjustments = run(["list-feedback-adjustments", "--book-id", str(book_id), "--status", "applied"])
+    if f"{adjustment_id}\tbook={book_id}\ttarget_chapter=3" not in adjustments:
+        print("list-feedback-adjustments did not show applied adjustment")
+        print(adjustments)
+        return 1
+    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    try:
+        applied_brief = conn.execute(
+            "select required_beats, constraints from chapter_briefs where id=?",
+            (adjustment_brief_id,),
+        ).fetchone()
+        if not applied_brief or "回应读者反馈" not in applied_brief[0] or f"反馈调整#{adjustment_id}" not in applied_brief[1]:
+            print("feedback adjustment was not applied to chapter brief")
+            print(applied_brief)
+            return 1
+    finally:
+        conn.close()
     run([
         "record-chapter-continuity",
         "--book-id",
