@@ -30,6 +30,7 @@ python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 
 python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli list-generation-queue --status pending
 python -m app.cli generation-queue-health
+python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
 python -m app.cli run-generation-task --task-id 1
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2
@@ -39,6 +40,7 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli live-llm-smoke --yes
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
@@ -280,7 +282,8 @@ Queued generation tasks track attempts and retryable failures:
 
 ```bash
 python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
-python -m app.cli generation-queue-health --failure-limit 5
+python -m app.cli generation-queue-health --failure-limit 5 --stale-after-seconds 3600
+python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
 python -m app.cli run-generation-worker --book-id 1 --token-budget 100000 --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
@@ -310,12 +313,15 @@ The supervisor runs `generation-queue-health` before every worker loop, then run
 Queue task status operations:
 
 - `generation-queue-health`: reports queue status counts, oldest pending task, and recent failure summaries.
+- `recover-stale-generation-tasks`: scans `running` tasks that exceeded `--timeout-seconds`; retryable tasks return to `pending`, exhausted tasks become `failed`.
 - `pause-generation-task`: moves a pending queue task to `paused`; workers skip it and duplicate queue guards still protect the same chapter.
 - `resume-generation-task`: moves a paused task back to `pending`.
 - `cancel-generation-task`: moves a pending, paused, or failed task to `canceled`.
 - `retry-generation-task`: resets a failed task to `pending` with attempt count cleared.
 
 Use `budget-check` or worker `--token-budget` to stop generation once estimated token usage for a book exceeds a local budget.
+
+Queue execution records `running_started_at` while a task is active. Error handling classifies failures into categories such as `validation`, `structured_output`, `auth`, `permission`, `rate_limit`, `timeout`, `network`, `context_length`, `provider`, and `execution`. Validation/configuration-style failures fail fast; transient provider, rate-limit, timeout, and network failures can retry until `max_attempts` is exhausted.
 
 ## Operator Dashboard
 
@@ -382,9 +388,10 @@ To verify the live Volcano Ark/Coding Plan model path, opt in explicitly:
 
 ```bash
 python -m app.cli production-readiness --book-id 1 --start 1 --count 10 --live-llm
+python -m app.cli live-llm-smoke --yes
 ```
 
-`--live-llm` sends a tiny health-check request. It does not generate novel prose.
+`--live-llm` and `live-llm-smoke --yes` send tiny health-check requests. They do not generate novel prose. `live-llm-smoke` refuses to run without `--yes` because it calls the real LLM API.
 
 ## Development Database Safety
 

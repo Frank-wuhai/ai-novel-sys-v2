@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import GenerationTask
+from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
 
 
@@ -42,12 +44,26 @@ class QueueFailureSummary:
 
 
 @dataclass(frozen=True)
+class StaleTaskRecovery:
+    task_id: int
+    previous_status: str
+    new_status: str
+    chapter_number: int | None
+    attempt: int
+    max_attempts: int
+    age_seconds: int
+    error_category: str
+
+
+@dataclass(frozen=True)
 class QueueHealthReport:
     total: int
     counts: dict[str, int]
     oldest_pending_id: int | None
     oldest_pending_chapter: int | None
     latest_failures: list[QueueFailureSummary]
+    running_count: int = 0
+    stale_running_count: int = 0
 
 
 def enqueue_draft_chapter(
@@ -86,7 +102,7 @@ def list_generation_queue(
     return list(session.scalars(stmt))
 
 
-def build_generation_queue_health(session: Session, *, failure_limit: int = 5) -> QueueHealthReport:
+def build_generation_queue_health(session: Session, *, failure_limit: int = 5, stale_after_seconds: int = 3600) -> QueueHealthReport:
     if failure_limit < 1:
         raise ValueError("failure_limit must be >= 1")
     tasks = list(
@@ -100,12 +116,15 @@ def build_generation_queue_health(session: Session, *, failure_limit: int = 5) -
     oldest_pending = next((task for task in tasks if task.status == "pending"), None)
     oldest_pending_input = _loads_json(oldest_pending.input_json) if oldest_pending else {}
     failed_tasks = [task for task in reversed(tasks) if task.status == "failed"][:failure_limit]
+    stale_running = [task for task in tasks if task.status == "running" and _running_age_seconds(task) >= stale_after_seconds]
     return QueueHealthReport(
         total=len(tasks),
         counts=dict(sorted(counts.items())),
         oldest_pending_id=oldest_pending.id if oldest_pending else None,
         oldest_pending_chapter=oldest_pending_input.get("chapter_number") if oldest_pending else None,
         latest_failures=[_failure_summary(task) for task in failed_tasks],
+        running_count=counts.get("running", 0),
+        stale_running_count=len(stale_running),
     )
 
 
@@ -124,6 +143,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     attempt = int(input_data.get("attempt") or 0) + 1
     max_attempts = int(input_data.get("max_attempts") or 3)
     input_data["attempt"] = attempt
+    input_data["running_started_at"] = _utc_now_iso()
     if chapter_number < 1:
         task.status = "failed"
         task.input_json = _dumps_json(input_data)
@@ -143,15 +163,17 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
         else:
             raise ValueError(f"unsupported queue type: {task.task_type}")
     except Exception as exc:
-        task.status = "failed" if attempt >= max_attempts else "pending"
+        classification = classify_exception(exc)
+        retryable = classification.retryable and attempt < max_attempts
+        task.status = "pending" if retryable else "failed"
         task.output_json = _dumps_json(
             {
-                "error_category": _error_category(exc),
+                "error_category": classification.category,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
                 "attempt": attempt,
                 "max_attempts": max_attempts,
-                "retryable": attempt < max_attempts,
+                "retryable": retryable,
             }
         )
         session.flush()
@@ -159,6 +181,9 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
 
     child_task = _latest_child_generation_task(session, after_id=before_task_id, version_id=version.id)
     task.status = "completed"
+    input_data = _loads_json(task.input_json)
+    input_data.pop("running_started_at", None)
+    task.input_json = _dumps_json(input_data)
     task.output_json = _dumps_json(
         {
             "version_id": version.id,
@@ -188,6 +213,66 @@ def run_generation_queue(session: Session, *, max_tasks: int = 1) -> QueueBatchR
         seen_task_ids.add(task.id)
         results.append(run_generation_queue_task(session, task_id=task.id))
     return QueueBatchResult(results=results)
+
+
+def recover_stale_generation_tasks(
+    session: Session,
+    *,
+    timeout_seconds: int = 3600,
+    limit: int = 20,
+) -> list[StaleTaskRecovery]:
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    recovered: list[StaleTaskRecovery] = []
+    tasks = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "running")
+            .order_by(GenerationTask.id)
+            .limit(limit)
+        )
+    )
+    for task in tasks:
+        age = _running_age_seconds(task)
+        if age < timeout_seconds:
+            continue
+        input_data = _loads_json(task.input_json)
+        output_data = _loads_json(task.output_json)
+        attempt = int(input_data.get("attempt") or output_data.get("attempt") or 0)
+        max_attempts = int(input_data.get("max_attempts") or output_data.get("max_attempts") or 3)
+        new_status = "pending" if attempt < max_attempts else "failed"
+        input_data.pop("running_started_at", None)
+        task.input_json = _dumps_json(input_data)
+        output_data.update(
+            {
+                "error_category": "timeout",
+                "error_type": "StaleRunningTask",
+                "error": f"running task exceeded timeout_seconds={timeout_seconds}",
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "retryable": new_status == "pending",
+                "recovered_from_status": "running",
+                "stale_age_seconds": age,
+            }
+        )
+        task.output_json = _dumps_json(output_data)
+        task.status = new_status
+        recovered.append(
+            StaleTaskRecovery(
+                task_id=task.id,
+                previous_status="running",
+                new_status=new_status,
+                chapter_number=input_data.get("chapter_number"),
+                attempt=attempt,
+                max_attempts=max_attempts,
+                age_seconds=age,
+                error_category="timeout",
+            )
+        )
+    session.flush()
+    return recovered
 
 
 def retry_generation_queue_task(session: Session, *, task_id: int) -> GenerationTask:
@@ -333,10 +418,19 @@ def _dumps_json(value: dict) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _error_category(exc: Exception) -> str:
-    text = str(exc).lower()
-    if isinstance(exc, ValueError):
-        return "validation"
-    if "api" in text or "timeout" in text or "connection" in text or "rate" in text:
-        return "provider"
-    return "execution"
+def _utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat()
+
+
+def _running_age_seconds(task: GenerationTask) -> int:
+    input_data = _loads_json(task.input_json)
+    raw = input_data.get("running_started_at")
+    started = _parse_datetime(raw) if isinstance(raw, str) and raw else task.created_at
+    return max(0, int((datetime.utcnow() - started).total_seconds()))
+
+
+def _parse_datetime(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return datetime.utcnow() - timedelta(days=365)

@@ -30,6 +30,7 @@ from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
 from app.services.db_ops import check_database_health, create_database_backup, list_database_backups
 from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
+from app.services.live_llm import run_live_llm_smoke
 from app.services.llm_queue import (
     build_generation_queue_health,
     cancel_generation_queue_task,
@@ -37,6 +38,7 @@ from app.services.llm_queue import (
     enqueue_revise_chapter,
     list_generation_queue,
     pause_generation_queue_task,
+    recover_stale_generation_tasks,
     retry_generation_queue_task,
     resume_generation_queue_task,
     run_generation_queue,
@@ -281,6 +283,7 @@ def main() -> None:
 
     p = sub.add_parser("generation-queue-health")
     p.add_argument("--failure-limit", type=int, default=5)
+    p.add_argument("--stale-after-seconds", type=int, default=3600)
 
     p = sub.add_parser("run-generation-task")
     p.add_argument("--task-id", type=int, default=0)
@@ -297,6 +300,10 @@ def main() -> None:
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
+
+    p = sub.add_parser("recover-stale-generation-tasks")
+    p.add_argument("--timeout-seconds", type=int, default=3600)
+    p.add_argument("--limit", type=int, default=20)
 
     p = sub.add_parser("pause-generation-task")
     p.add_argument("--task-id", type=int, required=True)
@@ -377,6 +384,9 @@ def main() -> None:
 
     p = sub.add_parser("llm-usage-summary")
     p.add_argument("--book-id", type=int, default=0)
+
+    p = sub.add_parser("live-llm-smoke")
+    p.add_argument("--yes", action="store_true")
 
     p = sub.add_parser("quality-trends")
     p.add_argument("--book-id", type=int, required=True)
@@ -850,11 +860,17 @@ def main() -> None:
                 for task in list_generation_queue(session, status=args.status, limit=args.limit):
                     print(task_summary(task))
             elif args.cmd == "generation-queue-health":
-                report = build_generation_queue_health(session, failure_limit=args.failure_limit)
+                report = build_generation_queue_health(
+                    session,
+                    failure_limit=args.failure_limit,
+                    stale_after_seconds=args.stale_after_seconds,
+                )
                 print(f"total={report.total}")
                 print("counts=" + ",".join(f"{key}={value}" for key, value in report.counts.items()))
                 print(f"oldest_pending_id={report.oldest_pending_id or ''}")
                 print(f"oldest_pending_chapter={report.oldest_pending_chapter or ''}")
+                print(f"running_count={report.running_count}")
+                print(f"stale_running_count={report.stale_running_count}")
                 for failure in report.latest_failures:
                     print(
                         "\t".join(
@@ -936,6 +952,29 @@ def main() -> None:
                 task = retry_generation_queue_task(session, task_id=args.task_id)
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
+            elif args.cmd == "recover-stale-generation-tasks":
+                recovered = recover_stale_generation_tasks(
+                    session,
+                    timeout_seconds=args.timeout_seconds,
+                    limit=args.limit,
+                )
+                print(f"recovered_count={len(recovered)}")
+                for item in recovered:
+                    print(
+                        "\t".join(
+                            [
+                                "recovered",
+                                f"generation_task_id={item.task_id}",
+                                f"previous_status={item.previous_status}",
+                                f"status={item.new_status}",
+                                f"chapter={item.chapter_number or ''}",
+                                f"attempt={item.attempt}",
+                                f"max_attempts={item.max_attempts}",
+                                f"age_seconds={item.age_seconds}",
+                                f"error_category={item.error_category}",
+                            ]
+                        )
+                    )
             elif args.cmd == "pause-generation-task":
                 task = pause_generation_queue_task(session, task_id=args.task_id, reason=args.reason)
                 print(f"generation_task_id={task.id}")
@@ -1097,6 +1136,21 @@ def main() -> None:
                 print(f"failed_count={summary.failed_count}")
                 print(f"estimated_total_tokens={summary.estimated_total_tokens}")
                 print(f"elapsed_ms={summary.elapsed_ms}")
+            elif args.cmd == "live-llm-smoke":
+                if not args.yes:
+                    raise ValueError("live-llm-smoke requires --yes because it calls the real LLM API")
+                result = run_live_llm_smoke()
+                print(f"passed={result.passed}")
+                print(f"provider={result.provider}")
+                print(f"model={result.model}")
+                print(f"request_id={result.request_id}")
+                print(f"estimated_total_tokens={result.estimated_total_tokens}")
+                print(f"elapsed_ms={result.elapsed_ms}")
+                print(f"error_category={result.error_category}")
+                print(f"error={result.error}")
+                print(f"text={result.text}")
+                if not result.passed:
+                    raise SystemExit(1)
             elif args.cmd == "quality-trends":
                 trend = build_quality_trends(session, book_id=args.book_id, limit=args.limit)
                 weak_counts = ",".join(f"{key}={value}" for key, value in trend.weak_dimension_counts.items())

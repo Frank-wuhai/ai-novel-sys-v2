@@ -370,18 +370,14 @@ def main() -> int:
         "generation_task_id",
         run(["enqueue-revision", "--book-id", str(book_id), "--chapter-number", "6", "--max-attempts", "2"]),
     )
-    retryable_revision = run(["run-generation-task", "--task-id", str(queued_revision_id)])
-    if "status=pending" not in retryable_revision or '"retryable": true' not in retryable_revision:
-        print("queued revision task did not remain pending after retryable failure")
-        print(retryable_revision)
-        return 1
     failed_revision = run(["run-generation-task", "--task-id", str(queued_revision_id)])
     if (
         "status=failed" not in failed_revision
         or '"error_category": "validation"' not in failed_revision
+        or '"retryable": false' not in failed_revision
         or "latest chapter version must be needs_revision before revise" not in failed_revision
     ):
-        print("queued revision task did not fail with expected final reason")
+        print("queued revision task did not fail fast with expected validation reason")
         print(failed_revision)
         return 1
     retry_revision = run(["retry-generation-task", "--task-id", str(queued_revision_id)])
@@ -389,7 +385,6 @@ def main() -> int:
         print("retry-generation-task did not reset failed task")
         print(retry_revision)
         return 1
-    run(["run-generation-task", "--task-id", str(queued_revision_id)])
     run(["run-generation-task", "--task-id", str(queued_revision_id)])
     for chapter_number in (7, 8):
         run([
@@ -448,9 +443,63 @@ def main() -> int:
         print("canceled task was not listed as canceled")
         print(canceled_list)
         return 1
+    run([
+        "create-chapter-brief",
+        "--book-id",
+        str(book_id),
+        "--chapter-number",
+        "11",
+        "--goal",
+        "验证卡住任务恢复",
+        "--required-beats",
+        "压力,选择,代价,钩子",
+        "--constraints",
+        "dry-run only",
+    ])
+    stale_task_id = extract_id(
+        "generation_task_id",
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "11", "--max-attempts", "2"]),
+    )
+    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    try:
+        conn.execute(
+            "update generation_tasks set status='running', input_json=? where id=?",
+            (
+                json.dumps(
+                    {
+                        "chapter_number": 11,
+                        "dry_run": True,
+                        "attempt": 1,
+                        "max_attempts": 2,
+                        "running_started_at": "2000-01-01T00:00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                stale_task_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    stale_health = run(["generation-queue-health", "--stale-after-seconds", "1"])
+    if "running_count=1" not in stale_health or "stale_running_count=1" not in stale_health:
+        print("generation-queue-health did not detect stale running task")
+        print(stale_health)
+        return 1
+    recovery = run(["recover-stale-generation-tasks", "--timeout-seconds", "1"])
+    if (
+        "recovered_count=1" not in recovery
+        or f"generation_task_id={stale_task_id}" not in recovery
+        or "status=pending" not in recovery
+        or "error_category=timeout" not in recovery
+    ):
+        print("recover-stale-generation-tasks did not requeue stale task")
+        print(recovery)
+        return 1
+    run(["cancel-generation-task", "--task-id", str(stale_task_id), "--reason", "smoke recovered"])
     queue_health = run(["generation-queue-health", "--failure-limit", "2"])
     if (
-        "counts=canceled=1,completed=3,failed=1" not in queue_health
+        "counts=canceled=2,completed=3,failed=1" not in queue_health
         or f"failure\tgeneration_task_id={queued_revision_id}" not in queue_health
         or "error_category=validation" not in queue_health
     ):
@@ -605,6 +654,11 @@ def main() -> int:
             print("production readiness missing expected pass check")
             print(readiness)
             return 1
+    live_guard = run(["live-llm-smoke"], expect=1)
+    if "live-llm-smoke requires --yes" not in live_guard:
+        print("live-llm-smoke did not require explicit confirmation")
+        print(live_guard)
+        return 1
     run([
         "create-chapter-brief",
         "--book-id",
