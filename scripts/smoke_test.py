@@ -555,7 +555,11 @@ def main() -> int:
         print(snapshot)
         return 1
     dashboard_self_test = run_script(["scripts/run_local_dashboard.py", "--database-url", TEST_DB, "--self-test"])
-    if "dashboard_self_test=PASS" not in dashboard_self_test or "book_count=1" not in dashboard_self_test:
+    if (
+        "dashboard_self_test=PASS" not in dashboard_self_test
+        or "book_count=1" not in dashboard_self_test
+        or "action_status=ok" not in dashboard_self_test
+    ):
         print("local dashboard self-test did not pass")
         print(dashboard_self_test)
         return 1

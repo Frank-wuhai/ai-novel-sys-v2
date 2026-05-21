@@ -17,7 +17,8 @@ if str(ROOT) not in sys.path:
 from app.db.session import configure_database, session_scope
 from app.models.entities import Book
 from app.services.dashboard import build_project_snapshot
-from app.services.llm_queue import build_generation_queue_health
+from app.services.llm_queue import build_generation_queue_health, run_generation_queue
+from app.services.planning import AUTO_ACTIONS, run_next_action
 
 
 HTML = r"""<!doctype html>
@@ -109,6 +110,9 @@ HTML = r"""<!doctype html>
     .command { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
     .stack { display: grid; gap: 16px; }
     .empty { padding: 14px; color: var(--muted); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .actions button { height: 32px; font-size: 13px; }
+    .actions button.secondary { background: #ffffff; color: var(--ink); border-color: var(--line); }
     @media (max-width: 900px) {
       .toolbar, .summary, .grid { grid-template-columns: 1fr; }
     }
@@ -150,12 +154,17 @@ HTML = r"""<!doctype html>
         <section class="panel">
           <h2>Recommendation</h2>
           <div id="recommendation" class="empty"></div>
+          <div class="actions">
+            <button id="runQueue">Run Queue Once</button>
+            <button id="runNext" class="secondary">Run Safe Next Action</button>
+          </div>
         </section>
       </div>
     </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
+    let currentSnapshot = null;
 
     async function loadBooks() {
       const books = await fetchJson('/api/books');
@@ -175,6 +184,7 @@ HTML = r"""<!doctype html>
         fetchJson('/api/snapshot?' + params.toString()),
         fetchJson('/api/queue-health')
       ]);
+      currentSnapshot = snapshot;
       renderSummary(snapshot, health);
       renderChapters(snapshot.chapters);
       renderDecisions(snapshot.human_decisions.items);
@@ -188,6 +198,19 @@ HTML = r"""<!doctype html>
       const response = await fetch(path);
       if (!response.ok) throw new Error(await response.text());
       return response.json();
+    }
+
+    async function postAction(action, payload = {}) {
+      $('state').textContent = `Running ${action}`;
+      const response = await fetch('/api/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action, ...payload})
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      $('state').textContent = `${action}: ${result.status || 'done'}`;
+      await refresh();
     }
 
     function renderSummary(snapshot, health) {
@@ -269,9 +292,27 @@ HTML = r"""<!doctype html>
     }
 
     $('refresh').addEventListener('click', refresh);
-    loadBooks().catch((error) => {
+    $('runQueue').addEventListener('click', () => {
+      postAction('run_queue', {max_tasks: 1}).catch(showError);
+    });
+    $('runNext').addEventListener('click', () => {
+      const item = (currentSnapshot?.chapters || []).find((chapter) =>
+        ['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job'].includes(chapter.next_action)
+      );
+      if (!item) {
+        showError(new Error('No safe next action in selected range'));
+        return;
+      }
+      postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true}).catch(showError);
+    });
+
+    function showError(error) {
       $('state').textContent = 'Error';
       document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="panel empty">${escapeHtml(error.message)}</div>`);
+    }
+
+    loadBooks().catch((error) => {
+      showError(error);
     });
   </script>
 </body>
@@ -295,9 +336,11 @@ def main() -> int:
             queue = build_generation_queue_health(session)
             if books:
                 build_project_snapshot(session, book_id=books[0].id, start=1, count=1)
+            action_result = _perform_action(session, {"action": "queue_health"})
             print("dashboard_self_test=PASS")
             print(f"book_count={len(books)}")
             print(f"queue_total={queue.total}")
+            print(f"action_status={action_result['status']}")
         return 0
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     host, port = server.server_address
@@ -376,6 +419,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_text(f"ERROR: {exc}", status=HTTPStatus.BAD_REQUEST)
 
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path != "/api/action":
+                self._send_text("not found", status=HTTPStatus.NOT_FOUND)
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+            payload = json.loads(raw or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("JSON object is required")
+            with session_scope() as session:
+                self._send_json(_perform_action(session, payload))
+        except Exception as exc:
+            self._send_text(f"ERROR: {exc}", status=HTTPStatus.BAD_REQUEST)
+
     def log_message(self, format: str, *args) -> None:
         return
 
@@ -409,6 +468,52 @@ def _int_query(query: dict[str, list[str]], name: str, default: int) -> int:
     if not values:
         return default
     return int(values[0])
+
+
+def _perform_action(session, payload: dict) -> dict:
+    action = str(payload.get("action") or "")
+    if action == "queue_health":
+        report = build_generation_queue_health(session)
+        return {"status": "ok", "total": report.total, "counts": report.counts}
+    if action == "run_queue":
+        max_tasks = int(payload.get("max_tasks") or 1)
+        if max_tasks < 1 or max_tasks > 3:
+            raise ValueError("max_tasks must be between 1 and 3")
+        batch = run_generation_queue(session, max_tasks=max_tasks)
+        return {
+            "status": "executed",
+            "executed_count": len(batch.results),
+            "tasks": [
+                {
+                    "generation_task_id": result.task.id,
+                    "status": result.task.status,
+                    "version_id": result.version_id,
+                    "child_generation_task_id": result.child_generation_task_id,
+                }
+                for result in batch.results
+            ],
+        }
+    if action == "run_next_action":
+        book_id = int(payload.get("book_id") or 0)
+        chapter_number = int(payload.get("chapter_number") or 0)
+        if not book_id or not chapter_number:
+            raise ValueError("book_id and chapter_number are required")
+        result = run_next_action(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            dry_run=bool(payload.get("dry_run", True)),
+        )
+        if result.action not in AUTO_ACTIONS or result.status != "executed":
+            raise ValueError(f"action is not safe or executable: {result.action} {result.status}")
+        return {
+            "status": result.status,
+            "action": result.action,
+            "chapter_number": result.chapter_number,
+            "message": result.message,
+            "object_id": result.object_id,
+        }
+    raise ValueError(f"unsupported action: {action}")
 
 
 if __name__ == "__main__":

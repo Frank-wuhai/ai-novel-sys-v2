@@ -318,7 +318,7 @@ For a lightweight local web operator console:
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, human decisions, and the recommended next command. The first version is read-only; use the CLI commands it shows for mutations.
+Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass or one safe planner next action. Manual approvals, continuity writeback, and final publish confirmation still require CLI confirmation.
 
 ## Human Decision Package
 
