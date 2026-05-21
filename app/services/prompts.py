@@ -183,6 +183,51 @@ Canon 长期设定：
 """
 
 
+REVIEW_CHAPTER_TEMPLATE_V1 = """你是小说章节二审 reviewer。
+
+任务类型：reviewer_json_schema
+
+请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
+
+JSON 字段：
+- verdict: pass / needs_revision / fail
+- score: 0-100 整数
+- strengths: 字符串数组，列出章节优势
+- issues: 字符串数组，列出需要修复的问题
+- revision_suggestions: 字符串数组，给出可执行修订建议
+- risk_flags: 字符串数组，列出连续性、平台、爽点、节奏或钩子风险
+
+作品：{book_title}
+题材：{genre}
+目标平台：{target_platform}
+
+章节目标：
+{goal}
+
+必要节拍：
+{required_beats}
+
+硬约束：
+{constraints}
+
+规则质检报告：
+{rule_report}
+
+Canon 长期设定：
+{canon_context}
+
+章节正文：
+{chapter_content}
+
+审稿重点：
+- 是否形成清晰压力、选择、代价、后果和章末钩子
+- 是否覆盖 chapter brief
+- 是否违反 Canon 或能力代价约束
+- 是否有平台风险或系统元信息泄漏
+- 是否值得进入人工连续性回写和审批
+"""
+
+
 def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
     templates: list[PromptTemplate] = []
     for version, body in (
@@ -224,6 +269,23 @@ def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
         )
         session.add(revision_template)
         templates.append(revision_template)
+    existing_review = session.scalar(
+        select(PromptTemplate).where(
+            PromptTemplate.name == "review_chapter",
+            PromptTemplate.version == "v1",
+        )
+    )
+    if existing_review:
+        templates.append(existing_review)
+    else:
+        review_template = PromptTemplate(
+            name="review_chapter",
+            version="v1",
+            template=REVIEW_CHAPTER_TEMPLATE_V1,
+            status="active",
+        )
+        session.add(review_template)
+        templates.append(review_template)
     session.flush()
     return templates
 

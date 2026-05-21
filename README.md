@@ -53,6 +53,7 @@ python -m app.cli draft-chapter --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli enqueue-revision --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli retry-generation-task --task-id 1
 python -m app.cli review-chapter --book-id 1 --chapter-number 1
+python -m app.cli review-chapter --book-id 1 --chapter-number 1 --llm-review
 python -m app.cli quality-trends --book-id 1
 python -m app.cli create-revision-brief --book-id 1 --chapter-number 1
 python -m app.cli revise-chapter --book-id 1 --chapter-number 1 --dry-run
@@ -155,6 +156,20 @@ Current deterministic dimensions:
 - `platform_risk`: system/meta leakage markers
 
 The chapter passes only when there are no issues, total score is at least `70`, and every dimension is at least `50`.
+
+Optional LLM reviewer:
+
+```bash
+python -m app.cli review-chapter --book-id 1 --chapter-number 1 --llm-review
+```
+
+By default this uses the dry-run provider and embeds `llm_review` into the quality report without changing the deterministic gate. Use `--live-llm` only when you intentionally want the real reviewer call:
+
+```bash
+python -m app.cli review-chapter --book-id 1 --chapter-number 1 --llm-review --live-llm
+```
+
+LLM reviewer calls create `generation_tasks.task_type=llm_review_chapter` and `llm_request_logs` rows, so reviewer cost and latency are auditable.
 
 ## Revision Loop
 
@@ -519,6 +534,7 @@ MODEL_NAME=deepseek-v3.2
 LLM_TEMPERATURE=0.7
 LLM_DRAFT_MAX_TOKENS=3000
 LLM_REVISION_MAX_TOKENS=3000
+LLM_REVIEW_MAX_TOKENS=1200
 LLM_SMOKE_MAX_TOKENS=20
 LLM_INPUT_PRICE_PER_1M_TOKENS=0
 LLM_OUTPUT_PRICE_PER_1M_TOKENS=0

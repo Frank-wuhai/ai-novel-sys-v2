@@ -328,6 +328,8 @@ def main() -> None:
     p = sub.add_parser("review-chapter")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--llm-review", action="store_true")
+    p.add_argument("--live-llm", action="store_true")
 
     p = sub.add_parser("create-revision-brief")
     p.add_argument("--book-id", type=int, required=True)
@@ -1008,7 +1010,13 @@ def main() -> None:
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
             elif args.cmd == "review-chapter":
-                report = review_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number)
+                report = review_chapter(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    llm_review=args.llm_review,
+                    review_dry_run=not args.live_llm,
+                )
                 print(f"quality_report_id={report.id}")
                 print(f"passed={report.passed}")
                 print(f"score={report.score}")
@@ -1172,6 +1180,7 @@ def main() -> None:
                 print(f"temperature={settings.llm_temperature}")
                 print(f"draft_max_tokens={settings.llm_draft_max_tokens}")
                 print(f"revision_max_tokens={settings.llm_revision_max_tokens}")
+                print(f"review_max_tokens={settings.llm_review_max_tokens}")
                 print(f"smoke_max_tokens={settings.llm_smoke_max_tokens}")
                 print(f"input_price_per_1m_tokens={settings.llm_input_price_per_1m_tokens}")
                 print(f"output_price_per_1m_tokens={settings.llm_output_price_per_1m_tokens}")

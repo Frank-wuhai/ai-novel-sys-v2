@@ -26,7 +26,27 @@ class DraftOutput:
                 "used_brief_points": self.used_brief_points,
             },
             ensure_ascii=False,
-        )
+    )
+
+
+@dataclass
+class ReviewOutput:
+    verdict: str
+    score: int
+    strengths: list[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
+    revision_suggestions: list[str] = field(default_factory=list)
+    risk_flags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "verdict": self.verdict,
+            "score": self.score,
+            "strengths": self.strengths,
+            "issues": self.issues,
+            "revision_suggestions": self.revision_suggestions,
+            "risk_flags": self.risk_flags,
+        }
 
 
 def _extract_json(text: str) -> dict[str, Any]:
@@ -64,3 +84,30 @@ def parse_draft_output(text: str) -> DraftOutput:
         used_brief_points=[str(item) for item in used_points_raw],
     )
 
+
+def parse_review_output(text: str) -> ReviewOutput:
+    data = _extract_json(text)
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict not in {"pass", "needs_revision", "fail"}:
+        raise StructuredOutputError("review output verdict must be pass, needs_revision, or fail")
+    try:
+        score = int(data.get("score"))
+    except (TypeError, ValueError) as exc:
+        raise StructuredOutputError("review output score must be an integer") from exc
+    score = max(0, min(100, score))
+    return ReviewOutput(
+        verdict=verdict,
+        score=score,
+        strengths=_string_list(data.get("strengths")),
+        issues=_string_list(data.get("issues")),
+        revision_suggestions=_string_list(data.get("revision_suggestions")),
+        risk_flags=_string_list(data.get("risk_flags")),
+    )
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise StructuredOutputError("review output list fields must be arrays")
+    return [str(item) for item in value]

@@ -35,6 +35,30 @@ class DryRunProvider(BaseLLMProvider):
 
     def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
         started = time.perf_counter()
+        if "reviewer_json_schema" in prompt:
+            text = json.dumps(
+                {
+                    "verdict": "pass",
+                    "score": 82,
+                    "strengths": ["dry-run reviewer confirms visible pressure, choice, cost, and hook"],
+                    "issues": [],
+                    "revision_suggestions": ["正式使用时请启用 live reviewer 获取真实审稿意见"],
+                    "risk_flags": [],
+                },
+                ensure_ascii=False,
+            )
+            return LLMResponse(
+                text=text,
+                provider=self.name,
+                model="dry-run",
+                prompt_chars=len(prompt),
+                response_chars=len(text),
+                estimated_prompt_tokens=estimate_tokens(prompt),
+                estimated_response_tokens=estimate_tokens(text),
+                elapsed_ms=_elapsed_ms(started),
+                usage=None,
+                request_id="dry-run",
+            )
         paragraphs = [
             "林澈站在旧楼天台边缘时，异象已经逼近到第三次闪烁。远处的广告牌像被看不见的手拧弯，红光一层层压下来，所有声音都被挤成细线。他知道这一章不能只躲开危机，必须把压力推到选择面前。",
             "本章用于验证最小生产闭环，但正文仍按正式章节节奏推进：开场压力先落地，能力触发随后出现，代价落地必须清晰，章末钩子要把读者推向下一章。dry-run only 只作为审计标记存在，不改变故事内的选择和后果。",

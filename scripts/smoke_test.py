@@ -738,7 +738,7 @@ def main() -> int:
         print(cost_summary)
         return 1
     llm_config = run(["show-llm-config"])
-    if "model=deepseek-v3.2" not in llm_config or "draft_max_tokens=3000" not in llm_config:
+    if "model=deepseek-v3.2" not in llm_config or "draft_max_tokens=3000" not in llm_config or "review_max_tokens=1200" not in llm_config:
         print("show-llm-config did not expose default LLM config")
         print(llm_config)
         return 1
@@ -878,7 +878,7 @@ def main() -> int:
         "--summary",
         "未过质检前不得回写长期记忆。",
     ], expect=1)
-    review = run(["review-chapter", "--book-id", str(book_id), "--chapter-number", "1"])
+    review = run(["review-chapter", "--book-id", str(book_id), "--chapter-number", "1", "--llm-review"])
     if "passed=True" not in review:
         print("quality gate did not pass")
         print(review)
@@ -905,12 +905,32 @@ def main() -> int:
             "setting_risk",
             "platform_risk",
         }
+        llm_review = quality_data.get("llm_review", {})
         if quality_data.get("status") != "PASS" or set(quality_data.get("dimensions", {})) != expected_dimensions:
             print("structured quality report is incomplete")
             print(quality_report)
             return 1
+        if (
+            llm_review.get("status") != "completed"
+            or llm_review.get("verdict") != "pass"
+            or llm_review.get("provider") != "dry_run"
+            or not llm_review.get("generation_task_id")
+        ):
+            print("llm reviewer result was not embedded in quality report")
+            print(quality_report)
+            return 1
     finally:
         conn.close()
+    reviewer_tasks = run(["list-generation-tasks", "--book-id", str(book_id), "--task-type", "llm_review_chapter", "--limit", "1"])
+    if "type=llm_review_chapter" not in reviewer_tasks or "status=completed" not in reviewer_tasks:
+        print("LLM reviewer generation task was not recorded")
+        print(reviewer_tasks)
+        return 1
+    reviewer_audit = run(["list-llm-requests", "--book-id", str(book_id), "--limit", "5"])
+    if "type=llm_review_chapter" not in reviewer_audit or "template=review_chapter@v1" not in reviewer_audit:
+        print("LLM reviewer request log was not recorded")
+        print(reviewer_audit)
+        return 1
     run([
         "create-chapter-brief",
         "--book-id",

@@ -40,6 +40,7 @@ class Settings:
     llm_temperature: float = _float_env("LLM_TEMPERATURE", 0.7)
     llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 3000)
     llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 3000)
+    llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 1200)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
     llm_input_price_per_1m_tokens: float = _float_env("LLM_INPUT_PRICE_PER_1M_TOKENS", 0.0)
     llm_output_price_per_1m_tokens: float = _float_env("LLM_OUTPUT_PRICE_PER_1M_TOKENS", 0.0)
