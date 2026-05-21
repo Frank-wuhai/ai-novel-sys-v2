@@ -17,7 +17,14 @@ if str(ROOT) not in sys.path:
 from app.db.session import configure_database, session_scope
 from app.models.entities import Book
 from app.services.dashboard import build_project_snapshot
-from app.services.llm_queue import build_generation_queue_health, run_generation_queue
+from app.services.llm_queue import (
+    build_generation_queue_health,
+    cancel_generation_queue_task,
+    pause_generation_queue_task,
+    resume_generation_queue_task,
+    retry_generation_queue_task,
+    run_generation_queue,
+)
 from app.services.planning import AUTO_ACTIONS, run_next_action
 
 
@@ -262,11 +269,32 @@ HTML = r"""<!doctype html>
         `task #${item.id}`,
         item.chapter || '',
         item.status,
-        item.error_category || ''
+        item.error_category || '',
+        queueButtons(item)
       ]);
       $('queue').innerHTML =
         table(['Status', 'Count'], rows) +
-        table(['Recent', 'Chapter', 'Status', 'Detail'], failureRows.concat(taskRows));
+        table(['Recent Failure', 'Chapter', 'Status', 'Detail'], failureRows) +
+        table(['Task', 'Chapter', 'Status', 'Detail', 'Actions'], taskRows, true);
+    }
+
+    function queueButtons(item) {
+      const buttons = [];
+      if (item.status === 'pending') {
+        buttons.push(actionButton('Pause', 'pause_queue_task', item.id));
+        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+      } else if (item.status === 'paused') {
+        buttons.push(actionButton('Resume', 'resume_queue_task', item.id));
+        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+      } else if (item.status === 'failed') {
+        buttons.push(actionButton('Retry', 'retry_queue_task', item.id));
+        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+      }
+      return `<div class="actions">${buttons.join('')}</div>`;
+    }
+
+    function actionButton(label, action, taskId) {
+      return `<button class="secondary" data-action="${action}" data-task-id="${taskId}">${label}</button>`;
     }
 
     function renderReadiness(readiness) {
@@ -304,6 +332,11 @@ HTML = r"""<!doctype html>
         return;
       }
       postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true}).catch(showError);
+    });
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      postAction(button.dataset.action, {task_id: Number(button.dataset.taskId)}).catch(showError);
     });
 
     function showError(error) {
@@ -493,6 +526,18 @@ def _perform_action(session, payload: dict) -> dict:
                 for result in batch.results
             ],
         }
+    if action == "pause_queue_task":
+        task = pause_generation_queue_task(session, task_id=int(payload.get("task_id") or 0), reason="dashboard")
+        return {"status": task.status, "generation_task_id": task.id}
+    if action == "resume_queue_task":
+        task = resume_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
+        return {"status": task.status, "generation_task_id": task.id}
+    if action == "cancel_queue_task":
+        task = cancel_generation_queue_task(session, task_id=int(payload.get("task_id") or 0), reason="dashboard")
+        return {"status": task.status, "generation_task_id": task.id}
+    if action == "retry_queue_task":
+        task = retry_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
+        return {"status": task.status, "generation_task_id": task.id}
     if action == "run_next_action":
         book_id = int(payload.get("book_id") or 0)
         chapter_number = int(payload.get("chapter_number") or 0)
