@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.automation.openclaw_ops import OpenClawPublishingOperator
+from app.core.config import settings
 from app.llm.providers import get_provider
 from app.llm.schemas import StructuredOutputError, parse_draft_output
 from app.models.entities import (
@@ -30,12 +31,16 @@ from app.workflows.state_machine import WorkflowError, move
 
 
 def _llm_usage_payload(response, *, prompt: str) -> dict:
+    actual_prompt, actual_response, actual_total = _actual_usage_tokens(response.usage)
     return {
         "prompt_chars": len(prompt),
         "response_chars": len(response.text),
         "estimated_prompt_tokens": response.estimated_prompt_tokens,
         "estimated_response_tokens": response.estimated_response_tokens,
         "estimated_total_tokens": response.estimated_prompt_tokens + response.estimated_response_tokens,
+        "actual_prompt_tokens": actual_prompt,
+        "actual_response_tokens": actual_response,
+        "actual_total_tokens": actual_total,
         "elapsed_ms": response.elapsed_ms,
         "usage": response.usage,
         "request_id": response.request_id,
@@ -52,6 +57,7 @@ def _record_generation_llm_log(
     status: str,
     error_category: str = "",
 ) -> LLMRequestLog:
+    actual_prompt, actual_response, actual_total = _actual_usage_tokens(response.usage)
     return record_llm_request(
         session,
         book_id=task.book_id,
@@ -65,10 +71,22 @@ def _record_generation_llm_log(
         response_chars=len(response.text),
         estimated_prompt_tokens=response.estimated_prompt_tokens,
         estimated_response_tokens=response.estimated_response_tokens,
+        actual_prompt_tokens=actual_prompt,
+        actual_response_tokens=actual_response,
+        actual_total_tokens=actual_total,
         elapsed_ms=response.elapsed_ms,
         status=status,
         error_category=error_category,
     )
+
+
+def _actual_usage_tokens(usage: dict | None) -> tuple[int, int, int]:
+    if not usage:
+        return 0, 0, 0
+    prompt = int(usage.get("prompt_tokens") or 0)
+    response = int(usage.get("completion_tokens") or usage.get("response_tokens") or 0)
+    total = int(usage.get("total_tokens") or prompt + response)
+    return prompt, response, total
 
 
 def create_book(session: Session, *, title: str, genre: str = "", platform: str = "") -> Book:
@@ -201,7 +219,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
         constraints=brief.constraints,
     )
     provider = get_provider(dry_run)
-    response = provider.generate(prompt, max_tokens=3000)
+    response = provider.generate(prompt, max_tokens=settings.llm_draft_max_tokens, temperature=settings.llm_temperature)
     try:
         draft = parse_draft_output(response.text)
     except StructuredOutputError as exc:
@@ -406,7 +424,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         reader_promise=foundation.reader_promise,
     )
     provider = get_provider(dry_run)
-    response = provider.generate(prompt, max_tokens=3000)
+    response = provider.generate(prompt, max_tokens=settings.llm_revision_max_tokens, temperature=settings.llm_temperature)
     try:
         draft = parse_draft_output(response.text)
     except StructuredOutputError as exc:

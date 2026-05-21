@@ -7,6 +7,7 @@ import time
 
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
+from app.core.config import settings
 from app.services.budget import check_token_budget
 from app.services.audit import (
     compare_versions,
@@ -30,6 +31,7 @@ from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
 from app.services.db_ops import check_database_health, create_database_backup, list_database_backups
 from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
+from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
 from app.services.llm_queue import (
     build_generation_queue_health,
@@ -384,6 +386,13 @@ def main() -> None:
 
     p = sub.add_parser("llm-usage-summary")
     p.add_argument("--book-id", type=int, default=0)
+
+    p = sub.add_parser("llm-cost-summary")
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--input-price-per-1m", type=float, default=-1.0)
+    p.add_argument("--output-price-per-1m", type=float, default=-1.0)
+
+    sub.add_parser("show-llm-config")
 
     p = sub.add_parser("live-llm-smoke")
     p.add_argument("--yes", action="store_true")
@@ -1123,6 +1132,7 @@ def main() -> None:
                                 f"provider={log.provider}",
                                 f"model={log.model}",
                                 f"tokens={log.estimated_total_tokens}",
+                                f"actual_tokens={log.actual_total_tokens}",
                                 f"elapsed_ms={log.elapsed_ms}",
                                 f"template={log.prompt_template}",
                             ]
@@ -1135,7 +1145,36 @@ def main() -> None:
                 print(f"completed_count={summary.completed_count}")
                 print(f"failed_count={summary.failed_count}")
                 print(f"estimated_total_tokens={summary.estimated_total_tokens}")
+                print(f"actual_total_tokens={summary.actual_total_tokens}")
+                print(f"billable_prompt_tokens={summary.billable_prompt_tokens}")
+                print(f"billable_response_tokens={summary.billable_response_tokens}")
+                print(f"billable_total_tokens={summary.billable_total_tokens}")
                 print(f"elapsed_ms={summary.elapsed_ms}")
+            elif args.cmd == "llm-cost-summary":
+                cost = summarize_llm_cost(
+                    session,
+                    book_id=args.book_id or None,
+                    input_price_per_1m_tokens=None if args.input_price_per_1m < 0 else args.input_price_per_1m,
+                    output_price_per_1m_tokens=None if args.output_price_per_1m < 0 else args.output_price_per_1m,
+                )
+                print(f"book_id={cost.book_id or ''}")
+                print(f"model={cost.model}")
+                print(f"request_count={cost.request_count}")
+                print(f"billable_prompt_tokens={cost.billable_prompt_tokens}")
+                print(f"billable_response_tokens={cost.billable_response_tokens}")
+                print(f"billable_total_tokens={cost.billable_total_tokens}")
+                print(f"input_price_per_1m_tokens={cost.input_price_per_1m_tokens}")
+                print(f"output_price_per_1m_tokens={cost.output_price_per_1m_tokens}")
+                print(f"estimated_cost={cost.estimated_cost}")
+                print(f"currency={cost.currency}")
+            elif args.cmd == "show-llm-config":
+                print(f"model={settings.model_name}")
+                print(f"temperature={settings.llm_temperature}")
+                print(f"draft_max_tokens={settings.llm_draft_max_tokens}")
+                print(f"revision_max_tokens={settings.llm_revision_max_tokens}")
+                print(f"smoke_max_tokens={settings.llm_smoke_max_tokens}")
+                print(f"input_price_per_1m_tokens={settings.llm_input_price_per_1m_tokens}")
+                print(f"output_price_per_1m_tokens={settings.llm_output_price_per_1m_tokens}")
             elif args.cmd == "live-llm-smoke":
                 if not args.yes:
                     raise ValueError("live-llm-smoke requires --yes because it calls the real LLM API")

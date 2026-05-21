@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.core.config import settings
 from app.llm.providers import ArkOpenAIProvider
 from app.services.llm_errors import classify_exception
 
@@ -22,7 +23,11 @@ class LiveLLMSmokeResult:
 def run_live_llm_smoke() -> LiveLLMSmokeResult:
     try:
         provider = ArkOpenAIProvider()
-        response = provider.generate('只回复 JSON: {"ok": true}', max_tokens=20)
+        response = provider.generate(
+            '只回复 JSON: {"ok": true}',
+            max_tokens=settings.llm_smoke_max_tokens,
+            temperature=0,
+        )
     except Exception as exc:
         classification = classify_exception(exc)
         return LiveLLMSmokeResult(

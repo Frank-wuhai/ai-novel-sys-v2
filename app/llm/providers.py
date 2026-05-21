@@ -26,14 +26,14 @@ class LLMResponse:
 class BaseLLMProvider:
     name = "base"
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000) -> LLMResponse:
+    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
         raise NotImplementedError
 
 
 class DryRunProvider(BaseLLMProvider):
     name = "dry_run"
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000) -> LLMResponse:
+    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
         started = time.perf_counter()
         paragraphs = [
             "林澈站在旧楼天台边缘时，异象已经逼近到第三次闪烁。远处的广告牌像被看不见的手拧弯，红光一层层压下来，所有声音都被挤成细线。他知道这一章不能只躲开危机，必须把压力推到选择面前。",
@@ -90,15 +90,20 @@ class ArkOpenAIProvider(BaseLLMProvider):
             raise RuntimeError("ARK_API_KEY and ARK_BASE_URL are required for live LLM calls")
         self.client = OpenAI(api_key=settings.ark_api_key, base_url=settings.ark_base_url)
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000) -> LLMResponse:
+    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
         started = time.perf_counter()
-        result = self.client.chat.completions.create(
-            model=settings.model_name,
-            messages=[
+        kwargs = {
+            "model": settings.model_name,
+            "messages": [
                 {"role": "system", "content": "你是网文生产系统里的受控写作工位，只按结构化输入生成草稿。"},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=max_tokens,
+            "max_tokens": max_tokens,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        result = self.client.chat.completions.create(
+            **kwargs,
         )
         text = result.choices[0].message.content or ""
         usage = _usage_dict(getattr(result, "usage", None))

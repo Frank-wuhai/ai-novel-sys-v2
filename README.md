@@ -40,6 +40,8 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-cost-summary --book-id 1
+python -m app.cli show-llm-config
 python -m app.cli live-llm-smoke --yes
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
@@ -81,6 +83,8 @@ python -m app.cli list-generation-tasks --book-id 1
 python -m app.cli show-generation-task --task-id 1
 python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-cost-summary --book-id 1
+python -m app.cli show-llm-config
 python -m app.cli quality-trends --book-id 1
 python -m app.cli compare-chapter-versions --left-version-id 1 --right-version-id 2
 python -m app.cli list-publish-jobs
@@ -427,7 +431,7 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe schema change"
 ```
 
-The current migration chain starts at `20260521_0001_initial_schema` and includes production operation audit tables in `20260522_0003_production_ops`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
+The current migration chain starts at `20260521_0001_initial_schema` and includes production operation audit tables in `20260522_0003_production_ops`, plus actual LLM usage columns in `20260522_0004_llm_actual_usage`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
 
 Run the smoke test without touching `data/novel.db`:
 
@@ -502,6 +506,28 @@ Each LLM call also writes a durable `llm_request_logs` row. Use these commands t
 ```bash
 python -m app.cli list-llm-requests --book-id 1 --limit 20
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-cost-summary --book-id 1
+python -m app.cli llm-cost-summary --book-id 1 --input-price-per-1m 1.0 --output-price-per-1m 2.0
+```
+
+When provider `usage` is available, the system records actual prompt/completion/total tokens. Otherwise cost reporting falls back to estimated tokens.
+
+LLM runtime settings come from `.env`:
+
+```bash
+MODEL_NAME=deepseek-v3.2
+LLM_TEMPERATURE=0.7
+LLM_DRAFT_MAX_TOKENS=3000
+LLM_REVISION_MAX_TOKENS=3000
+LLM_SMOKE_MAX_TOKENS=20
+LLM_INPUT_PRICE_PER_1M_TOKENS=0
+LLM_OUTPUT_PRICE_PER_1M_TOKENS=0
+```
+
+Inspect the active values:
+
+```bash
+python -m app.cli show-llm-config
 ```
 
 `audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.

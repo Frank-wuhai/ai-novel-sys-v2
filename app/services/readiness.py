@@ -158,7 +158,11 @@ def _llm_config_check(*, live_llm: bool) -> ReadinessCheck:
     if not live_llm:
         return ReadinessCheck("llm", True, f"configured model={settings.model_name} live_check=skipped")
     try:
-        response = ArkOpenAIProvider().generate('只回复 JSON: {"ok": true}', max_tokens=20)
+        response = ArkOpenAIProvider().generate(
+            '只回复 JSON: {"ok": true}',
+            max_tokens=settings.llm_smoke_max_tokens,
+            temperature=0,
+        )
     except Exception as exc:
         return ReadinessCheck("llm", False, f"live_check_failed={type(exc).__name__}: {exc}")
     ok = '"ok"' in response.text or "ok" in response.text.lower()

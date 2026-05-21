@@ -22,6 +22,11 @@ LEGACY_COLUMNS = {
     "foreshadows": {
         "book_id": "INTEGER",
     },
+    "llm_request_logs": {
+        "actual_prompt_tokens": "INTEGER DEFAULT 0",
+        "actual_response_tokens": "INTEGER DEFAULT 0",
+        "actual_total_tokens": "INTEGER DEFAULT 0",
+    },
 }
 
 

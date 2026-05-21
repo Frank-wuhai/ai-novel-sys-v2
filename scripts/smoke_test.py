@@ -697,6 +697,7 @@ def main() -> int:
         '"prompt_template": "draft_chapter@v3"' not in task_detail
         or f'"version_id": {v1}' not in task_detail
         or '"estimated_total_tokens":' not in task_detail
+        or '"actual_total_tokens":' not in task_detail
         or '"elapsed_ms":' not in task_detail
         or '"request_id": "dry-run"' not in task_detail
     ):
@@ -714,9 +715,32 @@ def main() -> int:
         print(llm_requests)
         return 1
     llm_summary = run(["llm-usage-summary", "--book-id", str(book_id)])
-    if "request_count=" not in llm_summary or "completed_count=" not in llm_summary or "estimated_total_tokens=" not in llm_summary:
+    if (
+        "request_count=" not in llm_summary
+        or "completed_count=" not in llm_summary
+        or "estimated_total_tokens=" not in llm_summary
+        or "billable_total_tokens=" not in llm_summary
+    ):
         print("llm-usage-summary did not aggregate request logs")
         print(llm_summary)
+        return 1
+    cost_summary = run([
+        "llm-cost-summary",
+        "--book-id",
+        str(book_id),
+        "--input-price-per-1m",
+        "1",
+        "--output-price-per-1m",
+        "2",
+    ])
+    if "estimated_cost=" not in cost_summary or "currency=USD" not in cost_summary or "billable_total_tokens=" not in cost_summary:
+        print("llm-cost-summary did not estimate configured cost")
+        print(cost_summary)
+        return 1
+    llm_config = run(["show-llm-config"])
+    if "model=deepseek-v3.2" not in llm_config or "draft_max_tokens=3000" not in llm_config:
+        print("show-llm-config did not expose default LLM config")
+        print(llm_config)
         return 1
     conn = sqlite3.connect(ROOT / "data/test-novel.db")
     try:
@@ -1119,7 +1143,7 @@ def main() -> int:
         return 1
     database_health = run(["database-health"])
     if (
-        "latest_migration=20260522_0003_production_ops.py" not in database_health
+        "latest_migration=20260522_0004_llm_actual_usage.py" not in database_health
         or "llm_request_logs" not in database_health
         or "publish_executions" not in database_health
         or "database_backups" not in database_health
