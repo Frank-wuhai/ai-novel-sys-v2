@@ -29,6 +29,7 @@ from app.services.canon import (
 from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
 from app.services.llm_queue import (
+    build_generation_queue_health,
     cancel_generation_queue_task,
     enqueue_draft_chapter,
     enqueue_revise_chapter,
@@ -272,6 +273,9 @@ def main() -> None:
     p = sub.add_parser("list-generation-queue")
     p.add_argument("--status", default="")
     p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("generation-queue-health")
+    p.add_argument("--failure-limit", type=int, default=5)
 
     p = sub.add_parser("run-generation-task")
     p.add_argument("--task-id", type=int, default=0)
@@ -812,6 +816,28 @@ def main() -> None:
             elif args.cmd == "list-generation-queue":
                 for task in list_generation_queue(session, status=args.status, limit=args.limit):
                     print(task_summary(task))
+            elif args.cmd == "generation-queue-health":
+                report = build_generation_queue_health(session, failure_limit=args.failure_limit)
+                print(f"total={report.total}")
+                print("counts=" + ",".join(f"{key}={value}" for key, value in report.counts.items()))
+                print(f"oldest_pending_id={report.oldest_pending_id or ''}")
+                print(f"oldest_pending_chapter={report.oldest_pending_chapter or ''}")
+                for failure in report.latest_failures:
+                    print(
+                        "\t".join(
+                            [
+                                "failure",
+                                f"generation_task_id={failure.task_id}",
+                                f"type={failure.task_type}",
+                                f"chapter={failure.chapter_number or ''}",
+                                f"attempt={failure.attempt}",
+                                f"max_attempts={failure.max_attempts}",
+                                f"error_category={failure.error_category}",
+                                f"retryable={failure.retryable}",
+                                f"error={failure.error}",
+                            ]
+                        )
+                    )
             elif args.cmd == "run-generation-task":
                 result = run_generation_queue_task(session, task_id=args.task_id or None)
                 print(f"generation_task_id={result.task.id}")

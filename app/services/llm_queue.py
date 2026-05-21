@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
@@ -26,6 +27,27 @@ class QueueRunResult:
 @dataclass(frozen=True)
 class QueueBatchResult:
     results: list[QueueRunResult]
+
+
+@dataclass(frozen=True)
+class QueueFailureSummary:
+    task_id: int
+    task_type: str
+    chapter_number: int | None
+    attempt: int
+    max_attempts: int
+    error_category: str
+    error: str
+    retryable: bool
+
+
+@dataclass(frozen=True)
+class QueueHealthReport:
+    total: int
+    counts: dict[str, int]
+    oldest_pending_id: int | None
+    oldest_pending_chapter: int | None
+    latest_failures: list[QueueFailureSummary]
 
 
 def enqueue_draft_chapter(
@@ -62,6 +84,29 @@ def list_generation_queue(
     if status:
         stmt = stmt.where(GenerationTask.status == status)
     return list(session.scalars(stmt))
+
+
+def build_generation_queue_health(session: Session, *, failure_limit: int = 5) -> QueueHealthReport:
+    if failure_limit < 1:
+        raise ValueError("failure_limit must be >= 1")
+    tasks = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.task_type.in_(QUEUE_TYPES))
+            .order_by(GenerationTask.id)
+        )
+    )
+    counts = Counter(task.status for task in tasks)
+    oldest_pending = next((task for task in tasks if task.status == "pending"), None)
+    oldest_pending_input = _loads_json(oldest_pending.input_json) if oldest_pending else {}
+    failed_tasks = [task for task in reversed(tasks) if task.status == "failed"][:failure_limit]
+    return QueueHealthReport(
+        total=len(tasks),
+        counts=dict(sorted(counts.items())),
+        oldest_pending_id=oldest_pending.id if oldest_pending else None,
+        oldest_pending_chapter=oldest_pending_input.get("chapter_number") if oldest_pending else None,
+        latest_failures=[_failure_summary(task) for task in failed_tasks],
+    )
 
 
 def run_generation_queue_task(session: Session, *, task_id: int | None = None) -> QueueRunResult:
@@ -259,6 +304,21 @@ def _latest_child_generation_task(session: Session, *, after_id: int, version_id
         if output_data.get("version_id") == version_id:
             return task
     return None
+
+
+def _failure_summary(task: GenerationTask) -> QueueFailureSummary:
+    input_data = _loads_json(task.input_json)
+    output_data = _loads_json(task.output_json)
+    return QueueFailureSummary(
+        task_id=task.id,
+        task_type=task.task_type,
+        chapter_number=input_data.get("chapter_number"),
+        attempt=int(output_data.get("attempt") or input_data.get("attempt") or 0),
+        max_attempts=int(output_data.get("max_attempts") or input_data.get("max_attempts") or 0),
+        error_category=str(output_data.get("error_category") or ""),
+        error=str(output_data.get("error") or ""),
+        retryable=bool(output_data.get("retryable", False)),
+    )
 
 
 def _loads_json(value: str) -> dict:

@@ -29,6 +29,7 @@ python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 
 python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run --queue-generation
 python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli list-generation-queue --status pending
+python -m app.cli generation-queue-health
 python -m app.cli run-generation-task --task-id 1
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2
@@ -255,6 +256,7 @@ Queued generation tasks track attempts and retryable failures:
 
 ```bash
 python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
+python -m app.cli generation-queue-health --failure-limit 5
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
 python -m app.cli run-generation-worker --book-id 1 --token-budget 100000 --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
@@ -268,6 +270,7 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded by new
 
 Queue task status operations:
 
+- `generation-queue-health`: reports queue status counts, oldest pending task, and recent failure summaries.
 - `pause-generation-task`: moves a pending queue task to `paused`; workers skip it and duplicate queue guards still protect the same chapter.
 - `resume-generation-task`: moves a paused task back to `pending`.
 - `cancel-generation-task`: moves a pending, paused, or failed task to `canceled`.

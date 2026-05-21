@@ -435,6 +435,15 @@ def main() -> int:
         print("canceled task was not listed as canceled")
         print(canceled_list)
         return 1
+    queue_health = run(["generation-queue-health", "--failure-limit", "2"])
+    if (
+        "counts=canceled=1,completed=3,failed=1" not in queue_health
+        or f"failure\tgeneration_task_id={queued_revision_id}" not in queue_health
+        or "error_category=validation" not in queue_health
+    ):
+        print("generation-queue-health did not report expected queue state")
+        print(queue_health)
+        return 1
     run([
         "create-chapter-brief",
         "--book-id",
