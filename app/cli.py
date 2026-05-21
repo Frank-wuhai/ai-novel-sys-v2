@@ -29,10 +29,13 @@ from app.services.canon import (
 from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
 from app.services.llm_queue import (
+    cancel_generation_queue_task,
     enqueue_draft_chapter,
     enqueue_revise_chapter,
     list_generation_queue,
+    pause_generation_queue_task,
     retry_generation_queue_task,
+    resume_generation_queue_task,
     run_generation_queue,
     run_generation_queue_task,
 )
@@ -285,6 +288,17 @@ def main() -> None:
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
+
+    p = sub.add_parser("pause-generation-task")
+    p.add_argument("--task-id", type=int, required=True)
+    p.add_argument("--reason", default="")
+
+    p = sub.add_parser("resume-generation-task")
+    p.add_argument("--task-id", type=int, required=True)
+
+    p = sub.add_parser("cancel-generation-task")
+    p.add_argument("--task-id", type=int, required=True)
+    p.add_argument("--reason", default="")
 
     p = sub.add_parser("create-manual-chapter-version")
     p.add_argument("--book-id", type=int, required=True)
@@ -861,6 +875,18 @@ def main() -> None:
                 print(f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}\tbudget_stopped={budget_stopped}")
             elif args.cmd == "retry-generation-task":
                 task = retry_generation_queue_task(session, task_id=args.task_id)
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+            elif args.cmd == "pause-generation-task":
+                task = pause_generation_queue_task(session, task_id=args.task_id, reason=args.reason)
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+            elif args.cmd == "resume-generation-task":
+                task = resume_generation_queue_task(session, task_id=args.task_id)
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+            elif args.cmd == "cancel-generation-task":
+                task = cancel_generation_queue_task(session, task_id=args.task_id, reason=args.reason)
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
             elif args.cmd == "create-manual-chapter-version":

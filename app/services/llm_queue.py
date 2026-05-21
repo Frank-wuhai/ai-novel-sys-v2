@@ -13,7 +13,7 @@ from app.services.production import draft_chapter, revise_chapter
 QUEUE_DRAFT = "queue_draft_chapter"
 QUEUE_REVISE = "queue_revise_chapter"
 QUEUE_TYPES = {QUEUE_DRAFT, QUEUE_REVISE}
-ACTIVE_STATUSES = {"pending", "running"}
+ACTIVE_STATUSES = {"pending", "running", "paused"}
 
 
 @dataclass(frozen=True)
@@ -162,6 +162,42 @@ def retry_generation_queue_task(session: Session, *, task_id: int) -> Generation
     return task
 
 
+def pause_generation_queue_task(session: Session, *, task_id: int, reason: str = "") -> GenerationTask:
+    task = _get_queue_task(session, task_id=task_id)
+    if task.status != "pending":
+        raise ValueError(f"only pending generation queue tasks can pause, got {task.status}")
+    output_data = _loads_json(task.output_json)
+    output_data["pause_reason"] = reason
+    task.output_json = _dumps_json(output_data)
+    task.status = "paused"
+    session.flush()
+    return task
+
+
+def resume_generation_queue_task(session: Session, *, task_id: int) -> GenerationTask:
+    task = _get_queue_task(session, task_id=task_id)
+    if task.status != "paused":
+        raise ValueError(f"only paused generation queue tasks can resume, got {task.status}")
+    output_data = _loads_json(task.output_json)
+    output_data.pop("pause_reason", None)
+    task.output_json = _dumps_json(output_data)
+    task.status = "pending"
+    session.flush()
+    return task
+
+
+def cancel_generation_queue_task(session: Session, *, task_id: int, reason: str = "") -> GenerationTask:
+    task = _get_queue_task(session, task_id=task_id)
+    if task.status not in {"pending", "paused", "failed"}:
+        raise ValueError(f"only pending, paused, or failed generation queue tasks can cancel, got {task.status}")
+    output_data = _loads_json(task.output_json)
+    output_data["cancel_reason"] = reason
+    task.output_json = _dumps_json(output_data)
+    task.status = "canceled"
+    session.flush()
+    return task
+
+
 def _enqueue(
     session: Session,
     *,
@@ -180,6 +216,15 @@ def _enqueue(
     )
     session.add(task)
     session.flush()
+    return task
+
+
+def _get_queue_task(session: Session, *, task_id: int) -> GenerationTask:
+    task = session.get(GenerationTask, task_id)
+    if not task:
+        raise ValueError(f"generation queue task not found: {task_id}")
+    if task.task_type not in QUEUE_TYPES:
+        raise ValueError(f"not a generation queue task: {task.task_type}")
     return task
 
 

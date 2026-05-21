@@ -32,6 +32,9 @@ python -m app.cli list-generation-queue --status pending
 python -m app.cli run-generation-task --task-id 1
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2
+python -m app.cli pause-generation-task --task-id 1 --reason "manual hold"
+python -m app.cli resume-generation-task --task-id 1
+python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
@@ -256,9 +259,19 @@ python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
 python -m app.cli run-generation-worker --book-id 1 --token-budget 100000 --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
 python -m app.cli retry-generation-task --task-id 1
+python -m app.cli pause-generation-task --task-id 1 --reason "waiting for manual review"
+python -m app.cli resume-generation-task --task-id 1
+python -m app.cli cancel-generation-task --task-id 1 --reason "superseded by new brief"
 ```
 
 `run-generation-worker` is a bounded long-running queue consumer. It exits after `--max-loops`, so it can be supervised by shell scripts, systemd, or another process manager.
+
+Queue task status operations:
+
+- `pause-generation-task`: moves a pending queue task to `paused`; workers skip it and duplicate queue guards still protect the same chapter.
+- `resume-generation-task`: moves a paused task back to `pending`.
+- `cancel-generation-task`: moves a pending, paused, or failed task to `canceled`.
+- `retry-generation-task`: resets a failed task to `pending` with attempt count cleared.
 
 Use `budget-check` or worker `--token-budget` to stop generation once estimated token usage for a book exceeds a local budget.
 

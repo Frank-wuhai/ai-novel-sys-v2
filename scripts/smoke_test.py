@@ -321,6 +321,26 @@ def main() -> int:
         print("queued draft task was not listed as pending")
         print(queue_before)
         return 1
+    paused_queue = run(["pause-generation-task", "--task-id", str(queued_draft_id), "--reason", "smoke pause"])
+    if "status=paused" not in paused_queue:
+        print("pause-generation-task did not pause pending task")
+        print(paused_queue)
+        return 1
+    paused_duplicate = run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"], expect=1)
+    if "active generation queue task already exists" not in paused_duplicate:
+        print("paused queue task did not protect against duplicate enqueue")
+        print(paused_duplicate)
+        return 1
+    paused_worker = run(["run-generation-worker", "--max-loops", "1", "--sleep-seconds", "0", "--max-tasks-per-loop", "1"])
+    if "worker_done\ttotal_executed=0\tidle_loops=1\tbudget_stopped=False" not in paused_worker:
+        print("paused queue task should not be executed by worker")
+        print(paused_worker)
+        return 1
+    resumed_queue = run(["resume-generation-task", "--task-id", str(queued_draft_id)])
+    if "status=pending" not in resumed_queue:
+        print("resume-generation-task did not restore task to pending")
+        print(resumed_queue)
+        return 1
     queued_run = run(["run-generation-task", "--task-id", str(queued_draft_id)])
     queued_version_id = extract_id("version_id", queued_run)
     child_task_id = extract_id("child_generation_task_id", queued_run)
@@ -387,6 +407,33 @@ def main() -> int:
     if "passed=False" not in budget_report or "used_tokens=" not in budget_report:
         print("budget-check did not report exhausted budget")
         print(budget_report)
+        return 1
+    run([
+        "create-chapter-brief",
+        "--book-id",
+        str(book_id),
+        "--chapter-number",
+        "10",
+        "--goal",
+        "验证取消队列任务",
+        "--required-beats",
+        "压力,选择,代价,钩子",
+        "--constraints",
+        "dry-run only",
+    ])
+    canceled_task_id = extract_id(
+        "generation_task_id",
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "10"]),
+    )
+    canceled_task = run(["cancel-generation-task", "--task-id", str(canceled_task_id), "--reason", "smoke cancel"])
+    if "status=canceled" not in canceled_task:
+        print("cancel-generation-task did not cancel pending task")
+        print(canceled_task)
+        return 1
+    canceled_list = run(["list-generation-queue", "--status", "canceled"])
+    if f"{canceled_task_id}\tbook={book_id}\ttype=queue_draft_chapter\tstatus=canceled\tchapter=10" not in canceled_list:
+        print("canceled task was not listed as canceled")
+        print(canceled_list)
         return 1
     run([
         "create-chapter-brief",
