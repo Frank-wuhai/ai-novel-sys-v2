@@ -379,9 +379,14 @@ def main() -> int:
         print(worker_run)
         return 1
     idle_worker = run(["run-generation-worker", "--max-loops", "1", "--sleep-seconds", "0", "--max-tasks-per-loop", "1"])
-    if "worker_done\ttotal_executed=0\tidle_loops=1" not in idle_worker:
+    if "worker_done\ttotal_executed=0\tidle_loops=1\tbudget_stopped=False" not in idle_worker:
         print("run-generation-worker did not report idle loop")
         print(idle_worker)
+        return 1
+    budget_report = run(["budget-check", "--book-id", str(book_id), "--token-budget", "1"])
+    if "passed=False" not in budget_report or "used_tokens=" not in budget_report:
+        print("budget-check did not report exhausted budget")
+        print(budget_report)
         return 1
     run([
         "create-chapter-brief",
@@ -412,6 +417,23 @@ def main() -> int:
     if "action=enqueue_draft_chapter" not in queued_cycle or "next_action=wait_generation_task" not in queued_cycle:
         print("run-book-cycle did not queue generation and stop at wait state")
         print(queued_cycle)
+        return 1
+    budget_worker = run([
+        "run-generation-worker",
+        "--max-loops",
+        "1",
+        "--sleep-seconds",
+        "0",
+        "--max-tasks-per-loop",
+        "1",
+        "--book-id",
+        str(book_id),
+        "--token-budget",
+        "1",
+    ])
+    if "budget_stopped=True" not in budget_worker or "total_executed=0" not in budget_worker:
+        print("run-generation-worker did not stop on exhausted token budget")
+        print(budget_worker)
         return 1
     dashboard = run(["project-dashboard", "--book-id", str(book_id), "--start", "1", "--count", "9"])
     for expected in (

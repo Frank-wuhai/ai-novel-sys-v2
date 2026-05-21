@@ -6,6 +6,7 @@ import time
 
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
+from app.services.budget import check_token_budget
 from app.services.audit import (
     compare_versions,
     get_generation_task,
@@ -228,6 +229,10 @@ def main() -> None:
     p.add_argument("--count", type=int, default=20)
     p.add_argument("--recent-tasks", type=int, default=10)
 
+    p = sub.add_parser("budget-check")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--token-budget", type=int, required=True)
+
     p = sub.add_parser("draft-chapter")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
@@ -259,6 +264,8 @@ def main() -> None:
     p.add_argument("--max-loops", type=int, default=1)
     p.add_argument("--sleep-seconds", type=float, default=5.0)
     p.add_argument("--max-tasks-per-loop", type=int, default=1)
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--token-budget", type=int, default=0)
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
@@ -688,6 +695,14 @@ def main() -> None:
                 )
                 for line in report.lines:
                     print(line)
+            elif args.cmd == "budget-check":
+                report = check_token_budget(session, book_id=args.book_id, token_budget=args.token_budget)
+                print(f"passed={report.passed}")
+                print(f"book_id={report.book_id}")
+                print(f"token_budget={report.token_budget}")
+                print(f"used_tokens={report.used_tokens}")
+                print(f"remaining_tokens={report.remaining_tokens}")
+                print(f"task_count={report.task_count}")
             elif args.cmd == "draft-chapter":
                 version = draft_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number, dry_run=args.dry_run)
                 print(f"version_id={version.id}")
@@ -746,7 +761,18 @@ def main() -> None:
                     raise ValueError("max-tasks-per-loop must be >= 1")
                 total = 0
                 idle_loops = 0
+                budget_stopped = False
                 for loop_index in range(1, args.max_loops + 1):
+                    if args.token_budget:
+                        if not args.book_id:
+                            raise ValueError("--book-id is required when --token-budget is set")
+                        budget = check_token_budget(session, book_id=args.book_id, token_budget=args.token_budget)
+                        print(
+                            f"budget\tbook_id={budget.book_id}\tused_tokens={budget.used_tokens}\tremaining_tokens={budget.remaining_tokens}\tpassed={budget.passed}"
+                        )
+                        if not budget.passed:
+                            budget_stopped = True
+                            break
                     batch = run_generation_queue(session, max_tasks=args.max_tasks_per_loop)
                     total += len(batch.results)
                     print(f"worker_loop={loop_index}\texecuted_count={len(batch.results)}")
@@ -766,7 +792,7 @@ def main() -> None:
                         idle_loops += 1
                     if loop_index < args.max_loops and args.sleep_seconds > 0:
                         time.sleep(args.sleep_seconds)
-                print(f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}")
+                print(f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}\tbudget_stopped={budget_stopped}")
             elif args.cmd == "retry-generation-task":
                 task = retry_generation_queue_task(session, task_id=args.task_id)
                 print(f"generation_task_id={task.id}")
