@@ -260,6 +260,7 @@ python -m app.cli generation-queue-health --failure-limit 5
 python -m app.cli run-generation-queue --max-tasks 3
 python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
 python -m app.cli run-generation-worker --book-id 1 --token-budget 100000 --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
+python scripts/run_generation_worker.py --max-supervisor-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2 --log-dir logs
 python -m app.cli retry-generation-task --task-id 1
 python -m app.cli pause-generation-task --task-id 1 --reason "waiting for manual review"
 python -m app.cli resume-generation-task --task-id 1
@@ -267,6 +268,20 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded by new
 ```
 
 `run-generation-worker` is a bounded long-running queue consumer. It exits after `--max-loops`, so it can be supervised by shell scripts, systemd, or another process manager.
+
+For local unattended runs, use the supervisor script:
+
+```bash
+python scripts/run_generation_worker.py \
+  --book-id 1 \
+  --token-budget 100000 \
+  --max-supervisor-loops 100 \
+  --sleep-seconds 10 \
+  --max-tasks-per-loop 2 \
+  --log-dir logs
+```
+
+The supervisor runs `generation-queue-health` before every worker loop, then runs one bounded `run-generation-worker` pass. It appends all command output to `logs/generation-worker-YYYYMMDD.log`.
 
 Queue task status operations:
 

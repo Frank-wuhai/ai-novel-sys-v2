@@ -26,6 +26,19 @@ def run(args: list[str], *, expect: int = 0) -> str:
     return output
 
 
+def run_script(args: list[str], *, expect: int = 0) -> str:
+    cmd = [str(PYTHON), *args]
+    result = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True)
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != expect:
+        print("SCRIPT FAILED")
+        print(" ".join(cmd))
+        print(f"expected={expect} actual={result.returncode}")
+        print(output)
+        raise SystemExit(1)
+    return output
+
+
 def extract_id(name: str, output: str) -> int:
     match = re.search(rf"{name}=(\d+)", output)
     if not match:
@@ -443,6 +456,29 @@ def main() -> int:
     ):
         print("generation-queue-health did not report expected queue state")
         print(queue_health)
+        return 1
+    supervisor_output = run_script([
+        "scripts/run_generation_worker.py",
+        "--database-url",
+        TEST_DB,
+        "--max-supervisor-loops",
+        "1",
+        "--sleep-seconds",
+        "0",
+        "--max-tasks-per-loop",
+        "1",
+        "--log-dir",
+        "data/test-worker-logs",
+    ])
+    log_file = Path(extract_value("log_file", supervisor_output))
+    if not log_file.exists():
+        print("worker supervisor did not create log file")
+        print(supervisor_output)
+        return 1
+    log_text = log_file.read_text(encoding="utf-8")
+    if "command=generation-queue-health" not in log_text or "command=run-generation-worker" not in log_text:
+        print("worker supervisor log did not include expected commands")
+        print(log_text)
         return 1
     run([
         "create-chapter-brief",
