@@ -14,13 +14,16 @@ from app.models.entities import (
     ChapterReview,
     ChapterVersion,
     GenerationTask,
+    LLMRequestLog,
     PublishJob,
+    PublishExecution,
     PromptTemplate,
     QualityReport,
     StoryFoundation,
 )
 from app.services.canon import format_canon_context
 from app.services.evidence import format_market_evidence_context
+from app.services.llm_audit import record_llm_request
 from app.services.quality import evaluate_chapter
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.workflows.state_machine import WorkflowError, move
@@ -35,7 +38,37 @@ def _llm_usage_payload(response, *, prompt: str) -> dict:
         "estimated_total_tokens": response.estimated_prompt_tokens + response.estimated_response_tokens,
         "elapsed_ms": response.elapsed_ms,
         "usage": response.usage,
+        "request_id": response.request_id,
     }
+
+
+def _record_generation_llm_log(
+    session: Session,
+    *,
+    task: GenerationTask,
+    response,
+    prompt_template: str,
+    prompt: str,
+    status: str,
+    error_category: str = "",
+) -> LLMRequestLog:
+    return record_llm_request(
+        session,
+        book_id=task.book_id,
+        task_type=task.task_type,
+        generation_task_id=task.id,
+        provider=response.provider,
+        model=response.model,
+        request_id=response.request_id,
+        prompt_template=prompt_template,
+        prompt_chars=len(prompt),
+        response_chars=len(response.text),
+        estimated_prompt_tokens=response.estimated_prompt_tokens,
+        estimated_response_tokens=response.estimated_response_tokens,
+        elapsed_ms=response.elapsed_ms,
+        status=status,
+        error_category=error_category,
+    )
 
 
 def create_book(session: Session, *, title: str, genre: str = "", platform: str = "") -> Book:
@@ -193,6 +226,15 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
         )
         session.add(task)
         session.flush()
+        _record_generation_llm_log(
+            session,
+            task=task,
+            response=response,
+            prompt_template=f"{template.name}@{template.version}",
+            prompt=prompt,
+            status="failed",
+            error_category="structured_output",
+        )
         raise
     version = ChapterVersion(
         chapter_id=chapter.id,
@@ -233,6 +275,14 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
     )
     session.add(task)
     session.flush()
+    _record_generation_llm_log(
+        session,
+        task=task,
+        response=response,
+        prompt_template=f"{template.name}@{template.version}",
+        prompt=prompt,
+        status="completed",
+    )
     return version
 
 
@@ -384,6 +434,15 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         )
         session.add(task)
         session.flush()
+        _record_generation_llm_log(
+            session,
+            task=task,
+            response=response,
+            prompt_template=f"{template.name}@{template.version}",
+            prompt=prompt,
+            status="failed",
+            error_category="structured_output",
+        )
         raise
     version = ChapterVersion(
         chapter_id=chapter.id,
@@ -426,6 +485,14 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     session.add(task)
     session.flush()
+    _record_generation_llm_log(
+        session,
+        task=task,
+        response=response,
+        prompt_template=f"{template.name}@{template.version}",
+        prompt=prompt,
+        status="completed",
+    )
     return version
 
 
@@ -486,6 +553,13 @@ def list_publish_jobs(session: Session, *, status: str = "") -> list[PublishJob]
     return list(session.scalars(stmt))
 
 
+def list_publish_executions(session: Session, *, job_id: int | None = None, limit: int = 20) -> list[PublishExecution]:
+    stmt = select(PublishExecution).order_by(PublishExecution.id.desc()).limit(limit)
+    if job_id is not None:
+        stmt = stmt.where(PublishExecution.publish_job_id == job_id)
+    return list(session.scalars(stmt))
+
+
 def publish_job_dry_run(session: Session, *, job_id: int) -> PublishJob:
     job = session.get(PublishJob, job_id)
     if not job:
@@ -536,3 +610,42 @@ def retry_publish_job(session: Session, *, job_id: int) -> PublishJob:
     job.status = move("publish_job", job.status, "queued", "retry")
     session.flush()
     return job
+
+
+def execute_publish_job(session: Session, *, job_id: int, confirm: bool = False) -> tuple[PublishJob, PublishExecution]:
+    job = session.get(PublishJob, job_id)
+    if not job:
+        raise ValueError(f"publish job not found: {job_id}")
+    version = session.get(ChapterVersion, job.chapter_version_id)
+    if not version:
+        raise ValueError("publish job points to missing chapter version")
+    if job.status != "queued":
+        raise ValueError("publish execution requires queued publish job")
+    operator = OpenClawPublishingOperator()
+    if not confirm:
+        result = operator.publish_dry_run(platform=job.platform, title=version.title, content=version.content)
+        execution = PublishExecution(
+            publish_job_id=job.id,
+            platform=job.platform,
+            status="blocked",
+            automation_mode="confirmation_required",
+            report=f"Final publish confirmation required. {result.report}",
+        )
+        session.add(execution)
+        session.flush()
+        return job, execution
+    result = operator.publish_confirmed(platform=job.platform, title=version.title, content=version.content)
+    target_status = "published" if result.status == "published" else "failed"
+    action = "mark_published" if target_status == "published" else "mark_failed"
+    job.status = move("publish_job", job.status, target_status, action)
+    job.result_report = result.report
+    execution = PublishExecution(
+        publish_job_id=job.id,
+        platform=job.platform,
+        status=target_status,
+        automation_mode="confirmed",
+        report=result.report,
+    )
+    session.add(execution)
+    session.flush()
+    return job, execution

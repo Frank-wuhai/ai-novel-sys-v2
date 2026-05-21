@@ -28,6 +28,8 @@ from app.services.canon import (
 )
 from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
+from app.services.db_ops import check_database_health, create_database_backup, list_database_backups
+from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
 from app.services.llm_queue import (
     build_generation_queue_health,
     cancel_generation_queue_task,
@@ -49,10 +51,12 @@ from app.services.production import (
     create_publish_job,
     create_revision_brief,
     draft_chapter,
+    execute_publish_job,
     get_book,
     latest_chapter_version,
     list_books,
     list_chapters,
+    list_publish_executions,
     list_publish_jobs,
     mark_publish_job,
     publish_job_dry_run,
@@ -88,6 +92,7 @@ from app.services.feedback import (
     summarize_platform_feedback,
 )
 from app.services.prompts import get_prompt_template
+from app.services.quality_insights import build_quality_trends
 from app.services.readiness import check_production_readiness
 from app.services.story import (
     create_story_arc,
@@ -365,6 +370,18 @@ def main() -> None:
     p = sub.add_parser("show-generation-task")
     p.add_argument("--task-id", type=int, required=True)
 
+    p = sub.add_parser("list-llm-requests")
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--status", default="")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("llm-usage-summary")
+    p.add_argument("--book-id", type=int, default=0)
+
+    p = sub.add_parser("quality-trends")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--limit", type=int, default=20)
+
     p = sub.add_parser("list-publish-jobs")
     p.add_argument("--status", default="")
 
@@ -374,6 +391,14 @@ def main() -> None:
     p = sub.add_parser("queue-publish-job")
     p.add_argument("--job-id", type=int, required=True)
 
+    p = sub.add_parser("execute-publish-job")
+    p.add_argument("--job-id", type=int, required=True)
+    p.add_argument("--confirm", action="store_true")
+
+    p = sub.add_parser("list-publish-executions")
+    p.add_argument("--job-id", type=int, default=0)
+    p.add_argument("--limit", type=int, default=20)
+
     p = sub.add_parser("mark-publish-job")
     p.add_argument("--job-id", type=int, required=True)
     p.add_argument("--status", choices=["published", "failed"], required=True)
@@ -381,6 +406,14 @@ def main() -> None:
 
     p = sub.add_parser("retry-publish-job")
     p.add_argument("--job-id", type=int, required=True)
+
+    sub.add_parser("database-health")
+
+    p = sub.add_parser("backup-database")
+    p.add_argument("--label", default="")
+
+    p = sub.add_parser("list-database-backups")
+    p.add_argument("--limit", type=int, default=20)
 
     sub.add_parser("seed-prompts")
 
@@ -1033,6 +1066,61 @@ def main() -> None:
                 print(pretty_json(task.input_json))
                 print("output_json=")
                 print(pretty_json(task.output_json))
+            elif args.cmd == "list-llm-requests":
+                for log in list_llm_request_logs(
+                    session,
+                    book_id=args.book_id or None,
+                    status=args.status,
+                    limit=args.limit,
+                ):
+                    print(
+                        "\t".join(
+                            [
+                                str(log.id),
+                                f"book={log.book_id}",
+                                f"task={log.generation_task_id or ''}",
+                                f"type={log.task_type}",
+                                f"status={log.status}",
+                                f"provider={log.provider}",
+                                f"model={log.model}",
+                                f"tokens={log.estimated_total_tokens}",
+                                f"elapsed_ms={log.elapsed_ms}",
+                                f"template={log.prompt_template}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "llm-usage-summary":
+                summary = summarize_llm_usage(session, book_id=args.book_id or None)
+                print(f"book_id={summary.book_id or ''}")
+                print(f"request_count={summary.request_count}")
+                print(f"completed_count={summary.completed_count}")
+                print(f"failed_count={summary.failed_count}")
+                print(f"estimated_total_tokens={summary.estimated_total_tokens}")
+                print(f"elapsed_ms={summary.elapsed_ms}")
+            elif args.cmd == "quality-trends":
+                trend = build_quality_trends(session, book_id=args.book_id, limit=args.limit)
+                weak_counts = ",".join(f"{key}={value}" for key, value in trend.weak_dimension_counts.items())
+                print(f"book_id={trend.book_id}")
+                print(f"report_count={trend.report_count}")
+                print(f"passed_count={trend.passed_count}")
+                print(f"failed_count={trend.failed_count}")
+                print(f"average_score={trend.average_score}")
+                print(f"weak_dimensions={weak_counts}")
+                for item in trend.snapshots:
+                    print(
+                        "\t".join(
+                            [
+                                "quality",
+                                f"chapter={item.chapter_number}",
+                                f"version_id={item.version_id}",
+                                f"quality_report_id={item.quality_report_id}",
+                                f"score={item.score}",
+                                f"passed={item.passed}",
+                                f"issue_count={item.issue_count}",
+                                f"weak={','.join(item.weak_dimensions)}",
+                            ]
+                        )
+                    )
             elif args.cmd == "list-publish-jobs":
                 for job in list_publish_jobs(session, status=args.status):
                     print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}")
@@ -1045,6 +1133,32 @@ def main() -> None:
                 job = queue_publish_job(session, job_id=args.job_id)
                 print(f"publish_job_id={job.id}")
                 print(f"status={job.status}")
+            elif args.cmd == "execute-publish-job":
+                job, execution = execute_publish_job(session, job_id=args.job_id, confirm=args.confirm)
+                print(f"publish_job_id={job.id}")
+                print(f"status={job.status}")
+                print(f"publish_execution_id={execution.id}")
+                print(f"execution_status={execution.status}")
+                print(f"automation_mode={execution.automation_mode}")
+                print(f"report={execution.report}")
+            elif args.cmd == "list-publish-executions":
+                for execution in list_publish_executions(
+                    session,
+                    job_id=args.job_id or None,
+                    limit=args.limit,
+                ):
+                    print(
+                        "\t".join(
+                            [
+                                str(execution.id),
+                                f"job={execution.publish_job_id}",
+                                f"platform={execution.platform}",
+                                f"status={execution.status}",
+                                f"mode={execution.automation_mode}",
+                                f"report={execution.report}",
+                            ]
+                        )
+                    )
             elif args.cmd == "mark-publish-job":
                 job = mark_publish_job(session, job_id=args.job_id, status=args.status, report=args.report)
                 print(f"publish_job_id={job.id}")
@@ -1053,6 +1167,33 @@ def main() -> None:
                 job = retry_publish_job(session, job_id=args.job_id)
                 print(f"publish_job_id={job.id}")
                 print(f"status={job.status}")
+            elif args.cmd == "database-health":
+                health = check_database_health(session)
+                print(f"database_url={health.database_url}")
+                print(f"sqlite_path={health.sqlite_path}")
+                print(f"table_count={health.table_count}")
+                print(f"migration_count={health.migration_count}")
+                print(f"latest_migration={health.latest_migration}")
+                print(f"backup_count={health.backup_count}")
+                print("tables=" + ",".join(health.tables))
+            elif args.cmd == "backup-database":
+                backup = create_database_backup(session, label=args.label)
+                print(f"database_backup_id={backup.id}")
+                print(f"status={backup.status}")
+                print(f"backup_path={backup.backup_path}")
+                print(f"size_bytes={backup.size_bytes}")
+            elif args.cmd == "list-database-backups":
+                for backup in list_database_backups(session, limit=args.limit):
+                    print(
+                        "\t".join(
+                            [
+                                str(backup.id),
+                                f"status={backup.status}",
+                                f"size_bytes={backup.size_bytes}",
+                                f"path={backup.backup_path}",
+                            ]
+                        )
+                    )
             elif args.cmd == "seed-prompts":
                 templates = seed_prompts(session)
                 for template in templates:

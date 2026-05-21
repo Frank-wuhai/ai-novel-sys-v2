@@ -37,6 +37,8 @@ python -m app.cli pause-generation-task --task-id 1 --reason "manual hold"
 python -m app.cli resume-generation-task --task-id 1
 python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
+python -m app.cli list-llm-requests --book-id 1
+python -m app.cli llm-usage-summary --book-id 1
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
@@ -47,6 +49,7 @@ python -m app.cli draft-chapter --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli enqueue-revision --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli retry-generation-task --task-id 1
 python -m app.cli review-chapter --book-id 1 --chapter-number 1
+python -m app.cli quality-trends --book-id 1
 python -m app.cli create-revision-brief --book-id 1 --chapter-number 1
 python -m app.cli revise-chapter --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli record-chapter-continuity --book-id 1 --chapter-number 1 --summary "..."
@@ -54,8 +57,11 @@ python -m app.cli approve-chapter --version-id 1 --reviewer human
 python -m app.cli create-publish-job --version-id 1 --platform "manual"
 python -m app.cli publish-job-dry-run --job-id 1
 python -m app.cli queue-publish-job --job-id 1
-python -m app.cli mark-publish-job --job-id 1 --status published --report "manual test"
+python -m app.cli execute-publish-job --job-id 1 --confirm
+python -m app.cli list-publish-executions --job-id 1
 python -m app.cli retry-publish-job --job-id 1
+python -m app.cli database-health
+python -m app.cli backup-database --label before-release
 ```
 
 OpenClaw should not decide story canon or quality gates. It can execute approved `publish_jobs`.
@@ -71,8 +77,14 @@ python -m app.cli list-versions --book-id 1 --chapter-number 1
 python -m app.cli show-version --version-id 1
 python -m app.cli list-generation-tasks --book-id 1
 python -m app.cli show-generation-task --task-id 1
+python -m app.cli list-llm-requests --book-id 1
+python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli quality-trends --book-id 1
 python -m app.cli compare-chapter-versions --left-version-id 1 --right-version-id 2
 python -m app.cli list-publish-jobs
+python -m app.cli list-publish-executions --job-id 1
+python -m app.cli database-health
+python -m app.cli list-database-backups
 python -m app.cli list-prompts
 python -m app.cli show-prompt --name draft_chapter --version v1
 python -m app.cli list-evidence-sources
@@ -95,6 +107,7 @@ python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 10
 - LLM providers only produce draft text through controlled service calls.
 - OpenClaw/browser automation only operates on approved publish jobs and returns execution reports.
 - A publish dry-run may update `publish_jobs.status` and `publish_jobs.result_report`; it must not post to a real platform.
+- Confirmed publish execution writes `publish_executions` and moves a queued job to `published` or `failed`.
 
 ## Workflow Gates
 
@@ -114,6 +127,8 @@ Publish job status transitions:
 - `failed --retry--> queued`
 
 Commands cannot skip these transitions.
+
+`execute-publish-job` follows the same gate. Without `--confirm`, it records a blocked execution and leaves the job queued. With `--confirm`, it calls the platform automation boundary and records the result in `publish_executions`.
 
 ## Quality Gate
 
@@ -164,6 +179,14 @@ Manual/imported chapter versions can enter the same loop:
 ```bash
 python -m app.cli create-manual-chapter-version --book-id 1 --chapter-number 2 --title "..." --content "..."
 ```
+
+Use `quality-trends` to inspect quality drift across recent reports:
+
+```bash
+python -m app.cli quality-trends --book-id 1 --limit 20
+```
+
+It reports pass/fail counts, average score, weak dimension counts, and the latest chapter-level quality snapshots.
 
 ## Chapter Planner
 
@@ -378,6 +401,16 @@ python -m app.cli --database-url sqlite:///data/test-novel.db reset-dev-db --yes
 python -m app.cli --database-url sqlite:///data/test-novel.db list-books
 ```
 
+Before larger local changes or release preparation, inspect and back up the SQLite database:
+
+```bash
+python -m app.cli database-health
+python -m app.cli backup-database --label before-release
+python -m app.cli list-database-backups
+```
+
+Backups are copied to `data/backups/` and recorded in `database_backups`.
+
 ## Database Migrations
 
 Alembic owns schema migrations for durable databases:
@@ -387,7 +420,7 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe schema change"
 ```
 
-The initial migration is `20260521_0001_initial_schema`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
+The current migration chain starts at `20260521_0001_initial_schema` and includes production operation audit tables in `20260522_0003_production_ops`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
 
 Run the smoke test without touching `data/novel.db`:
 
@@ -454,7 +487,15 @@ Generation task output records lightweight usage telemetry:
 - `estimated_response_tokens`
 - `estimated_total_tokens`
 - `elapsed_ms`
+- `request_id`
 - provider `usage` when available
+
+Each LLM call also writes a durable `llm_request_logs` row. Use these commands to inspect live and dry-run production cost/latency:
+
+```bash
+python -m app.cli list-llm-requests --book-id 1 --limit 20
+python -m app.cli llm-usage-summary --book-id 1
+```
 
 `audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.
 

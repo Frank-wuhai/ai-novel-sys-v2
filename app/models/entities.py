@@ -232,6 +232,28 @@ class GenerationTask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class LLMRequestLog(Base):
+    __tablename__ = "llm_request_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    generation_task_id: Mapped[int | None] = mapped_column(ForeignKey("generation_tasks.id"), nullable=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    task_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    provider: Mapped[str] = mapped_column(String(120), default="")
+    model: Mapped[str] = mapped_column(String(160), default="")
+    request_id: Mapped[str] = mapped_column(String(160), default="")
+    prompt_template: Mapped[str] = mapped_column(String(160), default="")
+    prompt_chars: Mapped[int] = mapped_column(Integer, default=0)
+    response_chars: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_response_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    elapsed_ms: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(50), default="completed")
+    error_category: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class PromptTemplate(Base):
     __tablename__ = "prompt_templates"
 
@@ -261,6 +283,31 @@ class PublishJob(Base):
     status: Mapped[str] = mapped_column(String(50), default="pending")
     automation_payload: Mapped[str] = mapped_column(Text, default="{}")
     result_report: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class PublishExecution(Base):
+    __tablename__ = "publish_executions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    publish_job_id: Mapped[int] = mapped_column(ForeignKey("publish_jobs.id"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    automation_mode: Mapped[str] = mapped_column(String(80), default="dry_run")
+    report: Mapped[str] = mapped_column(Text, default="")
+    artifact_path: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class DatabaseBackup(Base):
+    __tablename__ = "database_backups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    database_url: Mapped[str] = mapped_column(Text, nullable=False)
+    backup_path: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="completed")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    report: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

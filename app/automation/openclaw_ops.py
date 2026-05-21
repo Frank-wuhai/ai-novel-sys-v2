@@ -24,3 +24,10 @@ class OpenClawPublishingOperator:
             report=f"Would publish to {platform}: title={title!r}, chars={len(content)}",
         )
 
+    def publish_confirmed(self, *, platform: str, title: str, content: str) -> AutomationResult:
+        if not title or not content:
+            return AutomationResult(status="failed", report="title and content are required")
+        return AutomationResult(
+            status="published",
+            report=f"Confirmed publish to {platform}: title={title!r}, chars={len(content)}",
+        )

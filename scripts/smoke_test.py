@@ -644,9 +644,25 @@ def main() -> int:
         or f'"version_id": {v1}' not in task_detail
         or '"estimated_total_tokens":' not in task_detail
         or '"elapsed_ms":' not in task_detail
+        or '"request_id": "dry-run"' not in task_detail
     ):
         print("show-generation-task did not include expected JSON")
         print(task_detail)
+        return 1
+    llm_requests = run(["list-llm-requests", "--book-id", str(book_id), "--limit", "5"])
+    if (
+        f"task={draft_task_id}" not in llm_requests
+        or "type=draft_chapter" not in llm_requests
+        or "provider=dry_run" not in llm_requests
+        or "model=dry-run" not in llm_requests
+    ):
+        print("list-llm-requests did not show draft audit log")
+        print(llm_requests)
+        return 1
+    llm_summary = run(["llm-usage-summary", "--book-id", str(book_id)])
+    if "request_count=" not in llm_summary or "completed_count=" not in llm_summary or "estimated_total_tokens=" not in llm_summary:
+        print("llm-usage-summary did not aggregate request logs")
+        print(llm_summary)
         return 1
     conn = sqlite3.connect(ROOT / "data/test-novel.db")
     try:
@@ -788,6 +804,11 @@ def main() -> int:
     if "passed=True" not in review:
         print("quality gate did not pass")
         print(review)
+        return 1
+    quality_trend = run(["quality-trends", "--book-id", str(book_id), "--limit", "5"])
+    if "passed_count=" not in quality_trend or "failed_count=0" not in quality_trend or "average_score=" not in quality_trend:
+        print("quality-trends did not summarize quality reports")
+        print(quality_trend)
         return 1
     conn = sqlite3.connect(ROOT / "data/test-novel.db")
     try:
@@ -1018,7 +1039,22 @@ def main() -> int:
         print("run-next-action did not retry failed publish job")
         print(auto_retry)
         return 1
-    run(["mark-publish-job", "--job-id", str(job_id), "--status", "published", "--report", "smoke published"])
+    execution_block = run(["execute-publish-job", "--job-id", str(job_id)])
+    if "execution_status=blocked" not in execution_block or "automation_mode=confirmation_required" not in execution_block:
+        print("execute-publish-job did not require confirmation by default")
+        print(execution_block)
+        return 1
+    execution_publish = run(["execute-publish-job", "--job-id", str(job_id), "--confirm"])
+    execution_id = extract_id("publish_execution_id", execution_publish)
+    if "status=published" not in execution_publish or "execution_status=published" not in execution_publish:
+        print("execute-publish-job did not publish confirmed job")
+        print(execution_publish)
+        return 1
+    executions = run(["list-publish-executions", "--job-id", str(job_id)])
+    if f"{execution_id}\tjob={job_id}" not in executions or "mode=confirmed" not in executions:
+        print("list-publish-executions did not show confirmed execution")
+        print(executions)
+        return 1
     if "next_action=done" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "1", "--count", "1"]):
         print("planner did not mark published chapter done")
         return 1
@@ -1026,6 +1062,28 @@ def main() -> int:
     if "active publish job already exists" not in duplicate:
         print("duplicate publish job guard did not trigger expected message")
         print(duplicate)
+        return 1
+    database_health = run(["database-health"])
+    if (
+        "latest_migration=20260522_0003_production_ops.py" not in database_health
+        or "llm_request_logs" not in database_health
+        or "publish_executions" not in database_health
+        or "database_backups" not in database_health
+    ):
+        print("database-health did not include production operation tables")
+        print(database_health)
+        return 1
+    backup_output = run(["backup-database", "--label", "smoke"])
+    backup_id = extract_id("database_backup_id", backup_output)
+    backup_path = Path(extract_value("backup_path", backup_output))
+    if not backup_path.exists() or backup_path.stat().st_size <= 0:
+        print("backup-database did not create a readable backup")
+        print(backup_output)
+        return 1
+    backup_list = run(["list-database-backups", "--limit", "5"])
+    if f"{backup_id}\tstatus=completed" not in backup_list:
+        print("list-database-backups did not show created backup")
+        print(backup_list)
         return 1
     print("smoke-test: PASS")
     print(f"database={TEST_DB}")

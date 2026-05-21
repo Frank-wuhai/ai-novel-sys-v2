@@ -20,6 +20,7 @@ class LLMResponse:
     estimated_response_tokens: int = 0
     elapsed_ms: int = 0
     usage: dict | None = None
+    request_id: str = ""
 
 
 class BaseLLMProvider:
@@ -77,6 +78,7 @@ class DryRunProvider(BaseLLMProvider):
             estimated_response_tokens=estimate_tokens(text),
             elapsed_ms=_elapsed_ms(started),
             usage=None,
+            request_id="dry-run",
         )
 
 
@@ -100,6 +102,7 @@ class ArkOpenAIProvider(BaseLLMProvider):
         )
         text = result.choices[0].message.content or ""
         usage = _usage_dict(getattr(result, "usage", None))
+        request_id = getattr(result, "id", "") or ""
         return LLMResponse(
             text=text,
             provider=self.name,
@@ -110,6 +113,7 @@ class ArkOpenAIProvider(BaseLLMProvider):
             estimated_response_tokens=estimate_tokens(text),
             elapsed_ms=_elapsed_ms(started),
             usage=usage,
+            request_id=request_id,
         )
 
 
