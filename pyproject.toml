@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Deterministic AI novel production system with browser automation as an external operations layer."
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.13",
   "SQLAlchemy>=2.0",
   "python-dotenv>=1.0",
   "pydantic>=2.0",

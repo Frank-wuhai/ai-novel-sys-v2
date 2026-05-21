@@ -321,6 +321,17 @@ python -m app.cli --database-url sqlite:///data/test-novel.db reset-dev-db --yes
 python -m app.cli --database-url sqlite:///data/test-novel.db list-books
 ```
 
+## Database Migrations
+
+Alembic owns schema migrations for durable databases:
+
+```bash
+alembic upgrade head
+alembic revision --autogenerate -m "describe schema change"
+```
+
+The initial migration is `20260521_0001_initial_schema`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
+
 Run the smoke test without touching `data/novel.db`:
 
 ```bash
