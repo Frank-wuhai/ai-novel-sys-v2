@@ -373,10 +373,15 @@ def main() -> int:
             "dry-run only",
         ])
         run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", str(chapter_number)])
-    batch_run = run(["run-generation-queue", "--max-tasks", "2"])
-    if "executed_count=2" not in batch_run or batch_run.count("status=completed") != 2:
-        print("run-generation-queue did not complete two queued tasks")
-        print(batch_run)
+    worker_run = run(["run-generation-worker", "--max-loops", "2", "--sleep-seconds", "0", "--max-tasks-per-loop", "1"])
+    if "worker_done\ttotal_executed=2" not in worker_run or worker_run.count("status=completed") != 2:
+        print("run-generation-worker did not complete two queued tasks")
+        print(worker_run)
+        return 1
+    idle_worker = run(["run-generation-worker", "--max-loops", "1", "--sleep-seconds", "0", "--max-tasks-per-loop", "1"])
+    if "worker_done\ttotal_executed=0\tidle_loops=1" not in idle_worker:
+        print("run-generation-worker did not report idle loop")
+        print(idle_worker)
         return 1
     run([
         "create-chapter-brief",

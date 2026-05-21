@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
@@ -253,6 +254,11 @@ def main() -> None:
 
     p = sub.add_parser("run-generation-queue")
     p.add_argument("--max-tasks", type=int, default=1)
+
+    p = sub.add_parser("run-generation-worker")
+    p.add_argument("--max-loops", type=int, default=1)
+    p.add_argument("--sleep-seconds", type=float, default=5.0)
+    p.add_argument("--max-tasks-per-loop", type=int, default=1)
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
@@ -733,6 +739,34 @@ def main() -> None:
                             ]
                         )
                     )
+            elif args.cmd == "run-generation-worker":
+                if args.max_loops < 1:
+                    raise ValueError("max-loops must be >= 1")
+                if args.max_tasks_per_loop < 1:
+                    raise ValueError("max-tasks-per-loop must be >= 1")
+                total = 0
+                idle_loops = 0
+                for loop_index in range(1, args.max_loops + 1):
+                    batch = run_generation_queue(session, max_tasks=args.max_tasks_per_loop)
+                    total += len(batch.results)
+                    print(f"worker_loop={loop_index}\texecuted_count={len(batch.results)}")
+                    for result in batch.results:
+                        print(
+                            "\t".join(
+                                [
+                                    "executed",
+                                    f"generation_task_id={result.task.id}",
+                                    f"status={result.task.status}",
+                                    f"version_id={result.version_id or ''}",
+                                    f"child_generation_task_id={result.child_generation_task_id or ''}",
+                                ]
+                            )
+                        )
+                    if not batch.results:
+                        idle_loops += 1
+                    if loop_index < args.max_loops and args.sleep_seconds > 0:
+                        time.sleep(args.sleep_seconds)
+                print(f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}")
             elif args.cmd == "retry-generation-task":
                 task = retry_generation_queue_task(session, task_id=args.task_id)
                 print(f"generation_task_id={task.id}")
