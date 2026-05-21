@@ -73,6 +73,12 @@ from app.services.evidence import (
     list_evidence_sources,
     list_market_signals,
 )
+from app.services.feedback import (
+    convert_feedback_to_market_signal,
+    list_platform_feedback,
+    record_platform_feedback,
+    summarize_platform_feedback,
+)
 from app.services.prompts import get_prompt_template
 from app.services.readiness import check_production_readiness
 from app.services.story import (
@@ -385,6 +391,32 @@ def main() -> None:
     p = sub.add_parser("audit-evidence")
     p.add_argument("--genre", default="")
     p.add_argument("--min-confidence", type=int, default=0)
+
+    p = sub.add_parser("record-feedback")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--platform", required=True)
+    p.add_argument("--metric-name", required=True)
+    p.add_argument("--metric-value", default="")
+    p.add_argument("--raw-text", default="")
+    p.add_argument("--chapter-number", type=int, default=0)
+
+    p = sub.add_parser("list-feedback")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--platform", default="")
+    p.add_argument("--metric-name", default="")
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("feedback-summary")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("feedback-to-market-signal")
+    p.add_argument("--feedback-id", type=int, required=True)
+    p.add_argument("--genre", required=True)
+    p.add_argument("--signal", required=True)
+    p.add_argument("--confidence", type=int, default=65)
+    p.add_argument("--source-status", default="verified")
+    p.add_argument("--source-reliability", type=int, default=3)
 
     p = sub.add_parser("add-character")
     p.add_argument("--book-id", type=int, required=True)
@@ -1007,6 +1039,74 @@ def main() -> None:
                             ]
                         )
                     )
+            elif args.cmd == "record-feedback":
+                feedback = record_platform_feedback(
+                    session,
+                    book_id=args.book_id,
+                    platform=args.platform,
+                    metric_name=args.metric_name,
+                    metric_value=args.metric_value,
+                    raw_text=args.raw_text,
+                    chapter_number=args.chapter_number or None,
+                )
+                print(f"feedback_id={feedback.id}")
+                print(f"book_id={feedback.book_id}")
+                print(f"chapter_id={feedback.chapter_id or ''}")
+                print(f"platform={feedback.platform}")
+                print(f"metric_name={feedback.metric_name}")
+            elif args.cmd == "list-feedback":
+                for feedback in list_platform_feedback(
+                    session,
+                    book_id=args.book_id,
+                    platform=args.platform,
+                    metric_name=args.metric_name,
+                    limit=args.limit,
+                ):
+                    print(
+                        "\t".join(
+                            [
+                                str(feedback.id),
+                                f"book={feedback.book_id}",
+                                f"chapter={feedback.chapter_id or ''}",
+                                f"platform={feedback.platform}",
+                                f"metric={feedback.metric_name}",
+                                f"value={feedback.metric_value}",
+                                f"raw={feedback.raw_text}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "feedback-summary":
+                summary = summarize_platform_feedback(session, book_id=args.book_id, limit=args.limit)
+                by_metric = ",".join(f"{key}={value}" for key, value in sorted(summary.by_metric.items()))
+                by_platform = ",".join(f"{key}={value}" for key, value in sorted(summary.by_platform.items()))
+                print(f"total={summary.total}")
+                print(f"by_metric={by_metric}")
+                print(f"by_platform={by_platform}")
+                for feedback in summary.latest:
+                    print(
+                        "\t".join(
+                            [
+                                "latest",
+                                f"feedback_id={feedback.id}",
+                                f"chapter={feedback.chapter_id or ''}",
+                                f"platform={feedback.platform}",
+                                f"metric={feedback.metric_name}",
+                                f"value={feedback.metric_value}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "feedback-to-market-signal":
+                source_id, signal_id = convert_feedback_to_market_signal(
+                    session,
+                    feedback_id=args.feedback_id,
+                    genre=args.genre,
+                    signal_text=args.signal,
+                    confidence=args.confidence,
+                    source_status=args.source_status,
+                    source_reliability=args.source_reliability,
+                )
+                print(f"evidence_source_id={source_id}")
+                print(f"market_signal_id={signal_id}")
             elif args.cmd == "add-character":
                 character = add_character(
                     session,

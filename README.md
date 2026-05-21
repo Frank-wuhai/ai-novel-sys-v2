@@ -10,6 +10,9 @@ python -m app.cli seed-prompts
 python -m app.cli add-evidence-source --source-id "source-001" --title "..." --url "..." --reliability 4 --status verified
 python -m app.cli add-market-signal --source-id "source-001" --genre "玄幻都市" --signal "..." --confidence 75
 python -m app.cli create-book --title "Demo" --genre "玄幻都市" --platform "番茄小说"
+python -m app.cli record-feedback --book-id 1 --platform "番茄小说" --metric-name "comment" --metric-value "..." --raw-text "..."
+python -m app.cli feedback-summary --book-id 1
+python -m app.cli feedback-to-market-signal --feedback-id 1 --genre "玄幻都市" --signal "..." --confidence 70
 python -m app.cli add-character --book-id 1 --name "主角" --role "protagonist"
 python -m app.cli add-world-rule --book-id 1 --category "能力代价" --rule "..."
 python -m app.cli add-power-system --book-id 1 --name "..." --rules "..." --costs "..." --limits "..."
@@ -68,6 +71,8 @@ python -m app.cli show-prompt --name draft_chapter --version v1
 python -m app.cli list-evidence-sources
 python -m app.cli list-market-signals --genre "玄幻都市" --usable-only
 python -m app.cli show-evidence-context --genre "玄幻都市"
+python -m app.cli list-feedback --book-id 1
+python -m app.cli feedback-summary --book-id 1
 python -m app.cli show-canon-context --book-id 1
 python -m app.cli show-story-bible --book-id 1
 python -m app.cli show-outline --book-id 1
@@ -400,6 +405,35 @@ Generation task output records lightweight usage telemetry:
 - provider `usage` when available
 
 `audit-evidence` explains why each market signal is or is not usable, including low confidence, missing source, unverified source, and low source reliability.
+
+## Feedback Loop
+
+Platform feedback is stored as raw operating data before it becomes evidence:
+
+```bash
+python -m app.cli record-feedback \
+  --book-id 1 \
+  --chapter-number 3 \
+  --platform "番茄小说" \
+  --metric-name "comment" \
+  --metric-value "needs-stronger-hook" \
+  --raw-text "读者反馈：章末钩子可以更明确。"
+
+python -m app.cli list-feedback --book-id 1 --metric-name comment
+python -m app.cli feedback-summary --book-id 1
+```
+
+After human judgment, convert useful feedback into a market signal:
+
+```bash
+python -m app.cli feedback-to-market-signal \
+  --feedback-id 1 \
+  --genre "玄幻都市" \
+  --signal "读者反馈显示章末钩子需要更明确。" \
+  --confidence 70
+```
+
+This creates an evidence source named `feedback-<id>` and a linked market signal. The signal still passes through the normal evidence usability checks before it can affect future drafts.
 
 ## Story Bible And Outline
 

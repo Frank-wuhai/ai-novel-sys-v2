@@ -581,6 +581,53 @@ def main() -> int:
             return 1
     finally:
         conn.close()
+    feedback_id = extract_id(
+        "feedback_id",
+        run([
+            "record-feedback",
+            "--book-id",
+            str(book_id),
+            "--chapter-number",
+            "3",
+            "--platform",
+            "manual",
+            "--metric-name",
+            "comment",
+            "--metric-value",
+            "needs-stronger-hook",
+            "--raw-text",
+            "读者反馈：章末钩子可以更明确。",
+        ]),
+    )
+    feedback_list = run(["list-feedback", "--book-id", str(book_id), "--metric-name", "comment"])
+    if f"{feedback_id}\tbook={book_id}" not in feedback_list or "raw=读者反馈：章末钩子可以更明确。" not in feedback_list:
+        print("list-feedback did not show recorded platform feedback")
+        print(feedback_list)
+        return 1
+    feedback_summary = run(["feedback-summary", "--book-id", str(book_id)])
+    if "total=1" not in feedback_summary or "by_metric=comment=1" not in feedback_summary or "by_platform=manual=1" not in feedback_summary:
+        print("feedback-summary did not aggregate recorded feedback")
+        print(feedback_summary)
+        return 1
+    feedback_signal_id = extract_id(
+        "market_signal_id",
+        run([
+            "feedback-to-market-signal",
+            "--feedback-id",
+            str(feedback_id),
+            "--genre",
+            "玄幻都市",
+            "--signal",
+            "读者反馈显示章末钩子需要更明确。",
+            "--confidence",
+            "70",
+        ]),
+    )
+    feedback_audit = run(["audit-evidence", "--genre", "玄幻都市", "--min-confidence", "70"])
+    if f"signal_id={feedback_signal_id}" not in feedback_audit or f"source=feedback-{feedback_id}" not in feedback_audit:
+        print("feedback-derived market signal was not auditable")
+        print(feedback_audit)
+        return 1
     run([
         "record-chapter-continuity",
         "--book-id",
