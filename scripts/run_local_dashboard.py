@@ -45,7 +45,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI Novel System v2</title>
+  <title>AI 小说生产系统 v2</title>
   <style>
     :root {
       color-scheme: light;
@@ -168,70 +168,70 @@ HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <h1>AI Novel System v2</h1>
-    <div id="state" class="muted">Loading</div>
+    <h1>AI 小说生产系统 v2</h1>
+    <div id="state" class="muted">加载中</div>
   </header>
   <main>
     <section class="toolbar">
-      <label>Book<select id="book"></select></label>
-      <label>Start<input id="start" type="number" min="1" value="1"></label>
-      <label>Count<input id="count" type="number" min="1" value="20"></label>
-      <label>Chapter<input id="chapter" type="number" min="1" value="1"></label>
-      <button id="refresh">Refresh</button>
+      <label>作品<select id="book"></select></label>
+      <label>起始章<input id="start" type="number" min="1" value="1"></label>
+      <label>章数<input id="count" type="number" min="1" value="20"></label>
+      <label>当前章<input id="chapter" type="number" min="1" value="1"></label>
+      <button id="refresh">刷新</button>
     </section>
     <section class="summary" id="summary"></section>
     <section class="grid">
       <div class="stack">
         <section class="panel">
-          <h2>Chapters</h2>
+          <h2>章节列表</h2>
           <div id="chapters"></div>
         </section>
         <section class="panel">
-          <h2>Human Decisions</h2>
+          <h2>人工决策</h2>
           <div id="decisions"></div>
         </section>
       </div>
       <div class="stack">
         <section class="panel">
-          <h2>Queue Health</h2>
+          <h2>队列健康</h2>
           <div id="queue"></div>
         </section>
         <section class="panel">
-          <h2>Readiness</h2>
+          <h2>生产就绪</h2>
           <div id="readiness"></div>
         </section>
         <section class="panel">
-          <h2>Recommendation</h2>
+          <h2>下一步建议</h2>
           <div id="recommendation" class="empty"></div>
           <div class="actions">
-            <button id="runQueue">Run Queue Once</button>
-            <button id="runNext" class="secondary">Run Safe Next Action</button>
+            <button id="runQueue">运行一次队列</button>
+            <button id="runNext" class="secondary">执行安全下一步</button>
           </div>
         </section>
       </div>
     </section>
     <section class="panel full">
-      <h2>Chapter Detail</h2>
+      <h2>章节详情</h2>
       <div id="chapterDetail"></div>
     </section>
     <section class="panel full">
-      <h2>Feedback</h2>
+      <h2>读者反馈</h2>
       <div id="feedback"></div>
       <div class="forms">
-        <label>Platform<input id="feedbackPlatform" value="manual"></label>
-        <label>Metric<input id="feedbackMetric" value="comment"></label>
-        <label>Value<input id="feedbackValue" value=""></label>
-        <label>Target<input id="feedbackTarget" type="number" min="1" value="1"></label>
-        <button id="recordFeedback">Record Feedback</button>
-        <label style="grid-column: 1 / -1;">Raw Text<textarea id="feedbackRaw"></textarea></label>
-        <label>Feedback IDs<input id="adjustmentFeedbackIds" placeholder="1,2"></label>
-        <label>Adjustment Target<input id="adjustmentTarget" type="number" min="1" value="1"></label>
-        <label style="grid-column: span 2;">Adjustment Text<input id="adjustmentText"></label>
-        <button id="createAdjustment">Create Adjustment</button>
+        <label>平台<input id="feedbackPlatform" value="manual"></label>
+        <label>指标<input id="feedbackMetric" value="comment"></label>
+        <label>数值<input id="feedbackValue" value=""></label>
+        <label>目标章<input id="feedbackTarget" type="number" min="1" value="1"></label>
+        <button id="recordFeedback">记录反馈</button>
+        <label style="grid-column: 1 / -1;">反馈原文<textarea id="feedbackRaw"></textarea></label>
+        <label>反馈 ID<input id="adjustmentFeedbackIds" placeholder="1,2"></label>
+        <label>调整目标章<input id="adjustmentTarget" type="number" min="1" value="1"></label>
+        <label style="grid-column: span 2;">调整内容<input id="adjustmentText"></label>
+        <button id="createAdjustment">创建调整</button>
       </div>
     </section>
     <section class="panel full">
-      <h2>Knowledge Context</h2>
+      <h2>知识上下文</h2>
       <div id="knowledge"></div>
     </section>
   </main>
@@ -245,13 +245,13 @@ HTML = r"""<!doctype html>
         `<option value="${book.id}">${escapeHtml(book.title)} #${book.id}</option>`
       ).join('');
       if (books.length) await refresh();
-      else $('state').textContent = 'No books';
+      else $('state').textContent = '暂无作品';
     }
 
     async function refresh() {
       const bookId = $('book').value;
       if (!bookId) return;
-      $('state').textContent = 'Refreshing';
+      $('state').textContent = '刷新中';
       const params = new URLSearchParams({book_id: bookId, start: $('start').value, count: $('count').value});
       const chapterParams = new URLSearchParams({book_id: bookId, chapter_number: $('chapter').value});
       const [snapshot, health] = await Promise.all([
@@ -273,7 +273,7 @@ HTML = r"""<!doctype html>
       renderFeedback(feedback);
       renderKnowledge(knowledge);
       $('recommendation').innerHTML = `<div class="command">${escapeHtml(snapshot.recommendation)}</div>`;
-      $('state').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
     }
 
     async function fetchJson(path) {
@@ -283,7 +283,7 @@ HTML = r"""<!doctype html>
     }
 
     async function postAction(action, payload = {}) {
-      $('state').textContent = `Running ${action}`;
+      $('state').textContent = `执行中：${actionLabel(action)}`;
       const response = await fetch('/api/action', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -291,7 +291,7 @@ HTML = r"""<!doctype html>
       });
       if (!response.ok) throw new Error(await response.text());
       const result = await response.json();
-      $('state').textContent = `${action}: ${result.status || 'done'}`;
+      $('state').textContent = `${actionLabel(action)}：${statusLabel(result.status || 'done')}`;
       await refresh();
     }
 
@@ -299,11 +299,11 @@ HTML = r"""<!doctype html>
       const queueCounts = health.counts || {};
       const decisions = snapshot.human_decisions;
       $('summary').innerHTML = [
-        metric('Readiness', snapshot.readiness.passed ? 'PASS' : 'BLOCKED', snapshot.readiness.passed ? 'ok' : 'bad'),
-        metric('Pending', queueCounts.pending || 0, 'warn'),
-        metric('Failed', queueCounts.failed || 0, (queueCounts.failed || 0) ? 'bad' : 'ok'),
-        metric('Tokens', snapshot.generation_recent.estimated_tokens || 0, ''),
-        metric('Decisions', decisions.continuity + decisions.approval + decisions.publish + decisions.inspect, 'warn')
+        metric('就绪状态', snapshot.readiness.passed ? '通过' : '阻塞', snapshot.readiness.passed ? 'ok' : 'bad'),
+        metric('待执行', queueCounts.pending || 0, 'warn'),
+        metric('失败', queueCounts.failed || 0, (queueCounts.failed || 0) ? 'bad' : 'ok'),
+        metric('Token', snapshot.generation_recent.estimated_tokens || 0, ''),
+        metric('人工事项', decisions.continuity + decisions.approval + decisions.publish + decisions.inspect, 'warn')
       ].join('');
     }
 
@@ -313,19 +313,19 @@ HTML = r"""<!doctype html>
 
     function renderChapters(chapters) {
       if (!chapters.length) return empty('chapters');
-      $('chapters').innerHTML = table(['#', 'Version', 'Quality', 'Next', 'Reason'], chapters.map((item) => [
+      $('chapters').innerHTML = table(['章', '版本状态', '质检', '下一步', '原因'], chapters.map((item) => [
         `<button class="secondary" data-select-chapter="${item.number}">${item.number}</button>`,
-        escapeHtml(item.version_status || 'missing'),
-        escapeHtml(item.quality_passed),
-        escapeHtml(item.next_action),
+        escapeHtml(statusLabel(item.version_status || 'missing')),
+        escapeHtml(qualityLabel(item.quality_passed)),
+        escapeHtml(actionLabel(item.next_action)),
         escapeHtml(item.reason)
       ]), true);
     }
 
     function renderDecisions(items) {
       if (!items.length) return empty('decisions');
-      $('decisions').innerHTML = table(['Type', 'Chapter', 'Reason', 'Command'], items.map((item) => [
-        item.type,
+      $('decisions').innerHTML = table(['类型', '章节', '原因', '命令'], items.map((item) => [
+        decisionLabel(item.type),
         item.chapter,
         item.reason,
         `<span class="command">${escapeHtml(item.command_hint)}</span>`
@@ -335,35 +335,35 @@ HTML = r"""<!doctype html>
     function renderQueue(snapshot, health) {
       const rows = Object.entries(health.counts || {}).map(([name, count]) => [name, count]);
       const failureRows = (health.latest_failures || []).map((item) => [
-        `failure #${item.task_id}`,
+        `失败 #${item.task_id}`,
         item.chapter_number || '',
-        item.error_category || '',
+        errorLabel(item.error_category || ''),
         item.error || ''
       ]);
       const taskRows = (snapshot.generation_queue.tasks || []).map((item) => [
-        escapeHtml(`task #${item.id}`),
+        escapeHtml(`任务 #${item.id}`),
         escapeHtml(item.chapter || ''),
-        escapeHtml(item.status),
-        escapeHtml(item.error_category || ''),
+        escapeHtml(statusLabel(item.status)),
+        escapeHtml(errorLabel(item.error_category || '')),
         queueButtons(item)
       ]);
       $('queue').innerHTML =
-        table(['Status', 'Count'], rows) +
-        table(['Recent Failure', 'Chapter', 'Status', 'Detail'], failureRows) +
-        table(['Task', 'Chapter', 'Status', 'Detail', 'Actions'], taskRows, true);
+        table(['状态', '数量'], rows.map(([name, count]) => [statusLabel(name), count])) +
+        table(['最近失败', '章节', '类型', '详情'], failureRows) +
+        table(['任务', '章节', '状态', '详情', '操作'], taskRows, true);
     }
 
     function queueButtons(item) {
       const buttons = [];
       if (item.status === 'pending') {
-        buttons.push(actionButton('Pause', 'pause_queue_task', item.id));
-        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+        buttons.push(actionButton('暂停', 'pause_queue_task', item.id));
+        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
       } else if (item.status === 'paused') {
-        buttons.push(actionButton('Resume', 'resume_queue_task', item.id));
-        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+        buttons.push(actionButton('恢复', 'resume_queue_task', item.id));
+        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
       } else if (item.status === 'failed') {
-        buttons.push(actionButton('Retry', 'retry_queue_task', item.id));
-        buttons.push(actionButton('Cancel', 'cancel_queue_task', item.id));
+        buttons.push(actionButton('重试', 'retry_queue_task', item.id));
+        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
       }
       return `<div class="actions">${buttons.join('')}</div>`;
     }
@@ -373,16 +373,16 @@ HTML = r"""<!doctype html>
     }
 
     function renderReadiness(readiness) {
-      $('readiness').innerHTML = table(['Check', 'Passed', 'Detail'], readiness.checks.map((item) => [
-        item.name,
-        `<span class="${item.passed ? 'ok' : 'bad'}">${item.passed}</span>`,
+      $('readiness').innerHTML = table(['检查项', '结果', '详情'], readiness.checks.map((item) => [
+        readinessLabel(item.name),
+        `<span class="${item.passed ? 'ok' : 'bad'}">${item.passed ? '通过' : '未通过'}</span>`,
         item.detail
       ]), true);
     }
 
     function renderChapterDetail(detail) {
       if (!detail.chapter) {
-        $('chapterDetail').innerHTML = '<div class="empty">Chapter is missing</div>';
+        $('chapterDetail').innerHTML = '<div class="empty">章节不存在</div>';
         return;
       }
       const brief = detail.latest_brief;
@@ -390,67 +390,67 @@ HTML = r"""<!doctype html>
       const qualityData = quality?.data || null;
       const llmReview = qualityData?.llm_review || null;
       $('chapterDetail').innerHTML =
-        table(['Field', 'Value'], [
-          ['chapter_id', detail.chapter.id],
-          ['number', detail.chapter.number],
-          ['status', detail.chapter.status],
-          ['latest brief', brief ? `#${brief.id} ${brief.status}` : ''],
-          ['latest quality', quality ? `${quality.passed} score=${quality.score}` : '']
+        table(['字段', '值'], [
+          ['章节 ID', detail.chapter.id],
+          ['章节号', detail.chapter.number],
+          ['状态', statusLabel(detail.chapter.status)],
+          ['最新 Brief', brief ? `#${brief.id} ${statusLabel(brief.status)}` : ''],
+          ['最新质检', quality ? `${quality.passed ? '通过' : '未通过'} 分数=${quality.score}` : '']
         ]) +
-        (brief ? `<pre>${escapeHtml(['Goal: ' + brief.goal, 'Beats: ' + brief.required_beats, 'Constraints: ' + brief.constraints].join('\n'))}</pre>` : '') +
+        (brief ? `<pre>${escapeHtml(['目标：' + brief.goal, '必要节拍：' + brief.required_beats, '硬约束：' + brief.constraints].join('\n'))}</pre>` : '') +
         renderQualityDetail(qualityData) +
         renderLLMReview(llmReview) +
         renderVersionDiff(detail.version_diff) +
-        table(['Version', 'Status', 'Source', 'Chars', 'Title'], detail.versions.map((item) => [
+        table(['版本', '状态', '来源', '字数', '标题'], detail.versions.map((item) => [
           item.id,
-          item.status,
+          statusLabel(item.status),
           item.source,
           item.content_chars,
           item.title
         ])) +
-        table(['Task', 'Type', 'Status', 'Attempt', 'Error'], detail.generation_tasks.map((item) => [
+        table(['任务', '类型', '状态', '尝试', '错误'], detail.generation_tasks.map((item) => [
           item.id,
-          item.type,
-          item.status,
+          taskTypeLabel(item.type),
+          statusLabel(item.status),
           item.attempt || '',
-          item.error_category || ''
+          errorLabel(item.error_category || '')
         ]));
     }
 
     function renderQualityDetail(data) {
-      if (!data) return '<div class="empty">No quality report</div>';
+      if (!data) return '<div class="empty">暂无质检报告</div>';
       const dimensions = Object.entries(data.dimensions || {}).sort((a, b) => a[0].localeCompare(b[0]));
       const issues = data.issues || [];
-      return '<h2>Quality Report</h2>' +
-        table(['Status', 'Score', 'Chars'], [[data.status || '', data.score ?? '', data.chinese_chars ?? '']]) +
-        table(['Dimension', 'Score'], dimensions.map(([name, score]) => [
-          escapeHtml(name),
+      return '<h2>质检报告</h2>' +
+        table(['状态', '分数', '中文字数'], [[qualityStatusLabel(data.status || ''), data.score ?? '', data.chinese_chars ?? '']]) +
+        table(['维度', '分数'], dimensions.map(([name, score]) => [
+          escapeHtml(dimensionLabel(name)),
           `<span class="${score < 50 ? 'bad' : score < 70 ? 'warn' : 'ok'}">${score}</span>`
         ]), true) +
-        chips('Issues', issues);
+        chips('问题', issues);
     }
 
     function renderLLMReview(review) {
-      if (!review) return '<div class="empty">No LLM reviewer result</div>';
-      return '<h2>LLM Reviewer</h2>' +
-        table(['Field', 'Value'], [
-          ['status', review.status || ''],
-          ['verdict', review.verdict || ''],
-          ['score', review.score ?? ''],
-          ['provider', review.provider || ''],
-          ['model', review.model || ''],
-          ['task', review.generation_task_id || '']
+      if (!review) return '<div class="empty">暂无 LLM 二审结果</div>';
+      return '<h2>LLM 二审</h2>' +
+        table(['字段', '值'], [
+          ['状态', statusLabel(review.status || '')],
+          ['结论', verdictLabel(review.verdict || '')],
+          ['分数', review.score ?? ''],
+          ['供应商', review.provider || ''],
+          ['模型', review.model || ''],
+          ['任务', review.generation_task_id || '']
         ]) +
-        chips('Strengths', review.strengths || []) +
-        chips('Reviewer Issues', review.issues || []) +
-        chips('Revision Suggestions', review.revision_suggestions || []) +
-        chips('Risk Flags', review.risk_flags || []);
+        chips('优点', review.strengths || []) +
+        chips('二审问题', review.issues || []) +
+        chips('修订建议', review.revision_suggestions || []) +
+        chips('风险标记', review.risk_flags || []);
     }
 
     function renderVersionDiff(diff) {
-      if (!diff || !diff.text) return '<div class="empty">No version diff yet</div>';
-      return '<h2>Latest Version Diff</h2>' +
-        table(['Left', 'Right'], [[`#${diff.left_version_id}`, `#${diff.right_version_id}`]]) +
+      if (!diff || !diff.text) return '<div class="empty">暂无版本对比</div>';
+      return '<h2>最新版本对比</h2>' +
+        table(['旧版本', '新版本'], [[`#${diff.left_version_id}`, `#${diff.right_version_id}`]]) +
         `<pre class="diff">${formatDiff(diff.text)}</pre>`;
     }
 
@@ -465,25 +465,25 @@ HTML = r"""<!doctype html>
 
     function chips(title, items) {
       const values = (items || []).map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join('');
-      return `<div class="chips"><strong>${escapeHtml(title)}</strong>${values || '<span class="muted">None</span>'}</div>`;
+      return `<div class="chips"><strong>${escapeHtml(title)}</strong>${values || '<span class="muted">无</span>'}</div>`;
     }
 
     function renderFeedback(payload) {
       $('feedbackTarget').value = $('chapter').value;
       $('adjustmentTarget').value = $('chapter').value;
       $('feedback').innerHTML =
-        table(['Metric', 'Count'], Object.entries(payload.summary.by_metric || {})) +
-        table(['Feedback', 'Platform', 'Metric', 'Value', 'Raw'], payload.items.map((item) => [
+        table(['指标', '数量'], Object.entries(payload.summary.by_metric || {})) +
+        table(['反馈', '平台', '指标', '数值', '原文'], payload.items.map((item) => [
           `<button class="secondary" data-add-feedback-id="${item.id}">${item.id}</button>`,
           escapeHtml(item.platform),
           escapeHtml(item.metric_name),
           escapeHtml(item.metric_value),
           escapeHtml(item.raw_text)
         ]), true) +
-        table(['Adjustment', 'Target', 'Status', 'Feedback', 'Text'], payload.adjustments.map((item) => [
+        table(['调整', '目标章', '状态', '反馈', '内容'], payload.adjustments.map((item) => [
           item.id,
           item.target_chapter_number,
-          item.status,
+          statusLabel(item.status),
           item.feedback_ids,
           item.adjustment_text
         ]));
@@ -491,12 +491,12 @@ HTML = r"""<!doctype html>
 
     function renderKnowledge(payload) {
       $('knowledge').innerHTML =
-        table(['Story Bible', 'Status'], [[payload.story_bible?.id || '', payload.story_bible?.status || 'missing']]) +
-        `<pre>${escapeHtml('Story Context\n' + payload.story_context + '\n\nCanon Context\n' + payload.canon_context + '\n\nMarket Evidence\n' + payload.evidence_context)}</pre>` +
-        table(['Signal', 'Usable', 'Reason', 'Source'], payload.evidence_audit.map((item) => [
+        table(['故事圣经', '状态'], [[payload.story_bible?.id || '', statusLabel(payload.story_bible?.status || 'missing')]]) +
+        `<pre>${escapeHtml('故事上下文\n' + payload.story_context + '\n\nCanon 上下文\n' + payload.canon_context + '\n\n市场证据\n' + payload.evidence_context)}</pre>` +
+        table(['信号', '可用', '原因', '来源'], payload.evidence_audit.map((item) => [
           item.signal_id,
-          item.usable,
-          item.reasons.join(',') || 'usable',
+          item.usable ? '是' : '否',
+          item.reasons.join(',') || '可用',
           item.source
         ]));
     }
@@ -508,11 +508,116 @@ HTML = r"""<!doctype html>
     }
 
     function empty(id) {
-      $(id).innerHTML = '<div class="empty">No items</div>';
+      $(id).innerHTML = '<div class="empty">暂无数据</div>';
     }
 
     function escapeHtml(value) {
       return String(value).replace(/[&<>"']/g, (char) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[char]));
+    }
+
+    const STATUS_LABELS = {
+      active: '启用',
+      approved: '已审批',
+      applied: '已应用',
+      blocked: '阻塞',
+      canceled: '已取消',
+      completed: '已完成',
+      done: '完成',
+      draft: '草稿',
+      dry_run_ready: '干跑通过',
+      failed: '失败',
+      missing: '缺失',
+      needs_revision: '需修订',
+      no_version: '无版本',
+      pass: '通过',
+      paused: '已暂停',
+      pending: '待执行',
+      planned: '已规划',
+      planning: '规划中',
+      published: '已发布',
+      queued: '已入队',
+      ready: '就绪',
+      reviewed_pass: '质检通过',
+      revision_ready: '修订就绪',
+      running: '运行中'
+    };
+    const ACTION_LABELS = {
+      approve_chapter: '人工审批章节',
+      cancel_queue_task: '取消队列任务',
+      create_chapter_brief: '创建章节 Brief',
+      create_feedback_adjustment: '创建反馈调整',
+      create_publish_job: '创建发布任务',
+      create_revision_brief: '创建修订 Brief',
+      draft_chapter: '生成章节草稿',
+      mark_publish_job: '确认发布结果',
+      pause_queue_task: '暂停队列任务',
+      publish_job_dry_run: '发布干跑',
+      queue_publish_job: '发布入队',
+      record_chapter_continuity: '回写连续性',
+      record_feedback: '记录反馈',
+      resume_queue_task: '恢复队列任务',
+      retry_publish_job: '重试发布任务',
+      retry_queue_task: '重试队列任务',
+      review_chapter: '质检章节',
+      revise_chapter: '修订章节',
+      run_next_action: '执行安全下一步',
+      run_queue: '运行队列',
+      done: '已完成',
+      wait_generation_task: '等待生成任务'
+    };
+    const DECISION_LABELS = {
+      continuity_writeback: '连续性回写',
+      human_approval: '人工审批',
+      final_publish_confirmation: '最终发布确认',
+      manual_inspection: '人工检查'
+    };
+    const READINESS_LABELS = {
+      foundation: '故事地基',
+      story_bible: '故事圣经',
+      evidence: '市场证据',
+      canon: 'Canon',
+      chapter_queue: '章节队列',
+      human_decisions: '人工决策',
+      llm: 'LLM 配置'
+    };
+    const DIMENSION_LABELS = {
+      arc_alignment: '剧情段对齐',
+      basic_publishability: '基础可发布性',
+      brief_coverage: 'Brief 覆盖',
+      canon_consistency: 'Canon 一致性',
+      choice_and_cost: '选择与代价',
+      conflict_pressure: '冲突压力',
+      hook_strength: '章末钩子',
+      platform_risk: '平台风险',
+      prose_density: '文本密度',
+      reader_momentum: '读者推动力',
+      setting_risk: '设定风险'
+    };
+    const ERROR_LABELS = {
+      auth: '鉴权失败',
+      context_length: '上下文过长',
+      execution: '执行错误',
+      network: '网络错误',
+      permission: '权限错误',
+      provider: '供应商错误',
+      rate_limit: '限流',
+      structured_output: '结构化输出错误',
+      timeout: '超时',
+      validation: '校验错误'
+    };
+    function statusLabel(value) { return STATUS_LABELS[value] || value || ''; }
+    function actionLabel(value) { return ACTION_LABELS[value] || value || ''; }
+    function decisionLabel(value) { return DECISION_LABELS[value] || value || ''; }
+    function readinessLabel(value) { return READINESS_LABELS[value] || value || ''; }
+    function dimensionLabel(value) { return DIMENSION_LABELS[value] || value || ''; }
+    function errorLabel(value) { return ERROR_LABELS[value] || value || ''; }
+    function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
+    function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
+    function qualityLabel(value) {
+      if (value === true || value === 'True' || value === 'true') return '通过';
+      if (value === false || value === 'False' || value === 'false') return '未通过';
+      if (value === null || value === undefined || value === '') return '';
+      return String(value);
     }
 
     $('refresh').addEventListener('click', refresh);
@@ -540,7 +645,7 @@ HTML = r"""<!doctype html>
         ['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job'].includes(chapter.next_action)
       );
       if (!item) {
-        showError(new Error('No safe next action in selected range'));
+        showError(new Error('当前范围内没有可自动执行的安全动作'));
         return;
       }
       postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true}).catch(showError);
@@ -571,7 +676,7 @@ HTML = r"""<!doctype html>
     });
 
     function showError(error) {
-      $('state').textContent = 'Error';
+      $('state').textContent = '出错';
       document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="panel empty">${escapeHtml(error.message)}</div>`);
     }
 
