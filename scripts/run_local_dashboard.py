@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import sys
 from http import HTTPStatus
@@ -148,6 +149,17 @@ HTML = r"""<!doctype html>
     .empty { padding: 14px; color: var(--muted); }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
     .actions button { height: 32px; font-size: 13px; }
+    .diff {
+      background: #111827;
+      color: #e5e7eb;
+      max-height: 360px;
+      overflow: auto;
+    }
+    .diff .add { color: #86efac; }
+    .diff .del { color: #fca5a5; }
+    .diff .meta { color: #93c5fd; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--line); }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fff; }
     .actions button.secondary { background: #ffffff; color: var(--ink); border-color: var(--line); }
     @media (max-width: 900px) {
       .toolbar, .summary, .grid, .forms { grid-template-columns: 1fr; }
@@ -375,6 +387,8 @@ HTML = r"""<!doctype html>
       }
       const brief = detail.latest_brief;
       const quality = detail.latest_quality;
+      const qualityData = quality?.data || null;
+      const llmReview = qualityData?.llm_review || null;
       $('chapterDetail').innerHTML =
         table(['Field', 'Value'], [
           ['chapter_id', detail.chapter.id],
@@ -384,6 +398,9 @@ HTML = r"""<!doctype html>
           ['latest quality', quality ? `${quality.passed} score=${quality.score}` : '']
         ]) +
         (brief ? `<pre>${escapeHtml(['Goal: ' + brief.goal, 'Beats: ' + brief.required_beats, 'Constraints: ' + brief.constraints].join('\n'))}</pre>` : '') +
+        renderQualityDetail(qualityData) +
+        renderLLMReview(llmReview) +
+        renderVersionDiff(detail.version_diff) +
         table(['Version', 'Status', 'Source', 'Chars', 'Title'], detail.versions.map((item) => [
           item.id,
           item.status,
@@ -398,6 +415,57 @@ HTML = r"""<!doctype html>
           item.attempt || '',
           item.error_category || ''
         ]));
+    }
+
+    function renderQualityDetail(data) {
+      if (!data) return '<div class="empty">No quality report</div>';
+      const dimensions = Object.entries(data.dimensions || {}).sort((a, b) => a[0].localeCompare(b[0]));
+      const issues = data.issues || [];
+      return '<h2>Quality Report</h2>' +
+        table(['Status', 'Score', 'Chars'], [[data.status || '', data.score ?? '', data.chinese_chars ?? '']]) +
+        table(['Dimension', 'Score'], dimensions.map(([name, score]) => [
+          escapeHtml(name),
+          `<span class="${score < 50 ? 'bad' : score < 70 ? 'warn' : 'ok'}">${score}</span>`
+        ]), true) +
+        chips('Issues', issues);
+    }
+
+    function renderLLMReview(review) {
+      if (!review) return '<div class="empty">No LLM reviewer result</div>';
+      return '<h2>LLM Reviewer</h2>' +
+        table(['Field', 'Value'], [
+          ['status', review.status || ''],
+          ['verdict', review.verdict || ''],
+          ['score', review.score ?? ''],
+          ['provider', review.provider || ''],
+          ['model', review.model || ''],
+          ['task', review.generation_task_id || '']
+        ]) +
+        chips('Strengths', review.strengths || []) +
+        chips('Reviewer Issues', review.issues || []) +
+        chips('Revision Suggestions', review.revision_suggestions || []) +
+        chips('Risk Flags', review.risk_flags || []);
+    }
+
+    function renderVersionDiff(diff) {
+      if (!diff || !diff.text) return '<div class="empty">No version diff yet</div>';
+      return '<h2>Latest Version Diff</h2>' +
+        table(['Left', 'Right'], [[`#${diff.left_version_id}`, `#${diff.right_version_id}`]]) +
+        `<pre class="diff">${formatDiff(diff.text)}</pre>`;
+    }
+
+    function formatDiff(text) {
+      return escapeHtml(text).split('\n').map((line) => {
+        if (line.startsWith('+') && !line.startsWith('+++')) return `<span class="add">${line}</span>`;
+        if (line.startsWith('-') && !line.startsWith('---')) return `<span class="del">${line}</span>`;
+        if (line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++')) return `<span class="meta">${line}</span>`;
+        return line;
+      }).join('\n');
+    }
+
+    function chips(title, items) {
+      const values = (items || []).map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join('');
+      return `<div class="chips"><strong>${escapeHtml(title)}</strong>${values || '<span class="muted">None</span>'}</div>`;
     }
 
     function renderFeedback(payload) {
@@ -809,6 +877,7 @@ def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
         },
         "latest_brief": _brief_payload(latest_brief),
         "latest_quality": _quality_payload(latest_quality),
+        "version_diff": _version_diff_payload(versions),
         "versions": [
             {
                 "id": version.id,
@@ -924,11 +993,33 @@ def _brief_payload(brief: ChapterBrief | None) -> dict | None:
 def _quality_payload(quality: QualityReport | None) -> dict | None:
     if not quality:
         return None
+    data = _loads_json(quality.report)
     return {
         "id": quality.id,
         "score": quality.score,
         "passed": quality.passed,
         "report": quality.report,
+        "data": data,
+    }
+
+
+def _version_diff_payload(versions: list[ChapterVersion]) -> dict | None:
+    if len(versions) < 2:
+        return None
+    right = versions[0]
+    left = versions[1]
+    diff = difflib.unified_diff(
+        left.content.splitlines(),
+        right.content.splitlines(),
+        fromfile=f"version#{left.id}",
+        tofile=f"version#{right.id}",
+        lineterm="",
+    )
+    text = "\n".join(diff)
+    return {
+        "left_version_id": left.id,
+        "right_version_id": right.id,
+        "text": text,
     }
 
 
