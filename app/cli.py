@@ -29,7 +29,7 @@ from app.services.canon import (
 )
 from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
-from app.services.db_ops import check_database_health, create_database_backup, list_database_backups
+from app.services.db_ops import check_database_health, create_database_backup, list_database_backups, restore_database_from_backup
 from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
@@ -433,6 +433,10 @@ def main() -> None:
     p = sub.add_parser("backup-database")
     p.add_argument("--label", default="")
 
+    p = sub.add_parser("restore-database")
+    p.add_argument("--backup-path", required=True)
+    p.add_argument("--yes", action="store_true")
+
     p = sub.add_parser("list-database-backups")
     p.add_argument("--limit", type=int, default=20)
 
@@ -587,6 +591,18 @@ def main() -> None:
         reset_db()
         print("reset-dev-db: PASS")
         print(f"database={db_path}")
+        return
+    if args.cmd == "restore-database":
+        try:
+            result = restore_database_from_backup(backup_path=args.backup_path, confirm=args.yes)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+        print("restore-database: PASS")
+        print(f"database_path={result.database_path}")
+        print(f"source_backup_path={result.source_backup_path}")
+        print(f"pre_restore_backup_path={result.pre_restore_backup_path}")
+        print(f"restored_size_bytes={result.restored_size_bytes}")
         return
 
     try:

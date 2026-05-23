@@ -67,6 +67,7 @@ python -m app.cli list-publish-executions --job-id 1
 python -m app.cli retry-publish-job --job-id 1
 python -m app.cli database-health
 python -m app.cli backup-database --label before-release
+python -m app.cli restore-database --backup-path data/backups/novel-YYYYMMDD-HHMMSS-before-release.db --yes
 ```
 
 OpenClaw should not decide story canon or quality gates. It can execute approved `publish_jobs`.
@@ -433,9 +434,10 @@ Before larger local changes or release preparation, inspect and back up the SQLi
 python -m app.cli database-health
 python -m app.cli backup-database --label before-release
 python -m app.cli list-database-backups
+python -m app.cli restore-database --backup-path data/backups/novel-YYYYMMDD-HHMMSS-before-release.db --yes
 ```
 
-Backups are copied to `data/backups/` and recorded in `database_backups`.
+Backups are copied to `data/backups/` and recorded in `database_backups`. `restore-database` only supports SQLite, requires `--yes`, and automatically creates a `before-restore` copy of the current database before overwriting it.
 
 ## Database Migrations
 

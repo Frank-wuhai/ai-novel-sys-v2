@@ -1183,6 +1183,27 @@ def main() -> int:
         print("list-database-backups did not show created backup")
         print(backup_list)
         return 1
+    restore_guard = run(["restore-database", "--backup-path", str(backup_path)], expect=1)
+    if "restore-database requires --yes" not in restore_guard:
+        print("restore-database did not require explicit confirmation")
+        print(restore_guard)
+        return 1
+    marker_book = run(["create-book", "--title", "Smoke Restore Marker", "--genre", "测试", "--platform", "manual"])
+    marker_book_id = extract_id("book_id", marker_book)
+    if f"{marker_book_id}\tSmoke Restore Marker" not in run(["list-books"]):
+        print("restore marker book was not created before restore")
+        return 1
+    restore_output = run(["restore-database", "--backup-path", str(backup_path), "--yes"])
+    pre_restore_path = Path(extract_value("pre_restore_backup_path", restore_output))
+    if "restore-database: PASS" not in restore_output or not pre_restore_path.exists():
+        print("restore-database did not restore and preserve pre-restore backup")
+        print(restore_output)
+        return 1
+    restored_books = run(["list-books"])
+    if "Smoke Restore Marker" in restored_books:
+        print("restore-database did not restore backup state")
+        print(restored_books)
+        return 1
     print("smoke-test: PASS")
     print(f"database={TEST_DB}")
     print(f"book_id={book_id}")
