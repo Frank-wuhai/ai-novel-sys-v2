@@ -488,6 +488,14 @@ python scripts/readiness_regression_test.py
 
 It uses `data/readiness-regression.db` and verifies that market evidence must match the current book genre before production readiness can pass.
 
+Run the migration regression test when changing schema or Alembic revisions:
+
+```bash
+python scripts/migration_regression_test.py
+```
+
+It creates `data/migration-regression.db`, runs `alembic upgrade head`, and verifies the current head plus key tables, fields, and publishing target constraints. If Alembic is not installed in the active environment, the script exits with a clear dependency message instead of pretending the migration chain passed.
+
 ## Prompt And Structured Draft Output
 
 Draft generation uses versioned prompt templates stored in `prompt_templates`.
