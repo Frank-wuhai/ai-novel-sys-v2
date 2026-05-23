@@ -28,7 +28,10 @@ from app.services.feedback import (
     record_platform_feedback,
     summarize_platform_feedback,
 )
+from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
+from app.services.llm_costs import summarize_llm_cost
 from app.services.llm_queue import (
+    QUEUE_TYPES,
     build_generation_queue_health,
     cancel_generation_queue_task,
     pause_generation_queue_task,
@@ -201,6 +204,14 @@ HTML = r"""<!doctype html>
           <div id="readiness"></div>
         </section>
         <section class="panel">
+          <h2>LLM 用量与成本</h2>
+          <div id="llmUsage"></div>
+        </section>
+        <section class="panel">
+          <h2>失败任务处理</h2>
+          <div id="failedTasks"></div>
+        </section>
+        <section class="panel">
           <h2>下一步建议</h2>
           <div id="recommendation" class="empty"></div>
           <div class="actions">
@@ -258,10 +269,12 @@ HTML = r"""<!doctype html>
         fetchJson('/api/snapshot?' + params.toString()),
         fetchJson('/api/queue-health')
       ]);
-      const [detail, feedback, knowledge] = await Promise.all([
+      const [detail, feedback, knowledge, llmUsage, failedTasks] = await Promise.all([
         fetchJson('/api/chapter-detail?' + chapterParams.toString()),
         fetchJson('/api/feedback?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/knowledge?' + chapterParams.toString())
+        fetchJson('/api/knowledge?' + chapterParams.toString()),
+        fetchJson('/api/llm-usage?book_id=' + encodeURIComponent(bookId)),
+        fetchJson('/api/failed-tasks?book_id=' + encodeURIComponent(bookId))
       ]);
       currentSnapshot = snapshot;
       renderSummary(snapshot, health);
@@ -269,6 +282,8 @@ HTML = r"""<!doctype html>
       renderDecisions(snapshot.human_decisions.items);
       renderQueue(snapshot, health);
       renderReadiness(snapshot.readiness);
+      renderLLMUsage(llmUsage);
+      renderFailedTasks(failedTasks);
       renderChapterDetail(detail);
       renderFeedback(feedback);
       renderKnowledge(knowledge);
@@ -378,6 +393,51 @@ HTML = r"""<!doctype html>
         `<span class="${item.passed ? 'ok' : 'bad'}">${item.passed ? '通过' : '未通过'}</span>`,
         item.detail
       ]), true);
+    }
+
+    function renderLLMUsage(payload) {
+      const usage = payload.usage;
+      const cost = payload.cost;
+      $('llmUsage').innerHTML =
+        table(['指标', '值'], [
+          ['请求数', usage.request_count],
+          ['完成', usage.completed_count],
+          ['失败', usage.failed_count],
+          ['估算 Token', usage.estimated_total_tokens],
+          ['实际 Token', usage.actual_total_tokens],
+          ['计费 Token', usage.billable_total_tokens],
+          ['输入 Token', usage.billable_prompt_tokens],
+          ['输出 Token', usage.billable_response_tokens],
+          ['估算成本', `${cost.estimated_cost} ${cost.currency}`],
+          ['模型', cost.model]
+        ]) +
+        table(['请求', '类型', '状态', '模型', 'Token', '耗时'], payload.recent_requests.map((item) => [
+          item.id,
+          taskTypeLabel(item.task_type),
+          statusLabel(item.status),
+          item.model,
+          item.actual_total_tokens || item.estimated_total_tokens,
+          `${item.elapsed_ms} ms`
+        ]));
+    }
+
+    function renderFailedTasks(payload) {
+      const counts = Object.entries(payload.by_error_category || {}).map(([name, count]) => [errorLabel(name), count]);
+      const rows = payload.items.map((item) => [
+        item.id,
+        taskTypeLabel(item.task_type),
+        item.chapter_number || '',
+        errorLabel(item.error_category || ''),
+        item.error || '',
+        item.is_queue_task ? queueFailureButtons(item) : '<span class="muted">查看任务详情</span>'
+      ]);
+      $('failedTasks').innerHTML =
+        table(['错误类型', '数量'], counts) +
+        table(['任务', '类型', '章节', '错误', '详情', '操作'], rows, true);
+    }
+
+    function queueFailureButtons(item) {
+      return `<div class="actions">${actionButton('重试', 'retry_queue_task', item.id)}${actionButton('取消', 'cancel_queue_task', item.id)}</div>`;
     }
 
     function renderChapterDetail(detail) {
@@ -708,6 +768,8 @@ def main() -> int:
                 _chapter_detail(session, book_id=books[0].id, chapter_number=1)
                 _feedback_payload(session, book_id=books[0].id)
                 _knowledge_payload(session, book_id=books[0].id, chapter_number=1)
+                _llm_usage_payload(session, book_id=books[0].id)
+                _failed_tasks_payload(session, book_id=books[0].id)
             action_result = _perform_action(session, {"action": "queue_health"})
             print("dashboard_self_test=PASS")
             print(f"book_count={len(books)}")
@@ -813,6 +875,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             chapter_number=_int_query(query, "chapter_number", 1),
                         )
                     )
+                return
+            if parsed.path == "/api/llm-usage":
+                query = parse_qs(parsed.query)
+                with session_scope() as session:
+                    self._send_json(_llm_usage_payload(session, book_id=_int_query(query, "book_id", 0)))
+                return
+            if parsed.path == "/api/failed-tasks":
+                query = parse_qs(parsed.query)
+                with session_scope() as session:
+                    self._send_json(_failed_tasks_payload(session, book_id=_int_query(query, "book_id", 0)))
                 return
             self._send_text("not found", status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -1058,6 +1130,90 @@ def _knowledge_payload(session, *, book_id: int, chapter_number: int) -> dict:
             }
             for item in audit_market_evidence(session, genre=book.genre)
         ],
+    }
+
+
+def _llm_usage_payload(session, *, book_id: int) -> dict:
+    usage = summarize_llm_usage(session, book_id=book_id)
+    cost = summarize_llm_cost(session, book_id=book_id)
+    recent = list_llm_request_logs(session, book_id=book_id, limit=8)
+    return {
+        "usage": {
+            "book_id": usage.book_id,
+            "request_count": usage.request_count,
+            "completed_count": usage.completed_count,
+            "failed_count": usage.failed_count,
+            "estimated_total_tokens": usage.estimated_total_tokens,
+            "actual_total_tokens": usage.actual_total_tokens,
+            "billable_prompt_tokens": usage.billable_prompt_tokens,
+            "billable_response_tokens": usage.billable_response_tokens,
+            "billable_total_tokens": usage.billable_total_tokens,
+            "elapsed_ms": usage.elapsed_ms,
+        },
+        "cost": {
+            "book_id": cost.book_id,
+            "model": cost.model,
+            "request_count": cost.request_count,
+            "billable_prompt_tokens": cost.billable_prompt_tokens,
+            "billable_response_tokens": cost.billable_response_tokens,
+            "billable_total_tokens": cost.billable_total_tokens,
+            "input_price_per_1m_tokens": cost.input_price_per_1m_tokens,
+            "output_price_per_1m_tokens": cost.output_price_per_1m_tokens,
+            "estimated_cost": cost.estimated_cost,
+            "currency": cost.currency,
+        },
+        "recent_requests": [
+            {
+                "id": item.id,
+                "generation_task_id": item.generation_task_id,
+                "task_type": item.task_type,
+                "status": item.status,
+                "provider": item.provider,
+                "model": item.model,
+                "prompt_template": item.prompt_template,
+                "estimated_total_tokens": item.estimated_total_tokens,
+                "actual_total_tokens": item.actual_total_tokens,
+                "elapsed_ms": item.elapsed_ms,
+                "error_category": item.error_category,
+            }
+            for item in recent
+        ],
+    }
+
+
+def _failed_tasks_payload(session, *, book_id: int) -> dict:
+    tasks = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.book_id == book_id, GenerationTask.status == "failed")
+            .order_by(GenerationTask.id.desc())
+            .limit(20)
+        )
+    )
+    counts: dict[str, int] = {}
+    rows = []
+    for task in tasks:
+        input_data = _loads_json(task.input_json)
+        output_data = _loads_json(task.output_json)
+        error_category = str(output_data.get("error_category") or "")
+        counts[error_category] = counts.get(error_category, 0) + 1
+        rows.append(
+            {
+                "id": task.id,
+                "task_type": task.task_type,
+                "status": task.status,
+                "chapter_number": input_data.get("chapter_number"),
+                "attempt": output_data.get("attempt") or input_data.get("attempt"),
+                "max_attempts": output_data.get("max_attempts") or input_data.get("max_attempts"),
+                "error_category": error_category,
+                "error": str(output_data.get("error") or "")[:300],
+                "is_queue_task": task.task_type in QUEUE_TYPES,
+            }
+        )
+    return {
+        "total": len(rows),
+        "by_error_category": dict(sorted(counts.items())),
+        "items": rows,
     }
 
 
