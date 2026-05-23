@@ -1091,6 +1091,25 @@ def main() -> int:
         conn.close()
     run(["create-publish-job", "--version-id", str(v1), "--platform", "manual"], expect=1)
     run(["approve-chapter", "--version-id", str(v1), "--reviewer", "smoke"])
+    target_output = run([
+        "upsert-publishing-target",
+        "--platform",
+        "manual",
+        "--account-label",
+        "smoke-account",
+        "--work-identifier",
+        "smoke-work",
+        "--automation-mode",
+        "manual",
+        "--config-json",
+        '{"work_url":"https://example.invalid/work/smoke"}',
+    ])
+    target_id = extract_id("publishing_target_id", target_output)
+    targets = run(["list-publishing-targets", "--platform", "manual"])
+    if f"{target_id}\tplatform=manual\taccount=smoke-account\twork=smoke-work" not in targets:
+        print("publishing target was not listed")
+        print(targets)
+        return 1
     if "next_action=create_publish_job" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "1", "--count", "1"]):
         print("planner did not request publish job after approval")
         return 1
@@ -1100,6 +1119,16 @@ def main() -> int:
         print(auto_job)
         return 1
     job_id = extract_id("object_id", auto_job)
+    publish_job_detail = run(["show-publish-job", "--job-id", str(job_id)])
+    if (
+        f"id={job_id}" not in publish_job_detail
+        or f'"publishing_target_id": {target_id}' not in publish_job_detail
+        or '"work_identifier": "smoke-work"' not in publish_job_detail
+        or '"work_url": "https://example.invalid/work/smoke"' not in publish_job_detail
+    ):
+        print("show-publish-job did not include publishing target payload")
+        print(publish_job_detail)
+        return 1
     if "next_action=publish_job_dry_run" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "1", "--count", "1"]):
         print("planner did not request publish dry-run")
         return 1
@@ -1163,7 +1192,7 @@ def main() -> int:
         return 1
     database_health = run(["database-health"])
     if (
-        "latest_migration=20260522_0004_llm_actual_usage.py" not in database_health
+        "latest_migration=20260523_0005_publishing_target_config.py" not in database_health
         or "llm_request_logs" not in database_health
         or "publish_executions" not in database_health
         or "database_backups" not in database_health

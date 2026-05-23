@@ -56,12 +56,14 @@ from app.services.production import (
     create_revision_brief,
     draft_chapter,
     execute_publish_job,
+    get_publish_job,
     get_book,
     latest_chapter_version,
     list_books,
     list_chapters,
     list_publish_executions,
     list_publish_jobs,
+    list_publishing_targets,
     mark_publish_job,
     publish_job_dry_run,
     queue_publish_job,
@@ -69,6 +71,7 @@ from app.services.production import (
     revise_chapter,
     review_chapter,
     seed_prompts,
+    upsert_publishing_target,
 )
 from app.services.planning import (
     build_human_decision_package,
@@ -348,6 +351,14 @@ def main() -> None:
     p.add_argument("--version-id", type=int, required=True)
     p.add_argument("--platform", required=True)
 
+    p = sub.add_parser("upsert-publishing-target")
+    p.add_argument("--platform", required=True)
+    p.add_argument("--account-label", default="")
+    p.add_argument("--work-identifier", default="")
+    p.add_argument("--automation-mode", default="manual")
+    p.add_argument("--status", default="active")
+    p.add_argument("--config-json", default="{}")
+
     sub.add_parser("list-books")
 
     p = sub.add_parser("show-book")
@@ -404,6 +415,13 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=20)
 
     p = sub.add_parser("list-publish-jobs")
+    p.add_argument("--status", default="")
+
+    p = sub.add_parser("show-publish-job")
+    p.add_argument("--job-id", type=int, required=True)
+
+    p = sub.add_parser("list-publishing-targets")
+    p.add_argument("--platform", default="")
     p.add_argument("--status", default="")
 
     p = sub.add_parser("publish-job-dry-run")
@@ -1056,6 +1074,22 @@ def main() -> None:
                 job = create_publish_job(session, version_id=args.version_id, platform=args.platform)
                 print(f"publish_job_id={job.id}")
                 print(f"status={job.status}")
+            elif args.cmd == "upsert-publishing-target":
+                target = upsert_publishing_target(
+                    session,
+                    platform=args.platform,
+                    account_label=args.account_label,
+                    work_identifier=args.work_identifier,
+                    automation_mode=args.automation_mode,
+                    status=args.status,
+                    config_json=args.config_json,
+                )
+                print(f"publishing_target_id={target.id}")
+                print(f"platform={target.platform}")
+                print(f"account_label={target.account_label}")
+                print(f"work_identifier={target.work_identifier}")
+                print(f"automation_mode={target.automation_mode}")
+                print(f"status={target.status}")
             elif args.cmd == "list-books":
                 for book in list_books(session):
                     print(f"{book.id}\t{book.title}\t{book.genre}\t{book.target_platform}\t{book.status}")
@@ -1241,7 +1275,30 @@ def main() -> None:
                     )
             elif args.cmd == "list-publish-jobs":
                 for job in list_publish_jobs(session, status=args.status):
-                    print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}")
+                    print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}\tpayload={job.automation_payload}")
+            elif args.cmd == "show-publish-job":
+                job = get_publish_job(session, job_id=args.job_id)
+                print(f"id={job.id}")
+                print(f"version_id={job.chapter_version_id}")
+                print(f"platform={job.platform}")
+                print(f"status={job.status}")
+                print(f"automation_payload={pretty_json(job.automation_payload)}")
+                print(f"result_report={job.result_report}")
+            elif args.cmd == "list-publishing-targets":
+                for target in list_publishing_targets(session, platform=args.platform, status=args.status):
+                    print(
+                        "\t".join(
+                            [
+                                str(target.id),
+                                f"platform={target.platform}",
+                                f"account={target.account_label}",
+                                f"work={target.work_identifier}",
+                                f"mode={target.automation_mode}",
+                                f"status={target.status}",
+                                f"config={target.config_json}",
+                            ]
+                        )
+                    )
             elif args.cmd == "publish-job-dry-run":
                 job = publish_job_dry_run(session, job_id=args.job_id)
                 print(f"publish_job_id={job.id}")

@@ -18,6 +18,7 @@ from app.models.entities import (
     LLMRequestLog,
     PublishJob,
     PublishExecution,
+    PublishingTarget,
     PromptTemplate,
     QualityReport,
     StoryFoundation,
@@ -670,10 +671,79 @@ def create_publish_job(session: Session, *, version_id: int, platform: str) -> P
     )
     if existing:
         raise ValueError(f"active publish job already exists: {existing.id} ({existing.status})")
-    job = PublishJob(chapter_version_id=version_id, platform=platform, status="pending", automation_payload="{}")
+    target = get_publishing_target(session, platform=platform)
+    payload = {}
+    if target:
+        payload = {
+            "publishing_target_id": target.id,
+            "account_label": target.account_label,
+            "work_identifier": target.work_identifier,
+            "automation_mode": target.automation_mode,
+            "target_config": _loads_json(target.config_json),
+        }
+    job = PublishJob(
+        chapter_version_id=version_id,
+        platform=platform,
+        status="pending",
+        automation_payload=json.dumps(payload, ensure_ascii=False),
+    )
     session.add(job)
     session.flush()
     return job
+
+
+def upsert_publishing_target(
+    session: Session,
+    *,
+    platform: str,
+    account_label: str = "",
+    work_identifier: str = "",
+    automation_mode: str = "manual",
+    status: str = "active",
+    config_json: str = "{}",
+) -> PublishingTarget:
+    if not platform:
+        raise ValueError("platform is required")
+    _loads_json(config_json)
+    target = session.scalar(
+        select(PublishingTarget).where(
+            PublishingTarget.platform == platform,
+            PublishingTarget.account_label == account_label,
+            PublishingTarget.work_identifier == work_identifier,
+        )
+    )
+    if not target:
+        target = PublishingTarget(platform=platform, account_label=account_label, work_identifier=work_identifier)
+        session.add(target)
+    target.automation_mode = automation_mode
+    target.status = status
+    target.config_json = config_json
+    session.flush()
+    return target
+
+
+def get_publishing_target(
+    session: Session,
+    *,
+    platform: str,
+    account_label: str = "",
+    work_identifier: str = "",
+) -> PublishingTarget | None:
+    stmt = select(PublishingTarget).where(PublishingTarget.platform == platform, PublishingTarget.status == "active")
+    if account_label:
+        stmt = stmt.where(PublishingTarget.account_label == account_label)
+    if work_identifier:
+        stmt = stmt.where(PublishingTarget.work_identifier == work_identifier)
+    return session.scalar(stmt.order_by(PublishingTarget.id.desc()))
+
+
+def list_publishing_targets(session: Session, *, platform: str = "", status: str = "") -> list[PublishingTarget]:
+    stmt = select(PublishingTarget).order_by(PublishingTarget.id)
+    if platform:
+        stmt = stmt.where(PublishingTarget.platform == platform)
+    if status:
+        stmt = stmt.where(PublishingTarget.status == status)
+    return list(session.scalars(stmt))
 
 
 def list_books(session: Session) -> list[Book]:
@@ -700,6 +770,13 @@ def list_publish_jobs(session: Session, *, status: str = "") -> list[PublishJob]
     if status:
         stmt = stmt.where(PublishJob.status == status)
     return list(session.scalars(stmt))
+
+
+def get_publish_job(session: Session, *, job_id: int) -> PublishJob:
+    job = session.get(PublishJob, job_id)
+    if not job:
+        raise ValueError(f"publish job not found: {job_id}")
+    return job
 
 
 def list_publish_executions(session: Session, *, job_id: int | None = None, limit: int = 20) -> list[PublishExecution]:
@@ -798,3 +875,13 @@ def execute_publish_job(session: Session, *, job_id: int, confirm: bool = False)
     session.add(execution)
     session.flush()
     return job, execution
+
+
+def _loads_json(value: str) -> dict:
+    try:
+        data = json.loads(value or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("JSON object is required")
+    return data

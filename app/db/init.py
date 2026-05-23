@@ -27,6 +27,10 @@ LEGACY_COLUMNS = {
         "actual_response_tokens": "INTEGER DEFAULT 0",
         "actual_total_tokens": "INTEGER DEFAULT 0",
     },
+    "publishing_targets": {
+        "work_identifier": "VARCHAR(255) DEFAULT ''",
+        "config_json": "TEXT DEFAULT '{}'",
+    },
 }
 
 

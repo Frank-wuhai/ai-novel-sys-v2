@@ -269,11 +269,14 @@ class PromptTemplate(Base):
 
 class PublishingTarget(Base):
     __tablename__ = "publishing_targets"
+    __table_args__ = (UniqueConstraint("platform", "account_label", "work_identifier"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     platform: Mapped[str] = mapped_column(String(120), nullable=False)
     account_label: Mapped[str] = mapped_column(String(120), default="")
+    work_identifier: Mapped[str] = mapped_column(String(255), default="")
     automation_mode: Mapped[str] = mapped_column(String(80), default="manual")
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(50), default="active")
 
 

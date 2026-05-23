@@ -59,7 +59,10 @@ python -m app.cli create-revision-brief --book-id 1 --chapter-number 1
 python -m app.cli revise-chapter --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli record-chapter-continuity --book-id 1 --chapter-number 1 --summary "..."
 python -m app.cli approve-chapter --version-id 1 --reviewer human
+python -m app.cli upsert-publishing-target --platform "manual" --account-label "main" --work-identifier "demo-work" --automation-mode manual --config-json "{}"
+python -m app.cli list-publishing-targets
 python -m app.cli create-publish-job --version-id 1 --platform "manual"
+python -m app.cli show-publish-job --job-id 1
 python -m app.cli publish-job-dry-run --job-id 1
 python -m app.cli queue-publish-job --job-id 1
 python -m app.cli execute-publish-job --job-id 1 --confirm
@@ -89,7 +92,9 @@ python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli show-llm-config
 python -m app.cli quality-trends --book-id 1
 python -m app.cli compare-chapter-versions --left-version-id 1 --right-version-id 2
+python -m app.cli list-publishing-targets
 python -m app.cli list-publish-jobs
+python -m app.cli show-publish-job --job-id 1
 python -m app.cli list-publish-executions --job-id 1
 python -m app.cli database-health
 python -m app.cli list-database-backups
@@ -116,6 +121,7 @@ python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 10
 - OpenClaw/browser automation only operates on approved publish jobs and returns execution reports.
 - A publish dry-run may update `publish_jobs.status` and `publish_jobs.result_report`; it must not post to a real platform.
 - Confirmed publish execution writes `publish_executions` and moves a queued job to `published` or `failed`.
+- Publishing target config is stored in `publishing_targets` and copied into `publish_jobs.automation_payload` when a job is created.
 
 ## Workflow Gates
 
@@ -137,6 +143,22 @@ Publish job status transitions:
 Commands cannot skip these transitions.
 
 `execute-publish-job` follows the same gate. Without `--confirm`, it records a blocked execution and leaves the job queued. With `--confirm`, it calls the platform automation boundary and records the result in `publish_executions`.
+
+Configure platform/work targets before creating publish jobs:
+
+```bash
+python -m app.cli upsert-publishing-target \
+  --platform "manual" \
+  --account-label "main-account" \
+  --work-identifier "platform-work-id" \
+  --automation-mode manual \
+  --config-json '{"work_url":"https://example.invalid/work"}'
+
+python -m app.cli list-publishing-targets
+python -m app.cli show-publish-job --job-id 1
+```
+
+The local web dashboard includes a publishing panel for target config, dry-run preview, execution reports, retry, queue, and explicit final publish confirmation.
 
 ## Quality Gate
 
@@ -367,7 +389,7 @@ For a lightweight local web operator console:
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, LLM usage/cost, failed task handling, chapter detail, feedback, Story/Canon/Evidence context, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, plus feedback recording and feedback adjustment creation. Manual approvals, continuity writeback, and final publish confirmation still require CLI confirmation.
+Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, LLM usage/cost, failed task handling, publishing targets/jobs/executions, chapter detail, feedback, Story/Canon/Evidence context, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, publish dry-run, publish queue, publish retry, explicit publish confirmation, plus feedback recording and feedback adjustment creation. Manual approvals and continuity writeback still require CLI confirmation.
 
 ## Human Decision Package
 

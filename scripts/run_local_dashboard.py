@@ -16,7 +16,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.session import configure_database, session_scope
-from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, GenerationTask, QualityReport
+from app.models.entities import (
+    Book,
+    Chapter,
+    ChapterBrief,
+    ChapterVersion,
+    GenerationTask,
+    PublishExecution,
+    PublishJob,
+    PublishingTarget,
+    QualityReport,
+)
 from app.services.canon import format_canon_context
 from app.services.dashboard import build_project_snapshot
 from app.services.evidence import audit_market_evidence, format_market_evidence_context
@@ -40,6 +50,13 @@ from app.services.llm_queue import (
     run_generation_queue,
 )
 from app.services.planning import AUTO_ACTIONS, run_next_action
+from app.services.production import (
+    execute_publish_job,
+    publish_job_dry_run,
+    queue_publish_job,
+    retry_publish_job,
+    upsert_publishing_target,
+)
 from app.services.story import format_story_control_context, get_story_bible
 
 
@@ -242,6 +259,18 @@ HTML = r"""<!doctype html>
       </div>
     </section>
     <section class="panel full">
+      <h2>发布配置与任务</h2>
+      <div id="publishing"></div>
+      <div class="forms">
+        <label>平台<input id="publishTargetPlatform" value="manual"></label>
+        <label>账号标签<input id="publishTargetAccount" value=""></label>
+        <label>作品标识<input id="publishTargetWork" value=""></label>
+        <label>自动化模式<input id="publishTargetMode" value="manual"></label>
+        <button id="savePublishTarget">保存发布目标</button>
+        <label style="grid-column: 1 / -1;">配置 JSON<textarea id="publishTargetConfig">{}</textarea></label>
+      </div>
+    </section>
+    <section class="panel full">
       <h2>知识上下文</h2>
       <div id="knowledge"></div>
     </section>
@@ -269,12 +298,13 @@ HTML = r"""<!doctype html>
         fetchJson('/api/snapshot?' + params.toString()),
         fetchJson('/api/queue-health')
       ]);
-      const [detail, feedback, knowledge, llmUsage, failedTasks] = await Promise.all([
+      const [detail, feedback, knowledge, llmUsage, failedTasks, publishing] = await Promise.all([
         fetchJson('/api/chapter-detail?' + chapterParams.toString()),
         fetchJson('/api/feedback?book_id=' + encodeURIComponent(bookId)),
         fetchJson('/api/knowledge?' + chapterParams.toString()),
         fetchJson('/api/llm-usage?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/failed-tasks?book_id=' + encodeURIComponent(bookId))
+        fetchJson('/api/failed-tasks?book_id=' + encodeURIComponent(bookId)),
+        fetchJson('/api/publishing?book_id=' + encodeURIComponent(bookId))
       ]);
       currentSnapshot = snapshot;
       renderSummary(snapshot, health);
@@ -286,6 +316,7 @@ HTML = r"""<!doctype html>
       renderFailedTasks(failedTasks);
       renderChapterDetail(detail);
       renderFeedback(feedback);
+      renderPublishing(publishing);
       renderKnowledge(knowledge);
       $('recommendation').innerHTML = `<div class="command">${escapeHtml(snapshot.recommendation)}</div>`;
       $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
@@ -549,6 +580,47 @@ HTML = r"""<!doctype html>
         ]));
     }
 
+    function renderPublishing(payload) {
+      $('publishing').innerHTML =
+        table(['目标', '平台', '账号', '作品', '模式', '状态'], payload.targets.map((item) => [
+          item.id,
+          item.platform,
+          item.account_label,
+          item.work_identifier,
+          item.automation_mode,
+          statusLabel(item.status)
+        ])) +
+        table(['任务', '版本', '章节', '平台', '状态', '预览', '操作'], payload.jobs.map((item) => [
+          item.id,
+          item.version_id,
+          item.chapter_number || '',
+          item.platform,
+          statusLabel(item.status),
+          `<details><summary>预览</summary><pre>${escapeHtml(item.preview.title + '\n字数：' + item.preview.content_chars + '\n\n' + item.preview.content_excerpt)}</pre><pre>${escapeHtml(item.result_report || '')}</pre></details>`,
+          publishButtons(item)
+        ]), true) +
+        table(['执行', '任务', '平台', '状态', '模式', '报告'], payload.executions.map((item) => [
+          item.id,
+          item.publish_job_id,
+          item.platform,
+          statusLabel(item.status),
+          item.automation_mode,
+          item.report
+        ]));
+    }
+
+    function publishButtons(item) {
+      const buttons = [];
+      if (item.status === 'pending') buttons.push(actionButton('发布干跑', 'publish_dry_run', item.id));
+      if (item.status === 'dry_run_ready') buttons.push(actionButton('发布入队', 'queue_publish_job', item.id));
+      if (item.status === 'queued') {
+        buttons.push(actionButton('确认检查', 'execute_publish_job_blocked', item.id));
+        buttons.push(actionButton('确认发布', 'execute_publish_job_confirm', item.id));
+      }
+      if (item.status === 'failed') buttons.push(actionButton('重试发布', 'retry_publish_job', item.id));
+      return `<div class="actions">${buttons.join('')}</div>`;
+    }
+
     function renderKnowledge(payload) {
       $('knowledge').innerHTML =
         table(['故事圣经', '状态'], [[payload.story_bible?.id || '', statusLabel(payload.story_bible?.status || 'missing')]]) +
@@ -713,6 +785,9 @@ HTML = r"""<!doctype html>
     document.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-action]');
       if (!button) return;
+      if (button.dataset.action === 'execute_publish_job_confirm') {
+        if (!window.confirm('确认要执行最终发布吗？这个动作会把发布任务标记为已发布。')) return;
+      }
       postAction(button.dataset.action, {task_id: Number(button.dataset.taskId)}).catch(showError);
     });
     $('recordFeedback').addEventListener('click', () => {
@@ -732,6 +807,15 @@ HTML = r"""<!doctype html>
         feedback_ids: $('adjustmentFeedbackIds').value,
         adjustment_text: $('adjustmentText').value,
         apply_to_brief: true
+      }).catch(showError);
+    });
+    $('savePublishTarget').addEventListener('click', () => {
+      postAction('upsert_publishing_target', {
+        platform: $('publishTargetPlatform').value,
+        account_label: $('publishTargetAccount').value,
+        work_identifier: $('publishTargetWork').value,
+        automation_mode: $('publishTargetMode').value,
+        config_json: $('publishTargetConfig').value
       }).catch(showError);
     });
 
@@ -770,6 +854,7 @@ def main() -> int:
                 _knowledge_payload(session, book_id=books[0].id, chapter_number=1)
                 _llm_usage_payload(session, book_id=books[0].id)
                 _failed_tasks_payload(session, book_id=books[0].id)
+                _publishing_payload(session, book_id=books[0].id)
             action_result = _perform_action(session, {"action": "queue_health"})
             print("dashboard_self_test=PASS")
             print(f"book_count={len(books)}")
@@ -886,6 +971,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 with session_scope() as session:
                     self._send_json(_failed_tasks_payload(session, book_id=_int_query(query, "book_id", 0)))
                 return
+            if parsed.path == "/api/publishing":
+                query = parse_qs(parsed.query)
+                with session_scope() as session:
+                    self._send_json(_publishing_payload(session, book_id=_int_query(query, "book_id", 0)))
+                return
             self._send_text("not found", status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_text(f"ERROR: {exc}", status=HTTPStatus.BAD_REQUEST)
@@ -976,6 +1066,31 @@ def _perform_action(session, payload: dict) -> dict:
     if action == "retry_queue_task":
         task = retry_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
         return {"status": task.status, "generation_task_id": task.id}
+    if action == "publish_dry_run":
+        job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
+        return {"status": job.status, "publish_job_id": job.id}
+    if action == "queue_publish_job":
+        job = queue_publish_job(session, job_id=int(payload.get("task_id") or 0))
+        return {"status": job.status, "publish_job_id": job.id}
+    if action == "retry_publish_job":
+        job = retry_publish_job(session, job_id=int(payload.get("task_id") or 0))
+        return {"status": job.status, "publish_job_id": job.id}
+    if action == "execute_publish_job_blocked":
+        job, execution = execute_publish_job(session, job_id=int(payload.get("task_id") or 0), confirm=False)
+        return {"status": execution.status, "publish_job_id": job.id, "publish_execution_id": execution.id}
+    if action == "execute_publish_job_confirm":
+        job, execution = execute_publish_job(session, job_id=int(payload.get("task_id") or 0), confirm=True)
+        return {"status": execution.status, "publish_job_id": job.id, "publish_execution_id": execution.id}
+    if action == "upsert_publishing_target":
+        target = upsert_publishing_target(
+            session,
+            platform=str(payload.get("platform") or ""),
+            account_label=str(payload.get("account_label") or ""),
+            work_identifier=str(payload.get("work_identifier") or ""),
+            automation_mode=str(payload.get("automation_mode") or "manual"),
+            config_json=str(payload.get("config_json") or "{}"),
+        )
+        return {"status": "saved", "publishing_target_id": target.id}
     if action == "record_feedback":
         feedback = record_platform_feedback(
             session,
@@ -1214,6 +1329,78 @@ def _failed_tasks_payload(session, *, book_id: int) -> dict:
         "total": len(rows),
         "by_error_category": dict(sorted(counts.items())),
         "items": rows,
+    }
+
+
+def _publishing_payload(session, *, book_id: int) -> dict:
+    targets = list(session.scalars(select(PublishingTarget).order_by(PublishingTarget.id)))
+    jobs = list(
+        session.scalars(
+            select(PublishJob)
+            .join(ChapterVersion, ChapterVersion.id == PublishJob.chapter_version_id)
+            .join(Chapter, Chapter.id == ChapterVersion.chapter_id)
+            .where(Chapter.book_id == book_id)
+            .order_by(PublishJob.id.desc())
+            .limit(20)
+        )
+    )
+    executions = list(
+        session.scalars(
+            select(PublishExecution)
+            .join(PublishJob, PublishJob.id == PublishExecution.publish_job_id)
+            .join(ChapterVersion, ChapterVersion.id == PublishJob.chapter_version_id)
+            .join(Chapter, Chapter.id == ChapterVersion.chapter_id)
+            .where(Chapter.book_id == book_id)
+            .order_by(PublishExecution.id.desc())
+            .limit(20)
+        )
+    )
+    return {
+        "targets": [
+            {
+                "id": target.id,
+                "platform": target.platform,
+                "account_label": target.account_label,
+                "work_identifier": target.work_identifier,
+                "automation_mode": target.automation_mode,
+                "status": target.status,
+                "config": _loads_json(target.config_json),
+            }
+            for target in targets
+        ],
+        "jobs": [_publish_job_payload(session, job) for job in jobs],
+        "executions": [
+            {
+                "id": execution.id,
+                "publish_job_id": execution.publish_job_id,
+                "platform": execution.platform,
+                "status": execution.status,
+                "automation_mode": execution.automation_mode,
+                "report": execution.report,
+                "artifact_path": execution.artifact_path,
+            }
+            for execution in executions
+        ],
+    }
+
+
+def _publish_job_payload(session, job: PublishJob) -> dict:
+    version = session.get(ChapterVersion, job.chapter_version_id)
+    chapter = session.get(Chapter, version.chapter_id) if version else None
+    content = version.content if version else ""
+    return {
+        "id": job.id,
+        "version_id": job.chapter_version_id,
+        "chapter_number": chapter.chapter_number if chapter else None,
+        "platform": job.platform,
+        "status": job.status,
+        "automation_payload": _loads_json(job.automation_payload),
+        "result_report": job.result_report,
+        "preview": {
+            "title": version.title if version else "",
+            "content_chars": len(content),
+            "content_excerpt": content[:1200],
+        },
     }
 
 
