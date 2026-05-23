@@ -496,6 +496,14 @@ python scripts/migration_regression_test.py
 
 It creates `data/migration-regression.db`, runs `alembic upgrade head`, and verifies the current head plus key tables, fields, and publishing target constraints. If Alembic is not installed in the active environment, the script exits with a clear dependency message instead of pretending the migration chain passed.
 
+Run the focused database restore regression test when changing backup, restore, or database safety code:
+
+```bash
+python scripts/database_restore_regression_test.py
+```
+
+It creates `data/database-restore-regression.db`, creates a backup, verifies the restore confirmation guard, adds marker data, restores the backup, verifies the marker data is gone, and checks that the automatic pre-restore backup file exists.
+
 ## Prompt And Structured Draft Output
 
 Draft generation uses versioned prompt templates stored in `prompt_templates`.
