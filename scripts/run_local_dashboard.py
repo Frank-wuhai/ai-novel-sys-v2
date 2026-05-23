@@ -29,6 +29,12 @@ from app.models.entities import (
 )
 from app.services.canon import format_canon_context
 from app.services.dashboard import build_project_snapshot
+from app.services.db_ops import (
+    check_database_health,
+    create_database_backup,
+    list_database_backups,
+    restore_database_from_backup,
+)
 from app.services.evidence import audit_market_evidence, format_market_evidence_context
 from app.services.feedback import (
     apply_feedback_adjustment_to_brief,
@@ -271,6 +277,16 @@ HTML = r"""<!doctype html>
       </div>
     </section>
     <section class="panel full">
+      <h2>数据库安全</h2>
+      <div id="databaseOps"></div>
+      <div class="forms">
+        <label>备份标签<input id="databaseBackupLabel" value="dashboard"></label>
+        <button id="createDatabaseBackup">创建备份</button>
+        <label style="grid-column: 1 / -1;">恢复备份路径<input id="databaseRestorePath" placeholder="data/backups/example.db"></label>
+        <button id="restoreDatabase">恢复数据库</button>
+      </div>
+    </section>
+    <section class="panel full">
       <h2>知识上下文</h2>
       <div id="knowledge"></div>
     </section>
@@ -298,13 +314,14 @@ HTML = r"""<!doctype html>
         fetchJson('/api/snapshot?' + params.toString()),
         fetchJson('/api/queue-health')
       ]);
-      const [detail, feedback, knowledge, llmUsage, failedTasks, publishing] = await Promise.all([
+      const [detail, feedback, knowledge, llmUsage, failedTasks, publishing, databaseOps] = await Promise.all([
         fetchJson('/api/chapter-detail?' + chapterParams.toString()),
         fetchJson('/api/feedback?book_id=' + encodeURIComponent(bookId)),
         fetchJson('/api/knowledge?' + chapterParams.toString()),
         fetchJson('/api/llm-usage?book_id=' + encodeURIComponent(bookId)),
         fetchJson('/api/failed-tasks?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/publishing?book_id=' + encodeURIComponent(bookId))
+        fetchJson('/api/publishing?book_id=' + encodeURIComponent(bookId)),
+        fetchJson('/api/database')
       ]);
       currentSnapshot = snapshot;
       renderSummary(snapshot, health);
@@ -317,6 +334,7 @@ HTML = r"""<!doctype html>
       renderChapterDetail(detail);
       renderFeedback(feedback);
       renderPublishing(publishing);
+      renderDatabaseOps(databaseOps);
       renderKnowledge(knowledge);
       $('recommendation').innerHTML = `<div class="command">${escapeHtml(snapshot.recommendation)}</div>`;
       $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
@@ -621,6 +639,26 @@ HTML = r"""<!doctype html>
       return `<div class="actions">${buttons.join('')}</div>`;
     }
 
+    function renderDatabaseOps(payload) {
+      const health = payload.health;
+      $('databaseOps').innerHTML =
+        table(['检查项', '值'], [
+          ['数据库地址', health.database_url],
+          ['SQLite 文件', health.sqlite_path],
+          ['数据表数量', health.table_count],
+          ['迁移脚本数量', health.migration_count],
+          ['最新迁移', health.latest_migration],
+          ['备份数量', health.backup_count]
+        ]) +
+        table(['备份', '状态', '大小', '路径', '报告'], payload.backups.map((item) => [
+          `<button class="secondary" data-use-backup-path="${escapeHtml(item.backup_path)}">#${item.id}</button>`,
+          statusLabel(item.status),
+          formatBytes(item.size_bytes),
+          `<span class="command">${escapeHtml(item.backup_path)}</span>`,
+          escapeHtml(item.report)
+        ]), true);
+    }
+
     function renderKnowledge(payload) {
       $('knowledge').innerHTML =
         table(['故事圣经', '状态'], [[payload.story_bible?.id || '', statusLabel(payload.story_bible?.status || 'missing')]]) +
@@ -653,13 +691,16 @@ HTML = r"""<!doctype html>
       applied: '已应用',
       blocked: '阻塞',
       canceled: '已取消',
+      created: '已创建',
       completed: '已完成',
       done: '完成',
       draft: '草稿',
       dry_run_ready: '干跑通过',
+      executed: '已执行',
       failed: '失败',
       missing: '缺失',
       needs_revision: '需修订',
+      ok: '正常',
       no_version: '无版本',
       pass: '通过',
       paused: '已暂停',
@@ -669,12 +710,16 @@ HTML = r"""<!doctype html>
       published: '已发布',
       queued: '已入队',
       ready: '就绪',
+      recorded: '已记录',
       reviewed_pass: '质检通过',
+      restored: '已恢复',
       revision_ready: '修订就绪',
-      running: '运行中'
+      running: '运行中',
+      saved: '已保存'
     };
     const ACTION_LABELS = {
       approve_chapter: '人工审批章节',
+      backup_database: '创建数据库备份',
       cancel_queue_task: '取消队列任务',
       create_chapter_brief: '创建章节 Brief',
       create_feedback_adjustment: '创建反馈调整',
@@ -692,6 +737,7 @@ HTML = r"""<!doctype html>
       retry_queue_task: '重试队列任务',
       review_chapter: '质检章节',
       revise_chapter: '修订章节',
+      restore_database: '恢复数据库',
       run_next_action: '执行安全下一步',
       run_queue: '运行队列',
       done: '已完成',
@@ -752,6 +798,13 @@ HTML = r"""<!doctype html>
       return String(value);
     }
 
+    function formatBytes(value) {
+      const size = Number(value || 0);
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+      return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    }
+
     $('refresh').addEventListener('click', refresh);
     document.addEventListener('click', (event) => {
       const chapterButton = event.target.closest('button[data-select-chapter]');
@@ -767,6 +820,10 @@ HTML = r"""<!doctype html>
           ids.push(feedbackButton.dataset.addFeedbackId);
         }
         $('adjustmentFeedbackIds').value = ids.join(',');
+      }
+      const backupButton = event.target.closest('button[data-use-backup-path]');
+      if (backupButton) {
+        $('databaseRestorePath').value = backupButton.dataset.useBackupPath;
       }
     });
     $('runQueue').addEventListener('click', () => {
@@ -818,6 +875,23 @@ HTML = r"""<!doctype html>
         config_json: $('publishTargetConfig').value
       }).catch(showError);
     });
+    $('createDatabaseBackup').addEventListener('click', () => {
+      postAction('backup_database', {
+        label: $('databaseBackupLabel').value
+      }).catch(showError);
+    });
+    $('restoreDatabase').addEventListener('click', () => {
+      const backupPath = $('databaseRestorePath').value.trim();
+      if (!backupPath) {
+        showError(new Error('请先填写或选择备份路径'));
+        return;
+      }
+      if (!window.confirm('确认恢复数据库？当前数据库会先自动备份，然后被所选备份覆盖。')) return;
+      postAction('restore_database', {
+        backup_path: backupPath,
+        confirm: true
+      }).catch(showError);
+    });
 
     function showError(error) {
       $('state').textContent = '出错';
@@ -855,6 +929,7 @@ def main() -> int:
                 _llm_usage_payload(session, book_id=books[0].id)
                 _failed_tasks_payload(session, book_id=books[0].id)
                 _publishing_payload(session, book_id=books[0].id)
+                _database_payload(session)
             action_result = _perform_action(session, {"action": "queue_health"})
             print("dashboard_self_test=PASS")
             print(f"book_count={len(books)}")
@@ -976,6 +1051,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 with session_scope() as session:
                     self._send_json(_publishing_payload(session, book_id=_int_query(query, "book_id", 0)))
                 return
+            if parsed.path == "/api/database":
+                with session_scope() as session:
+                    self._send_json(_database_payload(session))
+                return
             self._send_text("not found", status=HTTPStatus.NOT_FOUND)
         except Exception as exc:
             self._send_text(f"ERROR: {exc}", status=HTTPStatus.BAD_REQUEST)
@@ -991,6 +1070,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw or "{}")
             if not isinstance(payload, dict):
                 raise ValueError("JSON object is required")
+            if payload.get("action") == "restore_database":
+                self._send_json(_perform_restore_action(payload))
+                return
             with session_scope() as session:
                 self._send_json(_perform_action(session, payload))
         except Exception as exc:
@@ -1066,6 +1148,14 @@ def _perform_action(session, payload: dict) -> dict:
     if action == "retry_queue_task":
         task = retry_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
         return {"status": task.status, "generation_task_id": task.id}
+    if action == "backup_database":
+        backup = create_database_backup(session, label=str(payload.get("label") or "dashboard"))
+        return {
+            "status": backup.status,
+            "database_backup_id": backup.id,
+            "backup_path": backup.backup_path,
+            "size_bytes": backup.size_bytes,
+        }
     if action == "publish_dry_run":
         job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
         return {"status": job.status, "publish_job_id": job.id}
@@ -1136,6 +1226,20 @@ def _perform_action(session, payload: dict) -> dict:
             "object_id": result.object_id,
         }
     raise ValueError(f"unsupported action: {action}")
+
+
+def _perform_restore_action(payload: dict) -> dict:
+    result = restore_database_from_backup(
+        backup_path=str(payload.get("backup_path") or ""),
+        confirm=bool(payload.get("confirm")),
+    )
+    return {
+        "status": "restored",
+        "database_path": result.database_path,
+        "source_backup_path": result.source_backup_path,
+        "pre_restore_backup_path": result.pre_restore_backup_path,
+        "restored_size_bytes": result.restored_size_bytes,
+    }
 
 
 def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
@@ -1380,6 +1484,33 @@ def _publishing_payload(session, *, book_id: int) -> dict:
                 "artifact_path": execution.artifact_path,
             }
             for execution in executions
+        ],
+    }
+
+
+def _database_payload(session) -> dict:
+    health = check_database_health(session)
+    backups = list_database_backups(session, limit=20)
+    return {
+        "health": {
+            "database_url": health.database_url,
+            "sqlite_path": health.sqlite_path,
+            "table_count": health.table_count,
+            "tables": health.tables,
+            "migration_count": health.migration_count,
+            "latest_migration": health.latest_migration,
+            "backup_count": health.backup_count,
+        },
+        "backups": [
+            {
+                "id": backup.id,
+                "database_url": backup.database_url,
+                "backup_path": backup.backup_path,
+                "status": backup.status,
+                "size_bytes": backup.size_bytes,
+                "report": backup.report,
+            }
+            for backup in backups
         ],
     }
 

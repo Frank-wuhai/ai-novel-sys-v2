@@ -158,7 +158,7 @@ python -m app.cli list-publishing-targets
 python -m app.cli show-publish-job --job-id 1
 ```
 
-The local web dashboard includes a publishing panel for target config, dry-run preview, execution reports, retry, queue, and explicit final publish confirmation.
+The local web dashboard includes a publishing panel for target config, dry-run preview, execution reports, retry, queue, and explicit final publish confirmation. It also includes a database safety panel for health checks, backup creation, backup history, and confirmed sqlite restore.
 
 ## Quality Gate
 
@@ -389,7 +389,7 @@ For a lightweight local web operator console:
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, LLM usage/cost, failed task handling, publishing targets/jobs/executions, chapter detail, feedback, Story/Canon/Evidence context, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, publish dry-run, publish queue, publish retry, explicit publish confirmation, plus feedback recording and feedback adjustment creation. Manual approvals and continuity writeback still require CLI confirmation.
+Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, LLM usage/cost, failed task handling, publishing targets/jobs/executions, database health/backups, chapter detail, feedback, Story/Canon/Evidence context, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, publish dry-run, publish queue, publish retry, explicit publish confirmation, database backup, confirmed sqlite restore, plus feedback recording and feedback adjustment creation. Manual approvals and continuity writeback still require CLI confirmation.
 
 ## Human Decision Package
 
