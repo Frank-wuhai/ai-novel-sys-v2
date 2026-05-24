@@ -866,7 +866,7 @@ def publish_job_dry_run(session: Session, *, job_id: int) -> PublishJob:
         title=version.title,
         content=version.content,
         job_id=job.id,
-        target_config=payload.get("target_config", {}),
+        target_config=_automation_target_config(payload),
     )
     job.status = move("publish_job", job.status, result.status, "dry_run")
     job.result_report = _append_artifact_report(result.report, artifact_path=result.artifact_path)
@@ -919,7 +919,7 @@ def execute_publish_job(session: Session, *, job_id: int, confirm: bool = False)
     if job.status != "queued":
         raise ValueError("publish execution requires queued publish job")
     payload = _loads_json(job.automation_payload)
-    target_config = payload.get("target_config", {})
+    target_config = _automation_target_config(payload)
     operator = OpenClawPublishingOperator()
     if not confirm:
         result = operator.publish_dry_run(
@@ -968,6 +968,17 @@ def _append_artifact_report(report: str, *, artifact_path: str) -> str:
     if not artifact_path:
         return report
     return f"{report}\nartifact_path={artifact_path}"
+
+
+def _automation_target_config(payload: dict) -> dict:
+    target_config = payload.get("target_config", {})
+    if not isinstance(target_config, dict):
+        target_config = {}
+    merged = dict(target_config)
+    for key in ("publishing_target_id", "account_label", "work_identifier", "automation_mode"):
+        if key in payload and key not in merged:
+            merged[key] = payload[key]
+    return merged
 
 
 def _loads_json(value: str) -> dict:

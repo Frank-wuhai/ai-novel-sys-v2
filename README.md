@@ -162,6 +162,23 @@ python -m app.cli list-publishing-targets
 python -m app.cli show-publish-job --job-id 1
 ```
 
+For Fanqie, configure a dedicated target. The integration is browser-automation based rather than an official API; dry-run always writes a Fanqie publish plan and command artifact, while confirmed execution still requires `enable_real_publish=true` plus a configured browser session:
+
+```bash
+python -m app.cli upsert-publishing-target \
+  --platform "番茄小说" \
+  --account-label "main-account" \
+  --work-identifier "fanqie-work-id" \
+  --automation-mode fanqie_playwright \
+  --config-json '{"writer_url":"https://fanqienovel.com/author","cdp_url":"http://127.0.0.1:9222","publish_mode":"immediate","enable_real_publish":false}'
+
+python -m app.cli create-publish-job --version-id 1 --platform "番茄小说"
+python -m app.cli publish-job-dry-run --job-id 1
+python scripts/publish_fanqie.py --artifact-dir outputs/publish_executions/job-1-番茄小说-YYYYMMDD-HHMMSS
+```
+
+Only run `python scripts/publish_fanqie.py --artifact-dir ... --confirm` after you have logged into the Fanqie writer backend, verified the generated `fanqie_publish_plan.json`, and changed the target config to `"enable_real_publish": true`.
+
 The local web dashboard includes a publishing panel for target config, dry-run preview, execution reports, retry, queue, and explicit final publish confirmation. It also includes a database safety panel for health checks, backup creation, backup history, and confirmed sqlite restore.
 
 ## Quality Gate

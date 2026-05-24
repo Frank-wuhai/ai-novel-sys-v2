@@ -1373,6 +1373,46 @@ def main() -> int:
         print("duplicate publish job guard did not trigger expected message")
         print(duplicate)
         return 1
+    fanqie_target = run([
+        "upsert-publishing-target",
+        "--platform",
+        "番茄小说",
+        "--account-label",
+        "smoke-fanqie",
+        "--work-identifier",
+        "fanqie-work",
+        "--automation-mode",
+        "fanqie_playwright",
+        "--config-json",
+        '{"writer_url":"https://fanqienovel.com/author","publish_mode":"immediate","selectors":{"title":"input","editor":"textarea"}}',
+    ])
+    if "publishing_target_id=" not in fanqie_target:
+        print("fanqie publishing target was not created")
+        print(fanqie_target)
+        return 1
+    fanqie_job_id = extract_id("publish_job_id", run(["create-publish-job", "--version-id", str(v1), "--platform", "番茄小说"]))
+    fanqie_dry_run = run(["publish-job-dry-run", "--job-id", str(fanqie_job_id)])
+    fanqie_artifact_path = Path(extract_value("artifact_path", fanqie_dry_run))
+    fanqie_plan_path = fanqie_artifact_path / "fanqie_publish_plan.json"
+    if (
+        "status=dry_run_ready" not in fanqie_dry_run
+        or not fanqie_plan_path.exists()
+        or not (fanqie_artifact_path / "fanqie_command.txt").exists()
+    ):
+        print("fanqie dry-run did not create publish plan artifacts")
+        print(fanqie_dry_run)
+        return 1
+    fanqie_plan = json.loads(fanqie_plan_path.read_text(encoding="utf-8"))
+    if fanqie_plan.get("platform") != "番茄小说" or fanqie_plan.get("work_identifier") != "fanqie-work":
+        print("fanqie publish plan did not include target context")
+        print(fanqie_plan)
+        return 1
+    run(["queue-publish-job", "--job-id", str(fanqie_job_id)])
+    fanqie_confirm = run(["execute-publish-job", "--job-id", str(fanqie_job_id), "--confirm"])
+    if "execution_status=failed" not in fanqie_confirm or "enable_real_publish=true" not in fanqie_confirm:
+        print("fanqie confirmed publish did not keep the real-publish safety gate")
+        print(fanqie_confirm)
+        return 1
     database_health = run(["database-health"])
     if (
         "latest_migration=20260524_0006_indexes_and_constraints.py" not in database_health

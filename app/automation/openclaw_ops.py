@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from app.automation.fanqie import fanqie_script_command, is_fanqie_platform, write_fanqie_publish_plan
 from app.core.config import settings
 
 
@@ -33,18 +34,34 @@ class OpenClawPublishingOperator:
     ) -> AutomationResult:
         if not title or not content:
             return AutomationResult(status="blocked", report="title and content are required")
+        config = target_config or {}
         artifact_path = _write_publish_artifact(
             mode="dry_run",
             platform=platform,
             title=title,
             content=content,
             job_id=job_id,
-            target_config=target_config or {},
+            target_config=config,
             status="dry_run_ready",
         )
+        extra_report = ""
+        if is_fanqie_platform(platform):
+            artifact_dir = Path(artifact_path)
+            plan_path = write_fanqie_publish_plan(
+                artifact_dir=artifact_dir,
+                mode="dry_run",
+                title=title,
+                content=content,
+                target_config=config,
+            )
+            command_path = _write_command_artifact(
+                artifact_dir,
+                fanqie_script_command(artifact_dir=artifact_dir, confirm=False),
+            )
+            extra_report = f"\nfanqie_plan={plan_path}\nfanqie_command={command_path}"
         return AutomationResult(
             status="dry_run_ready",
-            report=f"Would publish to {platform}: title={title!r}, chars={len(content)}",
+            report=f"Would publish to {platform}: title={title!r}, chars={len(content)}{extra_report}",
             artifact_path=artifact_path,
         )
 
@@ -60,6 +77,54 @@ class OpenClawPublishingOperator:
         if not title or not content:
             return AutomationResult(status="failed", report="title and content are required")
         config = target_config or {}
+        if is_fanqie_platform(platform):
+            artifact_path = _write_publish_artifact(
+                mode="fanqie_confirmed",
+                platform=platform,
+                title=title,
+                content=content,
+                job_id=job_id,
+                target_config=config,
+                status="failed",
+            )
+            artifact_dir = Path(artifact_path)
+            plan_path = write_fanqie_publish_plan(
+                artifact_dir=artifact_dir,
+                mode="confirmed",
+                title=title,
+                content=content,
+                target_config=config,
+            )
+            command_path = _write_command_artifact(
+                artifact_dir,
+                fanqie_script_command(artifact_dir=artifact_dir, confirm=True),
+            )
+            if not config.get("enable_real_publish", False):
+                return AutomationResult(
+                    status="failed",
+                    report=(
+                        "fanqie publish requires target_config.enable_real_publish=true before real platform execution"
+                        f"\nfanqie_plan={plan_path}\nfanqie_command={command_path}"
+                    ),
+                    artifact_path=artifact_path,
+                )
+            if not config.get("cdp_url") and not config.get("user_data_dir"):
+                return AutomationResult(
+                    status="failed",
+                    report=(
+                        "fanqie publish requires cdp_url or user_data_dir for browser automation"
+                        f"\nfanqie_plan={plan_path}\nfanqie_command={command_path}"
+                    ),
+                    artifact_path=artifact_path,
+                )
+            return AutomationResult(
+                status="failed",
+                report=(
+                    "fanqie browser execution script is prepared; run the recorded fanqie_command after logging in and verifying selectors"
+                    f"\nfanqie_plan={plan_path}\nfanqie_command={command_path}"
+                ),
+                artifact_path=artifact_path,
+            )
         if config.get("require_manual_platform_step", False):
             artifact_path = _write_publish_artifact(
                 mode="confirmed_blocked",
@@ -124,6 +189,12 @@ def _write_publish_artifact(
         encoding="utf-8",
     )
     return str(artifact_dir)
+
+
+def _write_command_artifact(artifact_dir: Path, command: list[str]) -> Path:
+    path = artifact_dir / "fanqie_command.txt"
+    path.write_text(" ".join(command) + "\n", encoding="utf-8")
+    return path
 
 
 def _safe_name(value: str) -> str:
