@@ -45,7 +45,7 @@ from app.services.feedback import (
     record_platform_feedback,
     summarize_platform_feedback,
 )
-from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
+from app.services.llm_audit import llm_failure_suggestion, list_llm_request_logs, summarize_llm_failures, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
 from app.services.llm_queue import (
     QUEUE_TYPES,
@@ -488,6 +488,14 @@ HTML = r"""<!doctype html>
 
     function renderFailedTasks(payload) {
       const counts = Object.entries(payload.by_error_category || {}).map(([name, count]) => [errorLabel(name), count]);
+      const llmRows = (payload.llm_failures || []).map((item) => [
+        errorLabel(item.error_category),
+        item.count,
+        item.latest_request_id,
+        taskTypeLabel(item.latest_task_type),
+        item.latest_model,
+        item.suggestion
+      ]);
       const rows = payload.items.map((item) => [
         item.id,
         taskTypeLabel(item.task_type),
@@ -498,6 +506,7 @@ HTML = r"""<!doctype html>
       ]);
       $('failedTasks').innerHTML =
         table(['错误类型', '数量'], counts) +
+        table(['LLM 错误', '次数', '最近请求', '类型', '模型', '处理建议'], llmRows) +
         table(['任务', '类型', '章节', '错误', '详情', '操作'], rows, true);
     }
 
@@ -1455,12 +1464,14 @@ def _failed_tasks_payload(session, *, book_id: int) -> dict:
         )
     )
     counts: dict[str, int] = {}
+    advice: dict[str, str] = {}
     rows = []
     for task in tasks:
         input_data = _loads_json(task.input_json)
         output_data = _loads_json(task.output_json)
         error_category = str(output_data.get("error_category") or "")
         counts[error_category] = counts.get(error_category, 0) + 1
+        advice[error_category] = llm_failure_suggestion(error_category)
         rows.append(
             {
                 "id": task.id,
@@ -1477,6 +1488,20 @@ def _failed_tasks_payload(session, *, book_id: int) -> dict:
     return {
         "total": len(rows),
         "by_error_category": dict(sorted(counts.items())),
+        "advice_by_error_category": {key: advice[key] for key in sorted(advice)},
+        "llm_failures": [
+            {
+                "error_category": item.error_category,
+                "count": item.count,
+                "latest_request_id": item.latest_request_id,
+                "latest_task_type": item.latest_task_type,
+                "latest_provider": item.latest_provider,
+                "latest_model": item.latest_model,
+                "latest_elapsed_ms": item.latest_elapsed_ms,
+                "suggestion": item.suggestion,
+            }
+            for item in summarize_llm_failures(session, book_id=book_id, limit=20)
+        ],
         "items": rows,
     }
 

@@ -40,6 +40,7 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
 python -m app.cli budget-check --book-id 1 --token-budget 100000
 python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-failure-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli show-llm-config
 python -m app.cli live-llm-smoke --yes --book-id 1
@@ -89,6 +90,7 @@ python -m app.cli list-generation-tasks --book-id 1
 python -m app.cli show-generation-task --task-id 1
 python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-failure-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli show-llm-config
 python -m app.cli quality-trends --book-id 1
@@ -568,6 +570,7 @@ Each LLM call also writes a durable `llm_request_logs` row. Use these commands t
 ```bash
 python -m app.cli list-llm-requests --book-id 1 --limit 20
 python -m app.cli llm-usage-summary --book-id 1
+python -m app.cli llm-failure-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1 --input-price-per-1m 1.0 --output-price-per-1m 2.0
 ```

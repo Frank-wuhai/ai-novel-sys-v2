@@ -36,7 +36,7 @@ from app.services.db_ops import (
     list_database_backups,
     restore_database_from_backup,
 )
-from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
+from app.services.llm_audit import list_llm_request_logs, summarize_llm_failures, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
 from app.services.llm_queue import (
@@ -409,6 +409,10 @@ def main() -> None:
 
     p = sub.add_parser("llm-usage-summary")
     p.add_argument("--book-id", type=int, default=0)
+
+    p = sub.add_parser("llm-failure-summary")
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--limit", type=int, default=20)
 
     p = sub.add_parser("llm-cost-summary")
     p.add_argument("--book-id", type=int, default=0)
@@ -1271,6 +1275,25 @@ def main() -> None:
                 print(f"billable_response_tokens={summary.billable_response_tokens}")
                 print(f"billable_total_tokens={summary.billable_total_tokens}")
                 print(f"elapsed_ms={summary.elapsed_ms}")
+            elif args.cmd == "llm-failure-summary":
+                rows = summarize_llm_failures(session, book_id=args.book_id or None, limit=args.limit)
+                print(f"failure_bucket_count={len(rows)}")
+                for row in rows:
+                    print(
+                        "\t".join(
+                            [
+                                "failure_bucket",
+                                f"error_category={row.error_category}",
+                                f"count={row.count}",
+                                f"latest_request_id={row.latest_request_id}",
+                                f"task_type={row.latest_task_type}",
+                                f"provider={row.latest_provider}",
+                                f"model={row.latest_model}",
+                                f"elapsed_ms={row.latest_elapsed_ms}",
+                                f"suggestion={row.suggestion}",
+                            ]
+                        )
+                    )
             elif args.cmd == "llm-cost-summary":
                 cost = summarize_llm_cost(
                     session,

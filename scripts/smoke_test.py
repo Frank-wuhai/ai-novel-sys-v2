@@ -798,6 +798,16 @@ def main() -> int:
         print("live-llm-smoke did not write failed request log")
         print(live_smoke_logs)
         return 1
+    failure_summary = run(["llm-failure-summary", "--book-id", str(book_id), "--limit", "5"])
+    if (
+        "failure_bucket_count=" not in failure_summary
+        or "failure_bucket\terror_category=auth" not in failure_summary
+        or "latest_request_id=" not in failure_summary
+        or "suggestion=检查 ARK_API_KEY" not in failure_summary
+    ):
+        print("llm-failure-summary did not aggregate auth failure")
+        print(failure_summary)
+        return 1
     run([
         "create-chapter-brief",
         "--book-id",
