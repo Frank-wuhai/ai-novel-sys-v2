@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.entities import GenerationTask
 from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
@@ -177,9 +178,11 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     attempt = int(input_data.get("attempt") or 0) + 1
     max_attempts = int(input_data.get("max_attempts") or 3)
     timeout_seconds = _task_timeout_seconds(input_data, fallback=3600)
+    llm_parameters = input_data.get("llm_parameters") or _queue_llm_parameter_snapshot(queue_type=task.task_type, dry_run=dry_run)
     input_data["attempt"] = attempt
     input_data["running_started_at"] = _utc_now_iso()
     input_data["task_timeout_seconds"] = timeout_seconds
+    input_data["llm_parameters"] = llm_parameters
     if chapter_number < 1:
         task.status = "failed"
         task.input_json = _dumps_json(input_data)
@@ -210,6 +213,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
                 "attempt": attempt,
                 "max_attempts": max_attempts,
                 "task_timeout_seconds": timeout_seconds,
+                "llm_parameters": llm_parameters,
                 "running_age_seconds": _running_age_seconds(task),
                 "retryable": retryable,
             }
@@ -230,6 +234,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
             "attempt": attempt,
             "max_attempts": max_attempts,
             "task_timeout_seconds": timeout_seconds,
+            "llm_parameters": llm_parameters,
         },
     )
     session.flush()
@@ -381,6 +386,7 @@ def _enqueue(
 ) -> GenerationTask:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
+    llm_parameters = _queue_llm_parameter_snapshot(queue_type=queue_type, dry_run=dry_run)
     task = GenerationTask(
         book_id=book_id,
         task_type=queue_type,
@@ -392,6 +398,7 @@ def _enqueue(
                 "attempt": 0,
                 "max_attempts": max_attempts,
                 "task_timeout_seconds": timeout_seconds,
+                "llm_parameters": llm_parameters,
             }
         ),
         output_json="{}",
@@ -456,6 +463,16 @@ def _failure_summary(task: GenerationTask) -> QueueFailureSummary:
         error=str(output_data.get("error") or ""),
         retryable=bool(output_data.get("retryable", False)),
     )
+
+
+def _queue_llm_parameter_snapshot(*, queue_type: str, dry_run: bool) -> dict:
+    max_tokens = settings.llm_revision_max_tokens if queue_type == QUEUE_REVISE else settings.llm_draft_max_tokens
+    return {
+        "provider_mode": "dry_run" if dry_run else "live",
+        "requested_model": settings.model_name,
+        "max_tokens": max_tokens,
+        "temperature": settings.llm_temperature,
+    }
 
 
 def _running_summary(task: GenerationTask, *, fallback_timeout_seconds: int) -> RunningTaskSummary:

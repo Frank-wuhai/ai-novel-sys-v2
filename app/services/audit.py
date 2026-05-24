@@ -88,6 +88,7 @@ def task_output_version_id(task: GenerationTask) -> int | None:
 def task_summary(task: GenerationTask) -> str:
     input_data = _loads_json(task.input_json)
     output_data = _loads_json(task.output_json)
+    llm_parameters = input_data.get("llm_parameters") if isinstance(input_data.get("llm_parameters"), dict) else {}
     version_id = output_data.get("version_id") or output_data.get("child_version_id")
     return "\t".join(
         [
@@ -97,6 +98,8 @@ def task_summary(task: GenerationTask) -> str:
             f"status={task.status}",
             f"chapter={input_data.get('chapter_number', '')}",
             f"timeout_seconds={input_data.get('task_timeout_seconds') or input_data.get('timeout_seconds') or ''}",
+            f"llm_model={llm_parameters.get('requested_model', '')}",
+            f"llm_max_tokens={llm_parameters.get('max_tokens', '')}",
             f"version={version_id or ''}",
             f"child_task={output_data.get('child_generation_task_id', '')}",
             f"provider={output_data.get('provider', '')}",

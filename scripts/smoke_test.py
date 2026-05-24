@@ -341,8 +341,14 @@ def main() -> int:
         run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6", "--task-timeout-seconds", "120"]),
     )
     queued_draft_detail = run(["show-generation-task", "--task-id", str(queued_draft_id)])
-    if '"task_timeout_seconds": 120' not in queued_draft_detail:
-        print("enqueue-draft did not record task timeout")
+    if (
+        '"task_timeout_seconds": 120' not in queued_draft_detail
+        or '"llm_parameters":' not in queued_draft_detail
+        or '"requested_model": "deepseek-v3.2"' not in queued_draft_detail
+        or '"max_tokens": 3000' not in queued_draft_detail
+        or '"temperature": 0.7' not in queued_draft_detail
+    ):
+        print("enqueue-draft did not record task timeout and model parameter snapshot")
         print(queued_draft_detail)
         return 1
     duplicate_queue = run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"], expect=1)
@@ -383,9 +389,24 @@ def main() -> int:
         print(queued_run)
         return 1
     queue_task_detail = run(["show-generation-task", "--task-id", str(queued_draft_id)])
-    if '"child_generation_task_id":' not in queue_task_detail or f'"version_id": {queued_version_id}' not in queue_task_detail:
+    if (
+        '"child_generation_task_id":' not in queue_task_detail
+        or f'"version_id": {queued_version_id}' not in queue_task_detail
+        or '"llm_parameters":' not in queue_task_detail
+        or '"max_tokens": 3000' not in queue_task_detail
+    ):
         print("queue task audit did not record child task and version")
         print(queue_task_detail)
+        return 1
+    child_task_detail = run(["show-generation-task", "--task-id", str(child_task_id)])
+    if (
+        '"llm_parameters":' not in child_task_detail
+        or '"requested_model": "deepseek-v3.2"' not in child_task_detail
+        or '"max_tokens": 3000' not in child_task_detail
+        or '"temperature": 0.7' not in child_task_detail
+    ):
+        print("child draft task did not record model parameter snapshot")
+        print(child_task_detail)
         return 1
     queued_revision_id = extract_id(
         "generation_task_id",

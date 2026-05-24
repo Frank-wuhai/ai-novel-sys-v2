@@ -417,6 +417,7 @@ HTML = r"""<!doctype html>
         escapeHtml(`任务 #${item.id}`),
         escapeHtml(item.chapter || ''),
         escapeHtml(statusLabel(item.status)),
+        escapeHtml(modelParamLabel(item.llm_parameters || {})),
         escapeHtml(item.status === 'running' ? `${item.running_age_seconds || 0}s / ${item.timeout_seconds || 0}s` : errorLabel(item.error_category || '')),
         queueButtons(item)
       ]);
@@ -424,7 +425,12 @@ HTML = r"""<!doctype html>
         table(['状态', '数量'], rows.map(([name, count]) => [statusLabel(name), count])) +
         table(['运行任务', '章节', '已运行', '超时阈值', '状态', '可恢复'], runningRows, true) +
         table(['最近失败', '章节', '类型', '详情'], failureRows) +
-        table(['任务', '章节', '状态', '运行/详情', '操作'], taskRows, true);
+        table(['任务', '章节', '状态', '模型参数', '运行/详情', '操作'], taskRows, true);
+    }
+
+    function modelParamLabel(params) {
+      if (!params || !Object.keys(params).length) return '';
+      return `${params.provider_mode || ''} ${params.requested_model || ''} max=${params.max_tokens || ''} temp=${params.temperature ?? ''}`;
     }
 
     function queueButtons(item) {

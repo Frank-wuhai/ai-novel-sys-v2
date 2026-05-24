@@ -255,6 +255,7 @@ def _task_stats(tasks: list[GenerationTask]) -> dict[str, int]:
 def _task_snapshot(task: GenerationTask) -> dict:
     input_data = _loads_json(task.input_json)
     output_data = _loads_json(task.output_json)
+    llm_parameters = input_data.get("llm_parameters") if isinstance(input_data.get("llm_parameters"), dict) else {}
     return {
         "id": task.id,
         "type": task.task_type,
@@ -263,6 +264,7 @@ def _task_snapshot(task: GenerationTask) -> dict:
         "attempt": input_data.get("attempt"),
         "max_attempts": input_data.get("max_attempts"),
         "timeout_seconds": _task_timeout_seconds(input_data),
+        "llm_parameters": llm_parameters,
         "running_age_seconds": _running_age_seconds(task) if task.status == "running" else 0,
         "stale": task.status == "running" and _running_age_seconds(task) >= _task_timeout_seconds(input_data),
         "error_category": output_data.get("error_category", ""),

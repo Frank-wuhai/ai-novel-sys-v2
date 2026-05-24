@@ -49,6 +49,15 @@ def _llm_usage_payload(response, *, prompt: str) -> dict:
     }
 
 
+def _llm_parameter_snapshot(*, dry_run: bool, max_tokens: int, temperature: float | None) -> dict:
+    return {
+        "provider_mode": "dry_run" if dry_run else "live",
+        "requested_model": settings.model_name,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+
 def _record_generation_llm_log(
     session: Session,
     *,
@@ -221,7 +230,16 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
         constraints=brief.constraints,
     )
     provider = get_provider(dry_run)
-    response = provider.generate(prompt, max_tokens=settings.llm_draft_max_tokens, temperature=settings.llm_temperature)
+    llm_parameters = _llm_parameter_snapshot(
+        dry_run=dry_run,
+        max_tokens=settings.llm_draft_max_tokens,
+        temperature=settings.llm_temperature,
+    )
+    response = provider.generate(
+        prompt,
+        max_tokens=settings.llm_draft_max_tokens,
+        temperature=settings.llm_temperature,
+    )
     try:
         draft = parse_draft_output(response.text)
     except StructuredOutputError as exc:
@@ -234,13 +252,21 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                     "chapter_number": chapter_number,
                     "dry_run": dry_run,
                     "prompt_template": f"{template.name}@{template.version}",
+                    "llm_parameters": llm_parameters,
                     "market_signal_ids": market_signal_ids,
                     "canon_refs": canon_refs,
                 },
                 ensure_ascii=False,
             ),
             output_json=json.dumps(
-                {"provider": response.provider, "model": response.model, "error": str(exc), "raw": response.text[:2000], **_llm_usage_payload(response, prompt=prompt)},
+                {
+                    "provider": response.provider,
+                    "model": response.model,
+                    "llm_parameters": llm_parameters,
+                    "error": str(exc),
+                    "raw": response.text[:2000],
+                    **_llm_usage_payload(response, prompt=prompt),
+                },
                 ensure_ascii=False,
             ),
         )
@@ -275,6 +301,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                 "chapter_number": chapter_number,
                 "dry_run": dry_run,
                 "prompt_template": f"{template.name}@{template.version}",
+                "llm_parameters": llm_parameters,
                 "market_signal_ids": market_signal_ids,
                 "market_evidence_count": len(market_signal_ids),
                 "canon_refs": canon_refs,
@@ -286,6 +313,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                 "version_id": version.id,
                 "provider": response.provider,
                 "model": response.model,
+                "llm_parameters": llm_parameters,
                 **_llm_usage_payload(response, prompt=prompt),
                 "self_check": draft.self_check,
                 "used_brief_points": draft.used_brief_points,
@@ -398,10 +426,16 @@ def _run_llm_chapter_review(
         chapter_content=version.content,
     )
     provider = get_provider(dry_run)
+    llm_parameters = _llm_parameter_snapshot(
+        dry_run=dry_run,
+        max_tokens=settings.llm_review_max_tokens,
+        temperature=settings.llm_temperature,
+    )
     input_json = {
         "chapter_number": chapter_number,
         "dry_run": dry_run,
         "prompt_template": f"{template.name}@{template.version}",
+        "llm_parameters": llm_parameters,
         "version_id": version.id,
     }
     try:
@@ -423,6 +457,7 @@ def _run_llm_chapter_review(
                     "error_category": classification.category,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
+                    "llm_parameters": llm_parameters,
                 },
                 ensure_ascii=False,
             ),
@@ -446,6 +481,7 @@ def _run_llm_chapter_review(
                 "version_id": version.id,
                 "provider": response.provider,
                 "model": response.model,
+                "llm_parameters": llm_parameters,
                 **_llm_usage_payload(response, prompt=prompt),
                 "review": review.to_dict(),
             },
@@ -556,7 +592,16 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         reader_promise=foundation.reader_promise,
     )
     provider = get_provider(dry_run)
-    response = provider.generate(prompt, max_tokens=settings.llm_revision_max_tokens, temperature=settings.llm_temperature)
+    llm_parameters = _llm_parameter_snapshot(
+        dry_run=dry_run,
+        max_tokens=settings.llm_revision_max_tokens,
+        temperature=settings.llm_temperature,
+    )
+    response = provider.generate(
+        prompt,
+        max_tokens=settings.llm_revision_max_tokens,
+        temperature=settings.llm_temperature,
+    )
     try:
         draft = parse_draft_output(response.text)
     except StructuredOutputError as exc:
@@ -569,6 +614,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                     "chapter_number": chapter_number,
                     "dry_run": dry_run,
                     "prompt_template": f"{template.name}@{template.version}",
+                    "llm_parameters": llm_parameters,
                     "source_version_id": source_version.id,
                     "quality_report_id": quality.id,
                     "revision_brief_id": revision_brief.id,
@@ -578,7 +624,14 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 ensure_ascii=False,
             ),
             output_json=json.dumps(
-                {"provider": response.provider, "model": response.model, "error": str(exc), "raw": response.text[:2000], **_llm_usage_payload(response, prompt=prompt)},
+                {
+                    "provider": response.provider,
+                    "model": response.model,
+                    "llm_parameters": llm_parameters,
+                    "error": str(exc),
+                    "raw": response.text[:2000],
+                    **_llm_usage_payload(response, prompt=prompt),
+                },
                 ensure_ascii=False,
             ),
         )
@@ -613,6 +666,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 "chapter_number": chapter_number,
                 "dry_run": dry_run,
                 "prompt_template": f"{template.name}@{template.version}",
+                "llm_parameters": llm_parameters,
                 "source_version_id": source_version.id,
                 "quality_report_id": quality.id,
                 "revision_brief_id": revision_brief.id,
@@ -626,6 +680,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 "version_id": version.id,
                 "provider": response.provider,
                 "model": response.model,
+                "llm_parameters": llm_parameters,
                 **_llm_usage_payload(response, prompt=prompt),
                 "self_check": draft.self_check,
                 "used_brief_points": draft.used_brief_points,
