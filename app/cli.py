@@ -5,9 +5,12 @@ import json
 import sys
 import time
 
+from sqlalchemy import select
+
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
 from app.core.config import settings
+from app.models.entities import Chapter, ChapterBrief
 from app.services.budget import check_token_budget
 from app.services.audit import (
     compare_versions,
@@ -343,6 +346,7 @@ def main() -> None:
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--llm-review", action="store_true")
     p.add_argument("--live-llm", action="store_true")
+    p.add_argument("--auto-revision-brief", action="store_true")
 
     p = sub.add_parser("create-revision-brief")
     p.add_argument("--book-id", type=int, required=True)
@@ -1115,11 +1119,24 @@ def main() -> None:
                     chapter_number=args.chapter_number,
                     llm_review=args.llm_review,
                     review_dry_run=not args.live_llm,
+                    auto_revision_brief=args.auto_revision_brief,
                 )
                 print(f"quality_report_id={report.id}")
                 print(f"passed={report.passed}")
                 print(f"score={report.score}")
                 print(f"report={report.report}")
+                if args.auto_revision_brief and not report.passed:
+                    chapter = session.scalar(select(Chapter).where(Chapter.book_id == args.book_id, Chapter.chapter_number == args.chapter_number))
+                    brief = (
+                        session.scalar(
+                            select(ChapterBrief)
+                            .where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")
+                            .order_by(ChapterBrief.id.desc())
+                        )
+                        if chapter
+                        else None
+                    )
+                    print(f"revision_brief_id={brief.id if brief else ''}")
             elif args.cmd == "create-revision-brief":
                 brief = create_revision_brief(session, book_id=args.book_id, chapter_number=args.chapter_number)
                 print(f"revision_brief_id={brief.id}")

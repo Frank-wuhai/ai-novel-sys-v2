@@ -1109,15 +1109,25 @@ def main() -> int:
             "smoke-bad-draft",
         ]),
     )
-    failed_review = run(["review-chapter", "--book-id", str(book_id), "--chapter-number", "2"], expect=0)
-    if "passed=False" not in failed_review:
+    failed_review = run(["review-chapter", "--book-id", str(book_id), "--chapter-number", "2", "--auto-revision-brief"], expect=0)
+    revision_brief_id = extract_id("revision_brief_id", failed_review)
+    if "passed=False" not in failed_review or revision_brief_id < 1:
         print("failed quality gate did not fail as expected")
         print(failed_review)
         return 1
-    revision_brief_id = extract_id(
-        "revision_brief_id",
-        run(["create-revision-brief", "--book-id", str(book_id), "--chapter-number", "2"]),
-    )
+    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    try:
+        revision_brief_row = conn.execute(
+            "select goal, required_beats from chapter_briefs where id=?",
+            (revision_brief_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    revision_brief_detail = "\n".join(revision_brief_row or [])
+    if "依据质检报告" not in revision_brief_detail or "上次质检分数=" not in revision_brief_detail:
+        print("auto revision brief did not include quality report context")
+        print(revision_brief_detail)
+        return 1
     if "next_action=revise_chapter" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "2", "--count", "1"]):
         print("planner did not request revise after revision brief")
         return 1

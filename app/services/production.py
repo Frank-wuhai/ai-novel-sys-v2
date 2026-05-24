@@ -345,6 +345,7 @@ def review_chapter(
     chapter_number: int,
     llm_review: bool = False,
     review_dry_run: bool = True,
+    auto_revision_brief: bool = False,
 ) -> QualityReport:
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
@@ -393,6 +394,8 @@ def review_chapter(
     action = "quality_pass" if result.passed else "quality_fail"
     version.status = move("chapter_version", version.status, target, action)
     session.flush()
+    if auto_revision_brief and not quality.passed:
+        create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
     return quality
 
 
@@ -528,12 +531,18 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
         quality_data = {"raw_report": quality.report}
     dimensions = quality_data.get("dimensions", {}) if isinstance(quality_data, dict) else {}
     issues = quality_data.get("issues", []) if isinstance(quality_data, dict) else []
+    llm_review = quality_data.get("llm_review", {}) if isinstance(quality_data, dict) else {}
+    llm_suggestions = llm_review.get("revision_suggestions", []) if isinstance(llm_review, dict) else []
+    risk_flags = llm_review.get("risk_flags", []) if isinstance(llm_review, dict) else []
     weak_dimensions = [name for name, score in dimensions.items() if isinstance(score, int) and score < 70]
-    goal = f"修订第{chapter_number}章，使质量门禁从失败恢复到可复审状态。"
+    goal = f"修订第{chapter_number}章，使质量门禁从失败恢复到可复审状态；上次质检分数={quality.score}。"
     required = "；".join(
         [
+            f"依据质检报告 #{quality.id} 修订",
             *(f"提升维度：{name}" for name in weak_dimensions),
             *(f"修复问题：{issue}" for issue in issues),
+            *(f"采纳二审建议：{suggestion}" for suggestion in llm_suggestions),
+            *(f"规避风险：{flag}" for flag in risk_flags),
         ]
     )
     if not required:

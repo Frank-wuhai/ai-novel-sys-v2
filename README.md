@@ -202,11 +202,14 @@ LLM reviewer calls create `generation_tasks.task_type=llm_review_chapter` and `l
 
 When a chapter version fails `review-chapter`, its status becomes `needs_revision`.
 
-Use the failure report to create a structured revision brief:
+Use the failure report to create a structured revision brief, or let `review-chapter` create it automatically when the gate fails:
 
 ```bash
+python -m app.cli review-chapter --book-id 1 --chapter-number 2 --auto-revision-brief
 python -m app.cli create-revision-brief --book-id 1 --chapter-number 2
 ```
+
+The generated revision brief includes the failed quality report ID, score, weak dimensions, rule issues, and any LLM reviewer revision suggestions/risk flags available in the quality report.
 
 Then create a revised draft version:
 
