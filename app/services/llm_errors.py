@@ -17,7 +17,13 @@ def classify_exception(exc: Exception) -> ErrorClassification:
         return ErrorClassification("validation", False)
     if "structuredoutputerror" in name or "invalid json" in combined or "json" in combined and "parse" in combined:
         return ErrorClassification("structured_output", False)
-    if "authentication" in combined or "unauthorized" in combined or "invalid api key" in combined:
+    if (
+        "authentication" in combined
+        or "unauthorized" in combined
+        or "invalid api key" in combined
+        or "api_key" in combined
+        or "api key" in combined
+    ):
         return ErrorClassification("auth", False)
     if "permission" in combined or "forbidden" in combined:
         return ErrorClassification("permission", False)

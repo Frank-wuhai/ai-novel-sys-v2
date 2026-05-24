@@ -42,7 +42,7 @@ python -m app.cli list-llm-requests --book-id 1
 python -m app.cli llm-usage-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli show-llm-config
-python -m app.cli live-llm-smoke --yes
+python -m app.cli live-llm-smoke --yes --book-id 1
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
@@ -436,10 +436,10 @@ To verify the live Volcano Ark/Coding Plan model path, opt in explicitly:
 
 ```bash
 python -m app.cli production-readiness --book-id 1 --start 1 --count 10 --live-llm
-python -m app.cli live-llm-smoke --yes
+python -m app.cli live-llm-smoke --yes --book-id 1
 ```
 
-`--live-llm` and `live-llm-smoke --yes` send tiny health-check requests. They do not generate novel prose. `live-llm-smoke` refuses to run without `--yes` because it calls the real LLM API.
+`--live-llm` and `live-llm-smoke --yes` send tiny health-check requests. They do not generate novel prose. `live-llm-smoke` refuses to run without `--yes` because it calls the real LLM API. When `--book-id` is provided, the smoke result is recorded in `llm_request_logs` with provider, model, request ID, token usage, status, and error category.
 
 ## Development Database Safety
 

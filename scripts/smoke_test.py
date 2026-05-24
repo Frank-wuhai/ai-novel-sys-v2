@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import os
 from pathlib import Path
 import sqlite3
 import json
@@ -16,6 +17,21 @@ TEST_DB = "sqlite:///data/test-novel.db"
 def run(args: list[str], *, expect: int = 0) -> str:
     cmd = [str(PYTHON), "-m", "app.cli", "--database-url", TEST_DB, *args]
     result = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True)
+    output = (result.stdout + result.stderr).strip()
+    if result.returncode != expect:
+        print("COMMAND FAILED")
+        print(" ".join(cmd))
+        print(f"expected={expect} actual={result.returncode}")
+        print(output)
+        raise SystemExit(1)
+    return output
+
+
+def run_with_env(args: list[str], *, env_overrides: dict[str, str], expect: int = 0) -> str:
+    cmd = [str(PYTHON), "-m", "app.cli", "--database-url", TEST_DB, *args]
+    env = os.environ.copy()
+    env.update(env_overrides)
+    result = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, env=env)
     output = (result.stdout + result.stderr).strip()
     if result.returncode != expect:
         print("COMMAND FAILED")
@@ -739,6 +755,27 @@ def main() -> int:
     if "live-llm-smoke requires --yes" not in live_guard:
         print("live-llm-smoke did not require explicit confirmation")
         print(live_guard)
+        return 1
+    failed_live_smoke = run_with_env(
+        ["live-llm-smoke", "--yes", "--book-id", str(book_id)],
+        env_overrides={"ARK_API_KEY": "", "ARK_BASE_URL": ""},
+        expect=1,
+    )
+    live_smoke_log_id = extract_id("llm_request_log_id", failed_live_smoke)
+    if "passed=False" not in failed_live_smoke or "error_category=auth" not in failed_live_smoke:
+        print("live-llm-smoke did not classify missing credentials")
+        print(failed_live_smoke)
+        return 1
+    live_smoke_logs = run(["list-llm-requests", "--book-id", str(book_id), "--status", "failed", "--limit", "5"])
+    if (
+        f"{live_smoke_log_id}\tbook={book_id}" not in live_smoke_logs
+        or "type=live_llm_smoke" not in live_smoke_logs
+        or "provider=ark_openai_compatible" not in live_smoke_logs
+        or "template=live_llm_smoke@v1" not in live_smoke_logs
+        or "error_category=auth" not in live_smoke_logs
+    ):
+        print("live-llm-smoke did not write failed request log")
+        print(live_smoke_logs)
         return 1
     run([
         "create-chapter-brief",

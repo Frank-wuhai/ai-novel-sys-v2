@@ -419,6 +419,7 @@ def main() -> None:
 
     p = sub.add_parser("live-llm-smoke")
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--book-id", type=int, default=0)
 
     p = sub.add_parser("quality-trends")
     p.add_argument("--book-id", type=int, required=True)
@@ -1249,10 +1250,12 @@ def main() -> None:
                                 f"status={log.status}",
                                 f"provider={log.provider}",
                                 f"model={log.model}",
+                                f"request_id={log.request_id}",
                                 f"tokens={log.estimated_total_tokens}",
                                 f"actual_tokens={log.actual_total_tokens}",
                                 f"elapsed_ms={log.elapsed_ms}",
                                 f"template={log.prompt_template}",
+                                f"error_category={log.error_category}",
                             ]
                         )
                     )
@@ -1297,17 +1300,19 @@ def main() -> None:
             elif args.cmd == "live-llm-smoke":
                 if not args.yes:
                     raise ValueError("live-llm-smoke requires --yes because it calls the real LLM API")
-                result = run_live_llm_smoke()
+                result = run_live_llm_smoke(session, book_id=args.book_id or None)
                 print(f"passed={result.passed}")
                 print(f"provider={result.provider}")
                 print(f"model={result.model}")
                 print(f"request_id={result.request_id}")
+                print(f"llm_request_log_id={result.llm_request_log_id or ''}")
                 print(f"estimated_total_tokens={result.estimated_total_tokens}")
                 print(f"elapsed_ms={result.elapsed_ms}")
                 print(f"error_category={result.error_category}")
                 print(f"error={result.error}")
                 print(f"text={result.text}")
                 if not result.passed:
+                    session.commit()
                     raise SystemExit(1)
             elif args.cmd == "quality-trends":
                 trend = build_quality_trends(session, book_id=args.book_id, limit=args.limit)
