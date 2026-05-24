@@ -859,10 +859,17 @@ def publish_job_dry_run(session: Session, *, job_id: int) -> PublishJob:
         raise ValueError("publish job points to missing chapter version")
     if version.status != "approved":
         raise ValueError("publish dry-run requires approved chapter version")
+    payload = _loads_json(job.automation_payload)
     operator = OpenClawPublishingOperator()
-    result = operator.publish_dry_run(platform=job.platform, title=version.title, content=version.content)
+    result = operator.publish_dry_run(
+        platform=job.platform,
+        title=version.title,
+        content=version.content,
+        job_id=job.id,
+        target_config=payload.get("target_config", {}),
+    )
     job.status = move("publish_job", job.status, result.status, "dry_run")
-    job.result_report = result.report
+    job.result_report = _append_artifact_report(result.report, artifact_path=result.artifact_path)
     session.flush()
     return job
 
@@ -911,34 +918,56 @@ def execute_publish_job(session: Session, *, job_id: int, confirm: bool = False)
         raise ValueError("publish job points to missing chapter version")
     if job.status != "queued":
         raise ValueError("publish execution requires queued publish job")
+    payload = _loads_json(job.automation_payload)
+    target_config = payload.get("target_config", {})
     operator = OpenClawPublishingOperator()
     if not confirm:
-        result = operator.publish_dry_run(platform=job.platform, title=version.title, content=version.content)
+        result = operator.publish_dry_run(
+            platform=job.platform,
+            title=version.title,
+            content=version.content,
+            job_id=job.id,
+            target_config=target_config,
+        )
         execution = PublishExecution(
             publish_job_id=job.id,
             platform=job.platform,
             status="blocked",
             automation_mode="confirmation_required",
-            report=f"Final publish confirmation required. {result.report}",
+            report=_append_artifact_report(f"Final publish confirmation required. {result.report}", artifact_path=result.artifact_path),
+            artifact_path=result.artifact_path,
         )
         session.add(execution)
         session.flush()
         return job, execution
-    result = operator.publish_confirmed(platform=job.platform, title=version.title, content=version.content)
+    result = operator.publish_confirmed(
+        platform=job.platform,
+        title=version.title,
+        content=version.content,
+        job_id=job.id,
+        target_config=target_config,
+    )
     target_status = "published" if result.status == "published" else "failed"
     action = "mark_published" if target_status == "published" else "mark_failed"
     job.status = move("publish_job", job.status, target_status, action)
-    job.result_report = result.report
+    job.result_report = _append_artifact_report(result.report, artifact_path=result.artifact_path)
     execution = PublishExecution(
         publish_job_id=job.id,
         platform=job.platform,
         status=target_status,
         automation_mode="confirmed",
-        report=result.report,
+        report=job.result_report,
+        artifact_path=result.artifact_path,
     )
     session.add(execution)
     session.flush()
     return job, execution
+
+
+def _append_artifact_report(report: str, *, artifact_path: str) -> str:
+    if not artifact_path:
+        return report
+    return f"{report}\nartifact_path={artifact_path}"
 
 
 def _loads_json(value: str) -> dict:

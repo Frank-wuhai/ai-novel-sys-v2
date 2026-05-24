@@ -17,6 +17,8 @@ data/*.db
 data/*.db-*
 data/backups/
 data/test-worker-logs/
+data/worker-stability-logs/
+outputs/
 
 *.log
 .DS_Store

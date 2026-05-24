@@ -1128,6 +1128,16 @@ def main() -> int:
         print("auto revision brief did not include quality report context")
         print(revision_brief_detail)
         return 1
+    quality_calibration = run(["quality-calibration", "--book-id", str(book_id), "--limit", "10"])
+    if (
+        "quality_calibration book_id=" not in quality_calibration
+        or "auto_revision_brief_coverage=1.0" not in quality_calibration
+        or "ready_for_trial=True" not in quality_calibration
+        or "blockers=" not in quality_calibration
+    ):
+        print("quality-calibration did not summarize production trial readiness")
+        print(quality_calibration)
+        return 1
     if "next_action=revise_chapter" not in run(["plan-chapters", "--book-id", str(book_id), "--start", "2", "--count", "1"]):
         print("planner did not request revise after revision brief")
         return 1
@@ -1326,18 +1336,32 @@ def main() -> int:
         print(auto_retry)
         return 1
     execution_block = run(["execute-publish-job", "--job-id", str(job_id)])
-    if "execution_status=blocked" not in execution_block or "automation_mode=confirmation_required" not in execution_block:
+    blocked_artifact_path = Path(extract_value("artifact_path", execution_block))
+    if (
+        "execution_status=blocked" not in execution_block
+        or "automation_mode=confirmation_required" not in execution_block
+        or not blocked_artifact_path.exists()
+        or not (blocked_artifact_path / "payload.json").exists()
+        or not (blocked_artifact_path / "content.txt").exists()
+    ):
         print("execute-publish-job did not require confirmation by default")
         print(execution_block)
         return 1
     execution_publish = run(["execute-publish-job", "--job-id", str(job_id), "--confirm"])
     execution_id = extract_id("publish_execution_id", execution_publish)
-    if "status=published" not in execution_publish or "execution_status=published" not in execution_publish:
+    artifact_path = Path(extract_value("artifact_path", execution_publish))
+    if (
+        "status=published" not in execution_publish
+        or "execution_status=published" not in execution_publish
+        or not artifact_path.exists()
+        or not (artifact_path / "payload.json").exists()
+        or not (artifact_path / "report.txt").exists()
+    ):
         print("execute-publish-job did not publish confirmed job")
         print(execution_publish)
         return 1
     executions = run(["list-publish-executions", "--job-id", str(job_id)])
-    if f"{execution_id}\tjob={job_id}" not in executions or "mode=confirmed" not in executions:
+    if f"{execution_id}\tjob={job_id}" not in executions or "mode=confirmed" not in executions or f"artifact={artifact_path}" not in executions:
         print("list-publish-executions did not show confirmed execution")
         print(executions)
         return 1

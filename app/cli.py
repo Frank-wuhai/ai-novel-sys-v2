@@ -108,7 +108,7 @@ from app.services.feedback import (
     summarize_platform_feedback,
 )
 from app.services.prompts import get_prompt_template
-from app.services.quality_insights import build_quality_trends
+from app.services.quality_insights import build_quality_calibration, build_quality_trends
 from app.services.readiness import check_production_readiness
 from app.services.story import (
     create_story_arc,
@@ -432,6 +432,12 @@ def main() -> None:
     p = sub.add_parser("quality-trends")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--limit", type=int, default=20)
+
+    p = sub.add_parser("quality-calibration")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--max-failure-rate", type=float, default=0.35)
+    p.add_argument("--min-average-score", type=float, default=70.0)
 
     p = sub.add_parser("list-publish-jobs")
     p.add_argument("--status", default="")
@@ -1378,6 +1384,27 @@ def main() -> None:
                             ]
                         )
                     )
+            elif args.cmd == "quality-calibration":
+                report = build_quality_calibration(
+                    session,
+                    book_id=args.book_id,
+                    limit=args.limit,
+                    max_failure_rate=args.max_failure_rate,
+                    min_average_score=args.min_average_score,
+                )
+                weak_counts = ",".join(f"{key}={value}" for key, value in report.weak_dimension_counts.items())
+                blockers = ",".join(report.blockers)
+                print(f"quality_calibration book_id={report.book_id}")
+                print(f"report_count={report.report_count}")
+                print(f"passed_count={report.passed_count}")
+                print(f"failed_count={report.failed_count}")
+                print(f"failure_rate={report.failure_rate}")
+                print(f"average_score={report.average_score}")
+                print(f"auto_revision_brief_count={report.auto_revision_brief_count}")
+                print(f"auto_revision_brief_coverage={report.auto_revision_brief_coverage}")
+                print(f"ready_for_trial={report.ready_for_trial}")
+                print(f"weak_dimensions={weak_counts}")
+                print(f"blockers={blockers}")
             elif args.cmd == "list-publish-jobs":
                 for job in list_publish_jobs(session, status=args.status):
                     print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}\tpayload={job.automation_payload}")
@@ -1420,6 +1447,7 @@ def main() -> None:
                 print(f"publish_execution_id={execution.id}")
                 print(f"execution_status={execution.status}")
                 print(f"automation_mode={execution.automation_mode}")
+                print(f"artifact_path={execution.artifact_path}")
                 print(f"report={execution.report}")
             elif args.cmd == "list-publish-executions":
                 for execution in list_publish_executions(
@@ -1435,6 +1463,7 @@ def main() -> None:
                                 f"platform={execution.platform}",
                                 f"status={execution.status}",
                                 f"mode={execution.automation_mode}",
+                                f"artifact={execution.artifact_path}",
                                 f"report={execution.report}",
                             ]
                         )

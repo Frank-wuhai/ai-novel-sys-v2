@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterVersion, QualityReport
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport
 
 
 @dataclass(frozen=True)
@@ -30,6 +30,21 @@ class QualityTrendReport:
     average_score: float
     weak_dimension_counts: dict[str, int]
     snapshots: list[ChapterQualitySnapshot]
+
+
+@dataclass(frozen=True)
+class QualityCalibrationReport:
+    book_id: int
+    report_count: int
+    passed_count: int
+    failed_count: int
+    failure_rate: float
+    average_score: float
+    weak_dimension_counts: dict[str, int]
+    auto_revision_brief_count: int
+    auto_revision_brief_coverage: float
+    ready_for_trial: bool
+    blockers: list[str]
 
 
 def build_quality_trends(session: Session, *, book_id: int, limit: int = 20) -> QualityTrendReport:
@@ -74,6 +89,59 @@ def build_quality_trends(session: Session, *, book_id: int, limit: int = 20) -> 
         weak_dimension_counts=dict(sorted(weak_counts.items())),
         snapshots=snapshots,
     )
+
+
+def build_quality_calibration(
+    session: Session,
+    *,
+    book_id: int,
+    limit: int = 20,
+    max_failure_rate: float = 0.35,
+    min_average_score: float = 70.0,
+) -> QualityCalibrationReport:
+    trends = build_quality_trends(session, book_id=book_id, limit=limit)
+    failed_report_ids = {item.quality_report_id for item in trends.snapshots if not item.passed}
+    auto_brief_count = _auto_revision_brief_count(session, book_id=book_id, failed_report_ids=failed_report_ids)
+    failure_rate = round(trends.failed_count / trends.report_count, 4) if trends.report_count else 0.0
+    coverage = round(auto_brief_count / trends.failed_count, 4) if trends.failed_count else 1.0
+    blockers: list[str] = []
+    if trends.report_count < 1:
+        blockers.append("缺少质检样本")
+    if trends.average_score < min_average_score:
+        blockers.append(f"平均分低于阈值 {min_average_score}")
+    if failure_rate > max_failure_rate:
+        blockers.append(f"失败率高于阈值 {max_failure_rate}")
+    if trends.failed_count and coverage < 1.0:
+        blockers.append("失败质检未全部生成 revision brief")
+    return QualityCalibrationReport(
+        book_id=book_id,
+        report_count=trends.report_count,
+        passed_count=trends.passed_count,
+        failed_count=trends.failed_count,
+        failure_rate=failure_rate,
+        average_score=trends.average_score,
+        weak_dimension_counts=trends.weak_dimension_counts,
+        auto_revision_brief_count=auto_brief_count,
+        auto_revision_brief_coverage=coverage,
+        ready_for_trial=not blockers,
+        blockers=blockers,
+    )
+
+
+def _auto_revision_brief_count(session: Session, *, book_id: int, failed_report_ids: set[int]) -> int:
+    if not failed_report_ids:
+        return 0
+    rows = session.execute(
+        select(ChapterBrief)
+        .join(Chapter, Chapter.id == ChapterBrief.chapter_id)
+        .where(Chapter.book_id == book_id, ChapterBrief.status == "revision_ready")
+    ).scalars()
+    count = 0
+    for brief in rows:
+        text = f"{brief.goal}\n{brief.required_beats}\n{brief.constraints}"
+        if any(f"质检报告 #{report_id}" in text for report_id in failed_report_ids):
+            count += 1
+    return count
 
 
 def _parse_quality_report(report: str) -> tuple[list[str], int]:

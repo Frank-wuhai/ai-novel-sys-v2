@@ -239,6 +239,14 @@ python -m app.cli quality-trends --book-id 1 --limit 20
 
 It reports pass/fail counts, average score, weak dimension counts, and the latest chapter-level quality snapshots.
 
+Before a real production trial, use `quality-calibration` to check whether recent failed reviews are fully covered by auto-created revision briefs and whether the sample is above the configured score/failure-rate thresholds:
+
+```bash
+python -m app.cli quality-calibration --book-id 1 --limit 20
+```
+
+The command prints `ready_for_trial=True` only when the inspected quality sample has no calibration blockers.
+
 ## Chapter Planner
 
 Use the planner to move from single-chapter operation to a chapter queue:
@@ -499,6 +507,14 @@ python scripts/readiness_regression_test.py
 ```
 
 It uses `data/readiness-regression.db` and verifies that market evidence must match the current book genre before production readiness can pass.
+
+Run the worker stability regression test before long unattended generation runs:
+
+```bash
+python scripts/worker_stability_regression_test.py
+```
+
+It creates `data/worker-stability-regression.db`, queues multiple dry-run chapter drafts, marks one task stale, runs the supervisor with stale recovery enabled, verifies the queue drains cleanly, and checks that worker logs were written.
 
 Run the migration regression test when changing schema or Alembic revisions:
 
