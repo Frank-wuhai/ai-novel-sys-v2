@@ -31,6 +31,7 @@ from app.services.canon import format_canon_context
 from app.services.dashboard import build_project_snapshot
 from app.services.db_ops import (
     check_database_health,
+    check_schema_version,
     create_database_backup,
     list_database_backups,
     restore_database_from_backup,
@@ -641,6 +642,7 @@ HTML = r"""<!doctype html>
 
     function renderDatabaseOps(payload) {
       const health = payload.health;
+      const schema = payload.schema_version;
       $('databaseOps').innerHTML =
         table(['检查项', '值'], [
           ['数据库地址', health.database_url],
@@ -649,6 +651,12 @@ HTML = r"""<!doctype html>
           ['迁移脚本数量', health.migration_count],
           ['最新迁移', health.latest_migration],
           ['备份数量', health.backup_count]
+        ]) +
+        table(['Schema', '值'], [
+          ['状态', statusLabel(schema.status)],
+          ['当前版本', schema.current_versions.join(',')],
+          ['代码期望版本', schema.expected_head],
+          ['说明', schema.message]
         ]) +
         table(['备份', '状态', '大小', '路径', '报告'], payload.backups.map((item) => [
           `<button class="secondary" data-use-backup-path="${escapeHtml(item.backup_path)}">#${item.id}</button>`,
@@ -715,7 +723,13 @@ HTML = r"""<!doctype html>
       restored: '已恢复',
       revision_ready: '修订就绪',
       running: '运行中',
-      saved: '已保存'
+      saved: '已保存',
+      ahead_or_diverged: '版本异常',
+      current: '当前最新',
+      current_with_extra_heads: '当前含额外分支',
+      behind: '落后',
+      no_migrations: '无迁移',
+      unversioned: '未版本化'
     };
     const ACTION_LABELS = {
       approve_chapter: '人工审批章节',
@@ -1490,6 +1504,7 @@ def _publishing_payload(session, *, book_id: int) -> dict:
 
 def _database_payload(session) -> dict:
     health = check_database_health(session)
+    schema = check_schema_version(session)
     backups = list_database_backups(session, limit=20)
     return {
         "health": {
@@ -1500,6 +1515,15 @@ def _database_payload(session) -> dict:
             "migration_count": health.migration_count,
             "latest_migration": health.latest_migration,
             "backup_count": health.backup_count,
+        },
+        "schema_version": {
+            "database_url": schema.database_url,
+            "current_versions": schema.current_versions,
+            "expected_head": schema.expected_head,
+            "status": schema.status,
+            "migration_count": schema.migration_count,
+            "latest_migration": schema.latest_migration,
+            "message": schema.message,
         },
         "backups": [
             {

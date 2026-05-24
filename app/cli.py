@@ -29,7 +29,13 @@ from app.services.canon import (
 )
 from app.services.continuity import record_chapter_continuity
 from app.services.dashboard import build_project_dashboard, build_project_snapshot
-from app.services.db_ops import check_database_health, create_database_backup, list_database_backups, restore_database_from_backup
+from app.services.db_ops import (
+    check_database_health,
+    check_schema_version,
+    create_database_backup,
+    list_database_backups,
+    restore_database_from_backup,
+)
 from app.services.llm_audit import list_llm_request_logs, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
@@ -447,6 +453,7 @@ def main() -> None:
     p.add_argument("--job-id", type=int, required=True)
 
     sub.add_parser("database-health")
+    sub.add_parser("schema-version")
 
     p = sub.add_parser("backup-database")
     p.add_argument("--label", default="")
@@ -1351,6 +1358,15 @@ def main() -> None:
                 print(f"latest_migration={health.latest_migration}")
                 print(f"backup_count={health.backup_count}")
                 print("tables=" + ",".join(health.tables))
+            elif args.cmd == "schema-version":
+                report = check_schema_version(session)
+                print(f"database_url={report.database_url}")
+                print(f"status={report.status}")
+                print("current_versions=" + ",".join(report.current_versions))
+                print(f"expected_head={report.expected_head}")
+                print(f"migration_count={report.migration_count}")
+                print(f"latest_migration={report.latest_migration}")
+                print(f"message={report.message}")
             elif args.cmd == "backup-database":
                 backup = create_database_backup(session, label=args.label)
                 print(f"database_backup_id={backup.id}")

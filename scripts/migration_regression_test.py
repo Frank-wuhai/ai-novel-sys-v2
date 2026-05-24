@@ -128,6 +128,17 @@ def _inspect_schema() -> int:
             return _fail("publishing_targets unique constraint is missing")
     finally:
         conn.close()
+    schema_result = subprocess.run(
+        [str(PYTHON), "-m", "app.cli", "--database-url", TEST_DB_URL, "schema-version"],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+    )
+    schema_output = (schema_result.stdout + schema_result.stderr).strip()
+    if schema_result.returncode != 0:
+        return _fail("schema-version command failed\n" + schema_output)
+    if f"status=current" not in schema_output or f"expected_head={EXPECTED_HEAD}" not in schema_output:
+        return _fail("schema-version did not report current head\n" + schema_output)
     print("migration-regression-test: PASS")
     print(f"database={TEST_DB_URL}")
     print(f"alembic_head={EXPECTED_HEAD}")

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import shutil
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import func, inspect, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import ROOT_DIR, settings
@@ -23,6 +24,17 @@ class DatabaseHealth:
     migration_count: int
     latest_migration: str
     backup_count: int
+
+
+@dataclass(frozen=True)
+class SchemaVersionReport:
+    database_url: str
+    current_versions: list[str]
+    expected_head: str
+    status: str
+    migration_count: int
+    latest_migration: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -99,8 +111,85 @@ def check_database_health(session: Session) -> DatabaseHealth:
     )
 
 
+def check_schema_version(session: Session) -> SchemaVersionReport:
+    migrations = _migration_revisions()
+    expected_head = _expected_migration_head(migrations)
+    current_versions = _current_alembic_versions(session)
+    current_set = set(current_versions)
+    known_revisions = set(migrations.values())
+    expected_set = set(expected_head.split(",")) if expected_head else set()
+    latest_migration = _latest_migration_name()
+
+    if not expected_head:
+        status = "no_migrations"
+        message = "no migration files found"
+    elif not current_versions:
+        status = "unversioned"
+        message = "database has no alembic_version entry; run alembic upgrade head for durable databases"
+    elif current_set == expected_set:
+        status = "current"
+        message = "database schema is at expected head"
+    elif current_set.issubset(known_revisions):
+        status = "behind"
+        message = f"database schema is behind expected head {expected_head}"
+    elif expected_set.issubset(current_set):
+        status = "current_with_extra_heads"
+        message = "database includes expected head plus additional alembic heads"
+    else:
+        status = "ahead_or_diverged"
+        message = "database schema version is not recognized by this code checkout"
+
+    return SchemaVersionReport(
+        database_url=settings.database_url,
+        current_versions=current_versions,
+        expected_head=expected_head,
+        status=status,
+        migration_count=len(migrations),
+        latest_migration=latest_migration,
+        message=message,
+    )
+
+
 def _migration_dir() -> Path:
     return ROOT_DIR / "migrations" / "versions"
+
+
+def _latest_migration_name() -> str:
+    migrations = sorted(path.name for path in _migration_dir().glob("*.py") if path.name != "__init__.py")
+    return migrations[-1] if migrations else ""
+
+
+def _migration_revisions() -> dict[str, str]:
+    revisions: dict[str, str] = {}
+    for path in sorted(_migration_dir().glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        text_value = path.read_text(encoding="utf-8")
+        match = re.search(r"^revision\s*=\s*['\"]([^'\"]+)['\"]", text_value, re.MULTILINE)
+        if match:
+            revisions[path.name] = match.group(1)
+    return revisions
+
+
+def _expected_migration_head(migrations: dict[str, str]) -> str:
+    down_revisions: set[str] = set()
+    for path in sorted(_migration_dir().glob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        text_value = path.read_text(encoding="utf-8")
+        match = re.search(r"^down_revision\s*=\s*['\"]([^'\"]+)['\"]", text_value, re.MULTILINE)
+        if match:
+            down_revisions.add(match.group(1))
+    heads = sorted(set(migrations.values()) - down_revisions)
+    return ",".join(heads)
+
+
+def _current_alembic_versions(session: Session) -> list[str]:
+    inspector = inspect(db_session.engine)
+    if "alembic_version" not in inspector.get_table_names():
+        return []
+    rows = session.execute(text("select version_num from alembic_version")).all()
+    return sorted(str(row[0]) for row in rows if row[0])
 
 
 def _copy_sqlite_backup(db_path: Path, *, label: str = "") -> Path:

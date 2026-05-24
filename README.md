@@ -69,6 +69,7 @@ python -m app.cli execute-publish-job --job-id 1 --confirm
 python -m app.cli list-publish-executions --job-id 1
 python -m app.cli retry-publish-job --job-id 1
 python -m app.cli database-health
+python -m app.cli schema-version
 python -m app.cli backup-database --label before-release
 python -m app.cli restore-database --backup-path data/backups/novel-YYYYMMDD-HHMMSS-before-release.db --yes
 ```
@@ -97,6 +98,7 @@ python -m app.cli list-publish-jobs
 python -m app.cli show-publish-job --job-id 1
 python -m app.cli list-publish-executions --job-id 1
 python -m app.cli database-health
+python -m app.cli schema-version
 python -m app.cli list-database-backups
 python -m app.cli list-prompts
 python -m app.cli show-prompt --name draft_chapter --version v1
@@ -454,12 +456,13 @@ Before larger local changes or release preparation, inspect and back up the SQLi
 
 ```bash
 python -m app.cli database-health
+python -m app.cli schema-version
 python -m app.cli backup-database --label before-release
 python -m app.cli list-database-backups
 python -m app.cli restore-database --backup-path data/backups/novel-YYYYMMDD-HHMMSS-before-release.db --yes
 ```
 
-Backups are copied to `data/backups/` and recorded in `database_backups`. `restore-database` only supports SQLite, requires `--yes`, and automatically creates a `before-restore` copy of the current database before overwriting it.
+Backups are copied to `data/backups/` and recorded in `database_backups`. `schema-version` compares the database Alembic version with the migration head in the current code checkout. `restore-database` only supports SQLite, requires `--yes`, and automatically creates a `before-restore` copy of the current database before overwriting it.
 
 ## Database Migrations
 
