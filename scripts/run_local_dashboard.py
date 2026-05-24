@@ -399,6 +399,14 @@ HTML = r"""<!doctype html>
 
     function renderQueue(snapshot, health) {
       const rows = Object.entries(health.counts || {}).map(([name, count]) => [name, count]);
+      const runningRows = (health.running_tasks || []).map((item) => [
+        `运行 #${item.task_id}`,
+        item.chapter_number || '',
+        `${item.running_age_seconds || 0}s`,
+        `${item.timeout_seconds || 0}s`,
+        item.stale ? '<span class="bad">已超时</span>' : '<span class="ok">运行中</span>',
+        item.recoverable ? '是' : '否'
+      ]);
       const failureRows = (health.latest_failures || []).map((item) => [
         `失败 #${item.task_id}`,
         item.chapter_number || '',
@@ -409,13 +417,14 @@ HTML = r"""<!doctype html>
         escapeHtml(`任务 #${item.id}`),
         escapeHtml(item.chapter || ''),
         escapeHtml(statusLabel(item.status)),
-        escapeHtml(errorLabel(item.error_category || '')),
+        escapeHtml(item.status === 'running' ? `${item.running_age_seconds || 0}s / ${item.timeout_seconds || 0}s` : errorLabel(item.error_category || '')),
         queueButtons(item)
       ]);
       $('queue').innerHTML =
         table(['状态', '数量'], rows.map(([name, count]) => [statusLabel(name), count])) +
+        table(['运行任务', '章节', '已运行', '超时阈值', '状态', '可恢复'], runningRows, true) +
         table(['最近失败', '章节', '类型', '详情'], failureRows) +
-        table(['任务', '章节', '状态', '详情', '操作'], taskRows, true);
+        table(['任务', '章节', '状态', '运行/详情', '操作'], taskRows, true);
     }
 
     function queueButtons(item) {
@@ -1007,6 +1016,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "counts": report.counts,
                             "oldest_pending_id": report.oldest_pending_id,
                             "oldest_pending_chapter": report.oldest_pending_chapter,
+                            "running_count": report.running_count,
+                            "stale_running_count": report.stale_running_count,
+                            "running_tasks": [
+                                {
+                                    "task_id": item.task_id,
+                                    "task_type": item.task_type,
+                                    "chapter_number": item.chapter_number,
+                                    "attempt": item.attempt,
+                                    "max_attempts": item.max_attempts,
+                                    "running_age_seconds": item.running_age_seconds,
+                                    "timeout_seconds": item.timeout_seconds,
+                                    "stale": item.stale,
+                                    "recoverable": item.recoverable,
+                                }
+                                for item in report.running_tasks
+                            ],
                             "latest_failures": [
                                 {
                                     "task_id": item.task_id,

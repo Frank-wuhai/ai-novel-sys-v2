@@ -96,6 +96,7 @@ def task_summary(task: GenerationTask) -> str:
             f"type={task.task_type}",
             f"status={task.status}",
             f"chapter={input_data.get('chapter_number', '')}",
+            f"timeout_seconds={input_data.get('task_timeout_seconds') or input_data.get('timeout_seconds') or ''}",
             f"version={version_id or ''}",
             f"child_task={output_data.get('child_generation_task_id', '')}",
             f"provider={output_data.get('provider', '')}",

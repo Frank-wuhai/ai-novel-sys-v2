@@ -78,6 +78,8 @@ def build_project_dashboard(
                     f"chapter={input_data.get('chapter_number', '')}",
                     f"attempt={input_data.get('attempt', '')}",
                     f"max_attempts={input_data.get('max_attempts', '')}",
+                    f"timeout_seconds={_task_timeout_seconds(input_data)}",
+                    f"running_age_seconds={_running_age_seconds(task) if task.status == 'running' else ''}",
                     f"error_category={output_data.get('error_category', '')}",
                 ]
             )
@@ -260,6 +262,9 @@ def _task_snapshot(task: GenerationTask) -> dict:
         "chapter": input_data.get("chapter_number"),
         "attempt": input_data.get("attempt"),
         "max_attempts": input_data.get("max_attempts"),
+        "timeout_seconds": _task_timeout_seconds(input_data),
+        "running_age_seconds": _running_age_seconds(task) if task.status == "running" else 0,
+        "stale": task.status == "running" and _running_age_seconds(task) >= _task_timeout_seconds(input_data),
         "error_category": output_data.get("error_category", ""),
     }
 
@@ -270,3 +275,21 @@ def _loads_json(value: str) -> dict:
     except json.JSONDecodeError:
         return {"raw": value}
     return data if isinstance(data, dict) else {"value": data}
+
+
+def _running_age_seconds(task: GenerationTask) -> int:
+    from datetime import datetime
+
+    input_data = _loads_json(task.input_json)
+    raw = input_data.get("running_started_at")
+    started = task.created_at
+    if isinstance(raw, str) and raw:
+        try:
+            started = datetime.fromisoformat(raw)
+        except ValueError:
+            started = task.created_at
+    return max(0, int((datetime.utcnow() - started).total_seconds()))
+
+
+def _task_timeout_seconds(input_data: dict) -> int:
+    return max(1, int(input_data.get("task_timeout_seconds") or input_data.get("timeout_seconds") or 3600))

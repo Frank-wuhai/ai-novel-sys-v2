@@ -281,12 +281,14 @@ def main() -> None:
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
     p.add_argument("--max-attempts", type=int, default=3)
+    p.add_argument("--task-timeout-seconds", type=int, default=3600)
 
     p = sub.add_parser("enqueue-revision")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
     p.add_argument("--max-attempts", type=int, default=3)
+    p.add_argument("--task-timeout-seconds", type=int, default=3600)
 
     p = sub.add_parser("list-generation-queue")
     p.add_argument("--status", default="")
@@ -895,10 +897,12 @@ def main() -> None:
                     chapter_number=args.chapter_number,
                     dry_run=not args.live_llm,
                     max_attempts=args.max_attempts,
+                    timeout_seconds=args.task_timeout_seconds,
                 )
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
                 print(f"task_type={task.task_type}")
+                print(f"task_timeout_seconds={args.task_timeout_seconds}")
             elif args.cmd == "enqueue-revision":
                 task = enqueue_revise_chapter(
                     session,
@@ -906,10 +910,12 @@ def main() -> None:
                     chapter_number=args.chapter_number,
                     dry_run=not args.live_llm,
                     max_attempts=args.max_attempts,
+                    timeout_seconds=args.task_timeout_seconds,
                 )
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
                 print(f"task_type={task.task_type}")
+                print(f"task_timeout_seconds={args.task_timeout_seconds}")
             elif args.cmd == "list-generation-queue":
                 for task in list_generation_queue(session, status=args.status, limit=args.limit):
                     print(task_summary(task))
@@ -925,6 +931,23 @@ def main() -> None:
                 print(f"oldest_pending_chapter={report.oldest_pending_chapter or ''}")
                 print(f"running_count={report.running_count}")
                 print(f"stale_running_count={report.stale_running_count}")
+                for item in report.running_tasks:
+                    print(
+                        "\t".join(
+                            [
+                                "running",
+                                f"generation_task_id={item.task_id}",
+                                f"type={item.task_type}",
+                                f"chapter={item.chapter_number or ''}",
+                                f"attempt={item.attempt}",
+                                f"max_attempts={item.max_attempts}",
+                                f"running_age_seconds={item.running_age_seconds}",
+                                f"timeout_seconds={item.timeout_seconds}",
+                                f"stale={item.stale}",
+                                f"recoverable={item.recoverable}",
+                            ]
+                        )
+                    )
                 for failure in report.latest_failures:
                     print(
                         "\t".join(

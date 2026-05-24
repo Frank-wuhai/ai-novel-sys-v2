@@ -322,8 +322,13 @@ def main() -> int:
     ])
     queued_draft_id = extract_id(
         "generation_task_id",
-        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"]),
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6", "--task-timeout-seconds", "120"]),
     )
+    queued_draft_detail = run(["show-generation-task", "--task-id", str(queued_draft_id)])
+    if '"task_timeout_seconds": 120' not in queued_draft_detail:
+        print("enqueue-draft did not record task timeout")
+        print(queued_draft_detail)
+        return 1
     duplicate_queue = run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "6"], expect=1)
     if "active generation queue task already exists" not in duplicate_queue:
         print("active queue guard did not reject duplicate draft task")
@@ -471,6 +476,7 @@ def main() -> int:
                         "dry_run": True,
                         "attempt": 1,
                         "max_attempts": 2,
+                        "task_timeout_seconds": 1,
                         "running_started_at": "2000-01-01T00:00:00",
                     },
                     ensure_ascii=False,
@@ -482,7 +488,14 @@ def main() -> int:
     finally:
         conn.close()
     stale_health = run(["generation-queue-health", "--stale-after-seconds", "1"])
-    if "running_count=1" not in stale_health or "stale_running_count=1" not in stale_health:
+    if (
+        "running_count=1" not in stale_health
+        or "stale_running_count=1" not in stale_health
+        or f"running\tgeneration_task_id={stale_task_id}" not in stale_health
+        or "timeout_seconds=1" not in stale_health
+        or "stale=True" not in stale_health
+        or "recoverable=True" not in stale_health
+    ):
         print("generation-queue-health did not detect stale running task")
         print(stale_health)
         return 1
@@ -491,6 +504,7 @@ def main() -> int:
         "recovered_count=1" not in recovery
         or f"generation_task_id={stale_task_id}" not in recovery
         or "status=pending" not in recovery
+        or "timeout_seconds=1" not in run(["show-generation-task", "--task-id", str(stale_task_id)])
         or "error_category=timeout" not in recovery
     ):
         print("recover-stale-generation-tasks did not requeue stale task")
@@ -525,6 +539,7 @@ def main() -> int:
                         "dry_run": True,
                         "attempt": 1,
                         "max_attempts": 2,
+                        "task_timeout_seconds": 1,
                         "running_started_at": "2000-01-01T00:00:00",
                     },
                     ensure_ascii=False,

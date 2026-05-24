@@ -44,6 +44,19 @@ class QueueFailureSummary:
 
 
 @dataclass(frozen=True)
+class RunningTaskSummary:
+    task_id: int
+    task_type: str
+    chapter_number: int | None
+    attempt: int
+    max_attempts: int
+    running_age_seconds: int
+    timeout_seconds: int
+    stale: bool
+    recoverable: bool
+
+
+@dataclass(frozen=True)
 class StaleTaskRecovery:
     task_id: int
     previous_status: str
@@ -62,6 +75,7 @@ class QueueHealthReport:
     oldest_pending_id: int | None
     oldest_pending_chapter: int | None
     latest_failures: list[QueueFailureSummary]
+    running_tasks: list[RunningTaskSummary]
     running_count: int = 0
     stale_running_count: int = 0
 
@@ -73,9 +87,18 @@ def enqueue_draft_chapter(
     chapter_number: int,
     dry_run: bool = True,
     max_attempts: int = 3,
+    timeout_seconds: int = 3600,
 ) -> GenerationTask:
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
-    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_DRAFT, max_attempts=max_attempts)
+    return _enqueue(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        dry_run=dry_run,
+        queue_type=QUEUE_DRAFT,
+        max_attempts=max_attempts,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def enqueue_revise_chapter(
@@ -85,9 +108,18 @@ def enqueue_revise_chapter(
     chapter_number: int,
     dry_run: bool = True,
     max_attempts: int = 3,
+    timeout_seconds: int = 3600,
 ) -> GenerationTask:
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
-    return _enqueue(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, queue_type=QUEUE_REVISE, max_attempts=max_attempts)
+    return _enqueue(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        dry_run=dry_run,
+        queue_type=QUEUE_REVISE,
+        max_attempts=max_attempts,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def list_generation_queue(
@@ -116,13 +148,15 @@ def build_generation_queue_health(session: Session, *, failure_limit: int = 5, s
     oldest_pending = next((task for task in tasks if task.status == "pending"), None)
     oldest_pending_input = _loads_json(oldest_pending.input_json) if oldest_pending else {}
     failed_tasks = [task for task in reversed(tasks) if task.status == "failed"][:failure_limit]
-    stale_running = [task for task in tasks if task.status == "running" and _running_age_seconds(task) >= stale_after_seconds]
+    running_tasks = [_running_summary(task, fallback_timeout_seconds=stale_after_seconds) for task in tasks if task.status == "running"]
+    stale_running = [task for task in running_tasks if task.stale]
     return QueueHealthReport(
         total=len(tasks),
         counts=dict(sorted(counts.items())),
         oldest_pending_id=oldest_pending.id if oldest_pending else None,
         oldest_pending_chapter=oldest_pending_input.get("chapter_number") if oldest_pending else None,
         latest_failures=[_failure_summary(task) for task in failed_tasks],
+        running_tasks=running_tasks,
         running_count=counts.get("running", 0),
         stale_running_count=len(stale_running),
     )
@@ -142,8 +176,10 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     dry_run = bool(input_data.get("dry_run", True))
     attempt = int(input_data.get("attempt") or 0) + 1
     max_attempts = int(input_data.get("max_attempts") or 3)
+    timeout_seconds = _task_timeout_seconds(input_data, fallback=3600)
     input_data["attempt"] = attempt
     input_data["running_started_at"] = _utc_now_iso()
+    input_data["task_timeout_seconds"] = timeout_seconds
     if chapter_number < 1:
         task.status = "failed"
         task.input_json = _dumps_json(input_data)
@@ -173,6 +209,8 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
                 "error": str(exc),
                 "attempt": attempt,
                 "max_attempts": max_attempts,
+                "task_timeout_seconds": timeout_seconds,
+                "running_age_seconds": _running_age_seconds(task),
                 "retryable": retryable,
             }
         )
@@ -191,6 +229,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
             "dry_run": dry_run,
             "attempt": attempt,
             "max_attempts": max_attempts,
+            "task_timeout_seconds": timeout_seconds,
         },
     )
     session.flush()
@@ -235,10 +274,11 @@ def recover_stale_generation_tasks(
         )
     )
     for task in tasks:
-        age = _running_age_seconds(task)
-        if age < timeout_seconds:
-            continue
         input_data = _loads_json(task.input_json)
+        task_timeout_seconds = _task_timeout_seconds(input_data, fallback=timeout_seconds)
+        age = _running_age_seconds(task)
+        if age < task_timeout_seconds:
+            continue
         output_data = _loads_json(task.output_json)
         attempt = int(input_data.get("attempt") or output_data.get("attempt") or 0)
         max_attempts = int(input_data.get("max_attempts") or output_data.get("max_attempts") or 3)
@@ -249,9 +289,10 @@ def recover_stale_generation_tasks(
             {
                 "error_category": "timeout",
                 "error_type": "StaleRunningTask",
-                "error": f"running task exceeded timeout_seconds={timeout_seconds}",
+                "error": f"running task exceeded timeout_seconds={task_timeout_seconds}",
                 "attempt": attempt,
                 "max_attempts": max_attempts,
+                "task_timeout_seconds": task_timeout_seconds,
                 "retryable": new_status == "pending",
                 "recovered_from_status": "running",
                 "stale_age_seconds": age,
@@ -336,12 +377,23 @@ def _enqueue(
     dry_run: bool,
     queue_type: str,
     max_attempts: int,
+    timeout_seconds: int,
 ) -> GenerationTask:
+    if timeout_seconds < 1:
+        raise ValueError("timeout_seconds must be >= 1")
     task = GenerationTask(
         book_id=book_id,
         task_type=queue_type,
         status="pending",
-        input_json=_dumps_json({"chapter_number": chapter_number, "dry_run": dry_run, "attempt": 0, "max_attempts": max_attempts}),
+        input_json=_dumps_json(
+            {
+                "chapter_number": chapter_number,
+                "dry_run": dry_run,
+                "attempt": 0,
+                "max_attempts": max_attempts,
+                "task_timeout_seconds": timeout_seconds,
+            }
+        ),
         output_json="{}",
     )
     session.add(task)
@@ -406,6 +458,27 @@ def _failure_summary(task: GenerationTask) -> QueueFailureSummary:
     )
 
 
+def _running_summary(task: GenerationTask, *, fallback_timeout_seconds: int) -> RunningTaskSummary:
+    input_data = _loads_json(task.input_json)
+    output_data = _loads_json(task.output_json)
+    attempt = int(input_data.get("attempt") or output_data.get("attempt") or 0)
+    max_attempts = int(input_data.get("max_attempts") or output_data.get("max_attempts") or 3)
+    timeout_seconds = _task_timeout_seconds(input_data, fallback=fallback_timeout_seconds)
+    age = _running_age_seconds(task)
+    stale = age >= timeout_seconds
+    return RunningTaskSummary(
+        task_id=task.id,
+        task_type=task.task_type,
+        chapter_number=input_data.get("chapter_number"),
+        attempt=attempt,
+        max_attempts=max_attempts,
+        running_age_seconds=age,
+        timeout_seconds=timeout_seconds,
+        stale=stale,
+        recoverable=stale,
+    )
+
+
 def _loads_json(value: str) -> dict:
     try:
         data = json.loads(value or "{}")
@@ -427,6 +500,10 @@ def _running_age_seconds(task: GenerationTask) -> int:
     raw = input_data.get("running_started_at")
     started = _parse_datetime(raw) if isinstance(raw, str) and raw else task.created_at
     return max(0, int((datetime.utcnow() - started).total_seconds()))
+
+
+def _task_timeout_seconds(input_data: dict, *, fallback: int) -> int:
+    return max(1, int(input_data.get("task_timeout_seconds") or input_data.get("timeout_seconds") or fallback))
 
 
 def _parse_datetime(value: str) -> datetime:

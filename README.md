@@ -27,7 +27,7 @@ python -m app.cli plan-chapters --book-id 1 --start 1 --count 5
 python -m app.cli run-next-action --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run
 python -m app.cli run-book-cycle --book-id 1 --start 1 --count 5 --max-steps 10 --dry-run --queue-generation
-python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
+python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3 --task-timeout-seconds 3600
 python -m app.cli list-generation-queue --status pending
 python -m app.cli generation-queue-health
 python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
@@ -325,7 +325,7 @@ python -m app.cli run-book-cycle \
 Queued generation tasks track attempts and retryable failures:
 
 ```bash
-python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
+python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3 --task-timeout-seconds 3600
 python -m app.cli generation-queue-health --failure-limit 5 --stale-after-seconds 3600
 python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
 python -m app.cli run-generation-queue --max-tasks 3
@@ -339,6 +339,8 @@ python -m app.cli cancel-generation-task --task-id 1 --reason "superseded by new
 ```
 
 `run-generation-worker` is a bounded long-running queue consumer. It exits after `--max-loops`, so it can be supervised by shell scripts, systemd, or another process manager.
+
+Each queued generation task can carry its own `task_timeout_seconds`. Queue health reports running age, timeout threshold, stale state, and whether the task can be recovered. If a task has no per-task timeout, recovery commands use their `--timeout-seconds` or `--task-timeout-seconds` fallback.
 
 For local unattended runs, use the supervisor script:
 
