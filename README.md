@@ -33,7 +33,7 @@ python -m app.cli generation-queue-health
 python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
 python -m app.cli run-generation-task --task-id 1
 python -m app.cli run-generation-queue --max-tasks 3
-python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2
+python -m app.cli run-generation-worker --max-loops 5 --sleep-seconds 2 --max-tasks-per-loop 2 --recover-stale-before-run --task-timeout-seconds 3600
 python -m app.cli pause-generation-task --task-id 1 --reason "manual hold"
 python -m app.cli resume-generation-task --task-id 1
 python -m app.cli cancel-generation-task --task-id 1 --reason "superseded"
@@ -329,9 +329,9 @@ python -m app.cli enqueue-draft --book-id 1 --chapter-number 1 --max-attempts 3
 python -m app.cli generation-queue-health --failure-limit 5 --stale-after-seconds 3600
 python -m app.cli recover-stale-generation-tasks --timeout-seconds 3600
 python -m app.cli run-generation-queue --max-tasks 3
-python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
+python -m app.cli run-generation-worker --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2 --recover-stale-before-run --task-timeout-seconds 3600
 python -m app.cli run-generation-worker --book-id 1 --token-budget 100000 --max-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2
-python scripts/run_generation_worker.py --max-supervisor-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2 --log-dir logs
+python scripts/run_generation_worker.py --max-supervisor-loops 20 --sleep-seconds 5 --max-tasks-per-loop 2 --recover-stale-before-run --task-timeout-seconds 3600 --log-dir logs
 python -m app.cli retry-generation-task --task-id 1
 python -m app.cli pause-generation-task --task-id 1 --reason "waiting for manual review"
 python -m app.cli resume-generation-task --task-id 1
@@ -349,10 +349,12 @@ python scripts/run_generation_worker.py \
   --max-supervisor-loops 100 \
   --sleep-seconds 10 \
   --max-tasks-per-loop 2 \
+  --recover-stale-before-run \
+  --task-timeout-seconds 3600 \
   --log-dir logs
 ```
 
-The supervisor runs `generation-queue-health` before every worker loop, then runs one bounded `run-generation-worker` pass. It appends all command output to `logs/generation-worker-YYYYMMDD.log`.
+The supervisor runs `generation-queue-health` before every worker loop, optionally runs stale task recovery, then runs one bounded `run-generation-worker` pass. It appends all command output to `logs/generation-worker-YYYYMMDD.log`.
 
 Queue task status operations:
 

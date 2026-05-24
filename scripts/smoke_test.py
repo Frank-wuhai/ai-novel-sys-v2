@@ -497,9 +497,68 @@ def main() -> int:
         print(recovery)
         return 1
     run(["cancel-generation-task", "--task-id", str(stale_task_id), "--reason", "smoke recovered"])
+    run([
+        "create-chapter-brief",
+        "--book-id",
+        str(book_id),
+        "--chapter-number",
+        "12",
+        "--goal",
+        "验证 worker 自动恢复卡住任务",
+        "--required-beats",
+        "压力,选择,代价,钩子",
+        "--constraints",
+        "dry-run only",
+    ])
+    worker_stale_task_id = extract_id(
+        "generation_task_id",
+        run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "12", "--max-attempts", "2"]),
+    )
+    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    try:
+        conn.execute(
+            "update generation_tasks set status='running', input_json=? where id=?",
+            (
+                json.dumps(
+                    {
+                        "chapter_number": 12,
+                        "dry_run": True,
+                        "attempt": 1,
+                        "max_attempts": 2,
+                        "running_started_at": "2000-01-01T00:00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                worker_stale_task_id,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    worker_recovery = run([
+        "run-generation-worker",
+        "--max-loops",
+        "1",
+        "--sleep-seconds",
+        "0",
+        "--max-tasks-per-loop",
+        "1",
+        "--recover-stale-before-run",
+        "--task-timeout-seconds",
+        "1",
+    ])
+    if (
+        "worker_recovery_loop=1\trecovered_count=1" not in worker_recovery
+        or f"generation_task_id={worker_stale_task_id}" not in worker_recovery
+        or "worker_done\ttotal_executed=1" not in worker_recovery
+        or "recovered_count=1" not in worker_recovery
+    ):
+        print("run-generation-worker did not recover and execute stale task")
+        print(worker_recovery)
+        return 1
     queue_health = run(["generation-queue-health", "--failure-limit", "2"])
     if (
-        "counts=canceled=2,completed=3,failed=1" not in queue_health
+        "counts=canceled=2,completed=4,failed=1" not in queue_health
         or f"failure\tgeneration_task_id={queued_revision_id}" not in queue_health
         or "error_category=validation" not in queue_health
     ):
@@ -516,6 +575,9 @@ def main() -> int:
         "0",
         "--max-tasks-per-loop",
         "1",
+        "--recover-stale-before-run",
+        "--task-timeout-seconds",
+        "3600",
         "--log-dir",
         "data/test-worker-logs",
     ])
@@ -525,7 +587,11 @@ def main() -> int:
         print(supervisor_output)
         return 1
     log_text = log_file.read_text(encoding="utf-8")
-    if "command=generation-queue-health" not in log_text or "command=run-generation-worker" not in log_text:
+    if (
+        "command=generation-queue-health" not in log_text
+        or "command=recover-stale-generation-tasks --timeout-seconds 3600" not in log_text
+        or "command=run-generation-worker" not in log_text
+    ):
         print("worker supervisor log did not include expected commands")
         print(log_text)
         return 1

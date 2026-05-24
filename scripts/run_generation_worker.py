@@ -19,6 +19,8 @@ def main() -> int:
     parser.add_argument("--max-supervisor-loops", type=int, default=1)
     parser.add_argument("--sleep-seconds", type=float, default=5.0)
     parser.add_argument("--max-tasks-per-loop", type=int, default=1)
+    parser.add_argument("--recover-stale-before-run", action="store_true")
+    parser.add_argument("--task-timeout-seconds", type=int, default=3600)
     parser.add_argument("--log-dir", default="logs")
     args = parser.parse_args()
 
@@ -27,6 +29,9 @@ def main() -> int:
         return 1
     if args.max_tasks_per_loop < 1:
         print("ERROR: --max-tasks-per-loop must be >= 1", file=sys.stderr)
+        return 1
+    if args.task_timeout_seconds < 1:
+        print("ERROR: --task-timeout-seconds must be >= 1", file=sys.stderr)
         return 1
     if args.token_budget and not args.book_id:
         print("ERROR: --book-id is required when --token-budget is set", file=sys.stderr)
@@ -46,6 +51,16 @@ def main() -> int:
             exit_code = health.returncode
             break
 
+        if args.recover_stale_before_run:
+            recovery = _run_cli(
+                ["recover-stale-generation-tasks", "--timeout-seconds", str(args.task_timeout_seconds)],
+                database_url=args.database_url,
+            )
+            _append_command(log_file, f"recover-stale-generation-tasks --timeout-seconds {args.task_timeout_seconds}", recovery)
+            if recovery.returncode != 0:
+                exit_code = recovery.returncode
+                break
+
         worker_args = [
             "run-generation-worker",
             "--max-loops",
@@ -55,6 +70,8 @@ def main() -> int:
             "--max-tasks-per-loop",
             str(args.max_tasks_per_loop),
         ]
+        if args.recover_stale_before_run:
+            worker_args.extend(["--recover-stale-before-run", "--task-timeout-seconds", str(args.task_timeout_seconds)])
         if args.book_id:
             worker_args.extend(["--book-id", str(args.book_id)])
         if args.token_budget:

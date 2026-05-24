@@ -308,6 +308,8 @@ def main() -> None:
     p.add_argument("--max-tasks-per-loop", type=int, default=1)
     p.add_argument("--book-id", type=int, default=0)
     p.add_argument("--token-budget", type=int, default=0)
+    p.add_argument("--recover-stale-before-run", action="store_true")
+    p.add_argument("--task-timeout-seconds", type=int, default=3600)
 
     p = sub.add_parser("retry-generation-task")
     p.add_argument("--task-id", type=int, required=True)
@@ -966,10 +968,36 @@ def main() -> None:
                     raise ValueError("max-loops must be >= 1")
                 if args.max_tasks_per_loop < 1:
                     raise ValueError("max-tasks-per-loop must be >= 1")
+                if args.task_timeout_seconds < 1:
+                    raise ValueError("task-timeout-seconds must be >= 1")
                 total = 0
                 idle_loops = 0
                 budget_stopped = False
+                total_recovered = 0
                 for loop_index in range(1, args.max_loops + 1):
+                    if args.recover_stale_before_run:
+                        recovered = recover_stale_generation_tasks(
+                            session,
+                            timeout_seconds=args.task_timeout_seconds,
+                        )
+                        total_recovered += len(recovered)
+                        print(f"worker_recovery_loop={loop_index}\trecovered_count={len(recovered)}")
+                        for item in recovered:
+                            print(
+                                "\t".join(
+                                    [
+                                        "recovered",
+                                        f"generation_task_id={item.task_id}",
+                                        f"previous_status={item.previous_status}",
+                                        f"status={item.new_status}",
+                                        f"chapter={item.chapter_number or ''}",
+                                        f"attempt={item.attempt}",
+                                        f"max_attempts={item.max_attempts}",
+                                        f"age_seconds={item.age_seconds}",
+                                        f"error_category={item.error_category}",
+                                    ]
+                                )
+                            )
                     if args.token_budget:
                         if not args.book_id:
                             raise ValueError("--book-id is required when --token-budget is set")
@@ -999,7 +1027,9 @@ def main() -> None:
                         idle_loops += 1
                     if loop_index < args.max_loops and args.sleep_seconds > 0:
                         time.sleep(args.sleep_seconds)
-                print(f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}\tbudget_stopped={budget_stopped}")
+                print(
+                    f"worker_done\ttotal_executed={total}\tidle_loops={idle_loops}\tbudget_stopped={budget_stopped}\trecovered_count={total_recovered}"
+                )
             elif args.cmd == "retry-generation-task":
                 task = retry_generation_queue_task(session, task_id=args.task_id)
                 print(f"generation_task_id={task.id}")
