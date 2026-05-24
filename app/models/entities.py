@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -94,6 +94,7 @@ class StoryArc(Base):
 
 class Character(Base):
     __tablename__ = "characters"
+    __table_args__ = (Index("ix_characters_book_name", "book_id", "name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id"), nullable=True)
@@ -116,6 +117,7 @@ class CharacterState(Base):
 
 class WorldRule(Base):
     __tablename__ = "world_rules"
+    __table_args__ = (Index("ix_world_rules_book_status", "book_id", "status"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -138,6 +140,7 @@ class PowerSystem(Base):
 
 class PlotThread(Base):
     __tablename__ = "plot_threads"
+    __table_args__ = (Index("ix_plot_threads_book_status", "book_id", "status"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -148,7 +151,10 @@ class PlotThread(Base):
 
 class Chapter(Base):
     __tablename__ = "chapters"
-    __table_args__ = (UniqueConstraint("book_id", "chapter_number"),)
+    __table_args__ = (
+        UniqueConstraint("book_id", "chapter_number"),
+        Index("ix_chapters_book_status", "book_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -164,6 +170,10 @@ class Chapter(Base):
 
 class ChapterVersion(Base):
     __tablename__ = "chapter_versions"
+    __table_args__ = (
+        UniqueConstraint("chapter_id", "version_number", name="uq_chapter_versions_chapter_version"),
+        Index("ix_chapter_versions_chapter_created", "chapter_id", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id"), nullable=False)
@@ -190,6 +200,7 @@ class ChapterBrief(Base):
 
 class Foreshadow(Base):
     __tablename__ = "foreshadows"
+    __table_args__ = (Index("ix_foreshadows_book_status", "book_id", "status"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int | None] = mapped_column(ForeignKey("books.id"), nullable=True)
@@ -211,6 +222,7 @@ class ChapterReview(Base):
 
 class QualityReport(Base):
     __tablename__ = "quality_reports"
+    __table_args__ = (Index("ix_quality_reports_version_created", "chapter_version_id", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chapter_version_id: Mapped[int] = mapped_column(ForeignKey("chapter_versions.id"), nullable=False)
@@ -222,6 +234,11 @@ class QualityReport(Base):
 
 class GenerationTask(Base):
     __tablename__ = "generation_tasks"
+    __table_args__ = (
+        Index("ix_generation_tasks_status_created", "status", "created_at"),
+        Index("ix_generation_tasks_book_status_created", "book_id", "status", "created_at"),
+        Index("ix_generation_tasks_book_type_status", "book_id", "task_type", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -234,6 +251,11 @@ class GenerationTask(Base):
 
 class LLMRequestLog(Base):
     __tablename__ = "llm_request_logs"
+    __table_args__ = (
+        Index("ix_llm_request_logs_book_created", "book_id", "created_at"),
+        Index("ix_llm_request_logs_book_status_created", "book_id", "status", "created_at"),
+        Index("ix_llm_request_logs_generation_task", "generation_task_id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     generation_task_id: Mapped[int | None] = mapped_column(ForeignKey("generation_tasks.id"), nullable=True)
@@ -259,6 +281,10 @@ class LLMRequestLog(Base):
 
 class PromptTemplate(Base):
     __tablename__ = "prompt_templates"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_prompt_templates_name_version"),
+        Index("ix_prompt_templates_name_status", "name", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -269,7 +295,10 @@ class PromptTemplate(Base):
 
 class PublishingTarget(Base):
     __tablename__ = "publishing_targets"
-    __table_args__ = (UniqueConstraint("platform", "account_label", "work_identifier"),)
+    __table_args__ = (
+        UniqueConstraint("platform", "account_label", "work_identifier"),
+        Index("ix_publishing_targets_platform_status", "platform", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     platform: Mapped[str] = mapped_column(String(120), nullable=False)
@@ -282,6 +311,11 @@ class PublishingTarget(Base):
 
 class PublishJob(Base):
     __tablename__ = "publish_jobs"
+    __table_args__ = (
+        Index("ix_publish_jobs_status_created", "status", "created_at"),
+        Index("ix_publish_jobs_version_status", "chapter_version_id", "status"),
+        Index("ix_publish_jobs_platform_status", "platform", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     chapter_version_id: Mapped[int] = mapped_column(ForeignKey("chapter_versions.id"), nullable=False)
@@ -294,6 +328,10 @@ class PublishJob(Base):
 
 class PublishExecution(Base):
     __tablename__ = "publish_executions"
+    __table_args__ = (
+        Index("ix_publish_executions_job_created", "publish_job_id", "created_at"),
+        Index("ix_publish_executions_status_created", "status", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     publish_job_id: Mapped[int] = mapped_column(ForeignKey("publish_jobs.id"), nullable=False)
@@ -307,6 +345,7 @@ class PublishExecution(Base):
 
 class DatabaseBackup(Base):
     __tablename__ = "database_backups"
+    __table_args__ = (Index("ix_database_backups_status_created", "status", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     database_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -319,6 +358,10 @@ class DatabaseBackup(Base):
 
 class PlatformFeedback(Base):
     __tablename__ = "platform_feedback"
+    __table_args__ = (
+        Index("ix_platform_feedback_book_collected", "book_id", "collected_at"),
+        Index("ix_platform_feedback_book_metric", "book_id", "metric_name"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -332,6 +375,10 @@ class PlatformFeedback(Base):
 
 class FeedbackAdjustment(Base):
     __tablename__ = "feedback_adjustments"
+    __table_args__ = (
+        Index("ix_feedback_adjustments_book_status", "book_id", "status"),
+        Index("ix_feedback_adjustments_book_target", "book_id", "target_chapter_number"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
@@ -356,6 +403,10 @@ class EvidenceSource(Base):
 
 class MarketSignal(Base):
     __tablename__ = "market_signals"
+    __table_args__ = (
+        Index("ix_market_signals_genre_confidence", "genre", "confidence"),
+        Index("ix_market_signals_genre_created", "genre", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_id: Mapped[int | None] = mapped_column(ForeignKey("evidence_sources.id"), nullable=True)

@@ -473,7 +473,7 @@ alembic upgrade head
 alembic revision --autogenerate -m "describe schema change"
 ```
 
-The current migration chain starts at `20260521_0001_initial_schema` and includes production operation audit tables in `20260522_0003_production_ops`, plus actual LLM usage columns in `20260522_0004_llm_actual_usage`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
+The current migration chain starts at `20260521_0001_initial_schema` and includes production operation audit tables in `20260522_0003_production_ops`, actual LLM usage columns in `20260522_0004_llm_actual_usage`, publishing target config in `20260523_0005_publishing_target_config`, and operational indexes/constraints in `20260524_0006_indexes_and_constraints`. `init-db` and `reset-dev-db` remain available for local development and smoke tests, but production-like databases should move through Alembic revisions.
 
 Run the smoke test without touching `data/novel.db`:
 
@@ -497,7 +497,7 @@ Run the migration regression test when changing schema or Alembic revisions:
 python scripts/migration_regression_test.py
 ```
 
-It creates `data/migration-regression.db`, runs `alembic upgrade head`, and verifies the current head plus key tables, fields, and publishing target constraints. If Alembic is not installed in the active environment, the script exits with a clear dependency message instead of pretending the migration chain passed.
+It creates `data/migration-regression.db`, runs `alembic upgrade head`, and verifies the current head plus key tables, fields, operational indexes, and important uniqueness constraints. If Alembic is not installed in the active environment, the script exits with a clear dependency message instead of pretending the migration chain passed.
 
 Run the focused database restore regression test when changing backup, restore, or database safety code:
 

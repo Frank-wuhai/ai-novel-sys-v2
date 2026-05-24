@@ -1192,7 +1192,7 @@ def main() -> int:
         return 1
     database_health = run(["database-health"])
     if (
-        "latest_migration=20260523_0005_publishing_target_config.py" not in database_health
+        "latest_migration=20260524_0006_indexes_and_constraints.py" not in database_health
         or "llm_request_logs" not in database_health
         or "publish_executions" not in database_health
         or "database_backups" not in database_health
