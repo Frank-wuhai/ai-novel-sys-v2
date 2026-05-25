@@ -105,7 +105,34 @@ HTML = r"""<!doctype html>
       gap: 16px;
     }
     h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: 0; }
-    main { max-width: 1280px; margin: 0 auto; padding: 20px; }
+    main { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .app-shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .sidebar {
+      position: sticky;
+      top: 16px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .sidebar-title { padding: 12px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); background: #fbfcfd; }
+    .nav-button {
+      width: 100%;
+      height: 42px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+      background: #fff;
+      color: var(--ink);
+      font-weight: 600;
+    }
+    .nav-button:last-child { border-bottom: 0; }
+    .nav-button.active { background: #e7f5f2; color: #0f5f59; box-shadow: inset 3px 0 0 var(--accent); }
+    .content { min-width: 0; }
+    .module-hidden { display: none !important; }
     .toolbar {
       display: grid;
       grid-template-columns: 1fr 90px 90px 90px auto;
@@ -201,7 +228,10 @@ HTML = r"""<!doctype html>
     .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fff; }
     .actions button.secondary { background: #ffffff; color: var(--ink); border-color: var(--line); }
     @media (max-width: 900px) {
-      .toolbar, .summary, .grid, .forms, .guide, .wizard-actions { grid-template-columns: 1fr; }
+      .app-shell, .toolbar, .summary, .grid, .forms, .guide, .wizard-actions { grid-template-columns: 1fr; }
+      .sidebar { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .sidebar-title { grid-column: 1 / -1; }
+      .nav-button { justify-content: center; }
     }
   </style>
 </head>
@@ -210,7 +240,17 @@ HTML = r"""<!doctype html>
     <h1>AI 小说生产系统 v2</h1>
     <div id="state" class="muted">加载中</div>
   </header>
-  <main>
+  <main class="app-shell">
+    <aside class="sidebar" aria-label="功能模块">
+      <div class="sidebar-title">功能模块</div>
+      <button class="nav-button active" data-view-button="production">生产流程</button>
+      <button class="nav-button" data-view-button="chapter">章节详情</button>
+      <button class="nav-button" data-view-button="publishing">番茄发布</button>
+      <button class="nav-button" data-view-button="feedback">读者反馈</button>
+      <button class="nav-button" data-view-button="knowledge">知识库</button>
+      <button class="nav-button" data-view-button="database">数据库</button>
+    </aside>
+    <div class="content">
     <section class="toolbar">
       <label>作品<select id="book"></select></label>
       <label>起始章<input id="start" type="number" min="1" value="1"></label>
@@ -218,8 +258,8 @@ HTML = r"""<!doctype html>
       <label>当前章<input id="chapter" type="number" min="1" value="1"></label>
       <button id="refresh">刷新</button>
     </section>
-    <section class="summary" id="summary"></section>
-    <section class="guide">
+    <section class="summary" id="summary" data-view="production"></section>
+    <section class="guide" data-view="production">
       <section class="panel">
         <h2>下一步该做什么</h2>
         <div id="operationGuide"></div>
@@ -244,7 +284,7 @@ HTML = r"""<!doctype html>
         <div class="danger-note">真实发布仍需要番茄登录态和发布安全开关，不会因为生成章节而自动误发。</div>
       </section>
     </section>
-    <section class="grid">
+    <section class="grid" data-view="production">
       <div class="stack">
         <section class="panel">
           <h2>章节列表</h2>
@@ -282,11 +322,11 @@ HTML = r"""<!doctype html>
         </section>
       </div>
     </section>
-    <section class="panel full">
+    <section class="panel full" data-view="chapter">
       <h2>章节详情</h2>
       <div id="chapterDetail"></div>
     </section>
-    <section class="panel full">
+    <section class="panel full" data-view="feedback">
       <h2>读者反馈</h2>
       <div id="feedback"></div>
       <div class="forms">
@@ -302,7 +342,7 @@ HTML = r"""<!doctype html>
         <button id="createAdjustment">创建调整</button>
       </div>
     </section>
-    <section class="panel full">
+    <section class="panel full" data-view="publishing">
       <h2>发布配置与任务</h2>
       <div id="publishing"></div>
       <div class="forms">
@@ -314,7 +354,7 @@ HTML = r"""<!doctype html>
         <label style="grid-column: 1 / -1;">番茄发布配置<textarea id="publishTargetConfig">{"writer_url":"https://fanqienovel.com/writer/zone","cdp_url":"http://127.0.0.1:9222","publish_mode":"immediate","enable_real_publish":false}</textarea></label>
       </div>
     </section>
-    <section class="panel full">
+    <section class="panel full" data-view="database">
       <h2>数据库安全</h2>
       <div id="databaseOps"></div>
       <div class="forms">
@@ -324,14 +364,26 @@ HTML = r"""<!doctype html>
         <button id="restoreDatabase">恢复数据库</button>
       </div>
     </section>
-    <section class="panel full">
+    <section class="panel full" data-view="knowledge">
       <h2>知识上下文</h2>
       <div id="knowledge"></div>
     </section>
+    </div>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
     let currentSnapshot = null;
+    let activeView = 'production';
+
+    function setActiveView(view) {
+      activeView = view;
+      document.querySelectorAll('[data-view]').forEach((section) => {
+        section.classList.toggle('module-hidden', section.dataset.view !== activeView);
+      });
+      document.querySelectorAll('[data-view-button]').forEach((button) => {
+        button.classList.toggle('active', button.dataset.viewButton === activeView);
+      });
+    }
 
     async function loadBooks() {
       const books = await fetchJson('/api/books');
@@ -995,10 +1047,15 @@ HTML = r"""<!doctype html>
     }
 
     $('refresh').addEventListener('click', refresh);
+    document.querySelectorAll('[data-view-button]').forEach((button) => {
+      button.addEventListener('click', () => setActiveView(button.dataset.viewButton));
+    });
+    setActiveView(activeView);
     document.addEventListener('click', (event) => {
       const chapterButton = event.target.closest('button[data-select-chapter]');
       if (chapterButton) {
         $('chapter').value = chapterButton.dataset.selectChapter;
+        setActiveView('chapter');
         refresh().catch(showError);
       }
       const feedbackButton = event.target.closest('button[data-add-feedback-id]');
