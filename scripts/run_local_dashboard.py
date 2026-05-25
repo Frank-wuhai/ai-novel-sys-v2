@@ -59,6 +59,8 @@ from app.services.llm_queue import (
 from app.services.planning import AUTO_ACTIONS, run_next_action
 from app.services.production import (
     approve_chapter,
+    create_book,
+    create_foundation,
     execute_publish_job,
     publish_job_dry_run,
     queue_publish_job,
@@ -66,7 +68,7 @@ from app.services.production import (
     upsert_publishing_target,
 )
 from app.services.continuity import record_chapter_continuity
-from app.services.story import format_story_control_context, get_story_bible
+from app.services.story import format_story_control_context, get_story_bible, upsert_story_bible
 
 
 HTML = r"""<!doctype html>
@@ -244,6 +246,7 @@ HTML = r"""<!doctype html>
     <aside class="sidebar" aria-label="功能模块">
       <div class="sidebar-title">功能模块</div>
       <button class="nav-button active" data-view-button="production">生产流程</button>
+      <button class="nav-button" data-view-button="newbook">创建新书</button>
       <button class="nav-button" data-view-button="chapter">章节详情</button>
       <button class="nav-button" data-view-button="publishing">番茄发布</button>
       <button class="nav-button" data-view-button="feedback">读者反馈</button>
@@ -272,8 +275,8 @@ HTML = r"""<!doctype html>
         </div>
         <div class="forms">
           <label>发布平台<input id="wizardPlatform" value="番茄小说"></label>
-          <label>最多推进步数<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
           <label>运行模式<select id="wizardDryRun"><option value="false">真实生成</option><option value="true">安全演示</option></select></label>
+          <label>安全上限<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
         </div>
         <div class="wizard-actions">
           <button id="runWizard">推进当前章</button>
@@ -281,7 +284,7 @@ HTML = r"""<!doctype html>
           <button id="approveWizard" class="secondary">审批当前章</button>
         </div>
         <label style="padding: 0 14px 12px;">连续性摘要<textarea id="continuitySummary" placeholder="质检通过后，写一句本章发生了什么；留空则系统自动生成简短摘要。"></textarea></label>
-        <div class="danger-note">真实发布仍需要番茄登录态和发布安全开关，不会因为生成章节而自动误发。</div>
+        <div class="danger-note">“安全上限”是防止一次点击连续执行太多步骤的保险，不是章节数量。真实发布仍需要番茄登录态和发布安全开关。</div>
       </section>
     </section>
     <section class="grid" data-view="production">
@@ -320,6 +323,24 @@ HTML = r"""<!doctype html>
             <button id="runNext" class="secondary">执行安全下一步</button>
           </div>
         </section>
+      </div>
+    </section>
+    <section class="panel full" data-view="newbook">
+      <h2>创建新书</h2>
+      <div class="callout">
+        <strong>这里会创建一部新作品，并写入最基础的故事地基和故事圣经。</strong>
+        创建完成后，左上角作品列表会自动切换到新书，然后就可以回到“生产流程”推进第一章。
+      </div>
+      <div class="forms">
+        <label>书名<input id="newBookTitle" placeholder="例如：我能推演超凡途径"></label>
+        <label>类型<input id="newBookGenre" value="玄幻脑洞"></label>
+        <label>目标平台<input id="newBookPlatform" value="番茄小说"></label>
+        <label>读者承诺<input id="newBookPromise" placeholder="例如：升级快、反转强、每章有钩子"></label>
+        <label style="grid-column: 1 / -1;">一句话核心设定<textarea id="newBookPremise" placeholder="主角是谁，获得什么能力，面对什么冲突。"></textarea></label>
+        <label style="grid-column: 1 / -1;">世界引擎<textarea id="newBookWorld" placeholder="世界如何运转，力量体系或时代背景是什么。"></textarea></label>
+        <label style="grid-column: 1 / -1;">主角引擎<textarea id="newBookProtagonist" placeholder="主角的欲望、缺陷、成长方向。"></textarea></label>
+        <label style="grid-column: 1 / -1;">冲突引擎<textarea id="newBookConflict" placeholder="主要敌人、压力来源、长期矛盾。"></textarea></label>
+        <button id="createNewBook">创建并切换到新书</button>
       </div>
     </section>
     <section class="panel full" data-view="chapter">
@@ -387,11 +408,15 @@ HTML = r"""<!doctype html>
 
     async function loadBooks() {
       const books = await fetchJson('/api/books');
-      $('book').innerHTML = books.map((book) =>
-        `<option value="${book.id}">${escapeHtml(book.title)} #${book.id}</option>`
-      ).join('');
+      renderBookOptions(books);
       if (books.length) await refresh();
       else $('state').textContent = '暂无作品';
+    }
+
+    function renderBookOptions(books, selectedId = '') {
+      $('book').innerHTML = books.map((book) =>
+        `<option value="${book.id}" ${String(book.id) === String(selectedId) ? 'selected' : ''}>${escapeHtml(book.title)} #${book.id}</option>`
+      ).join('');
     }
 
     async function refresh() {
@@ -448,6 +473,7 @@ HTML = r"""<!doctype html>
       const result = await response.json();
       $('state').textContent = `${actionLabel(action)}：${statusLabel(result.status || 'done')}`;
       await refresh();
+      return result;
     }
 
     function renderSummary(snapshot, health) {
@@ -1150,6 +1176,27 @@ HTML = r"""<!doctype html>
         config_json: $('publishTargetConfig').value
       }).catch(showError);
     });
+    $('createNewBook').addEventListener('click', async () => {
+      try {
+        const result = await postAction('create_new_book', {
+          title: $('newBookTitle').value,
+          genre: $('newBookGenre').value,
+          platform: $('newBookPlatform').value,
+          reader_promise: $('newBookPromise').value,
+          premise: $('newBookPremise').value,
+          world_engine: $('newBookWorld').value,
+          protagonist_engine: $('newBookProtagonist').value,
+          conflict_engine: $('newBookConflict').value
+        });
+        const books = await fetchJson('/api/book-options');
+        renderBookOptions(books, result.book?.id || '');
+        $('chapter').value = 1;
+        setActiveView('production');
+        await refresh();
+      } catch (error) {
+        showError(error);
+      }
+    });
     $('createDatabaseBackup').addEventListener('click', () => {
       postAction('backup_database', {
         label: $('databaseBackupLabel').value
@@ -1243,6 +1290,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             for book in books
                         ]
                     )
+                return
+            if parsed.path == "/api/book-options":
+                with session_scope() as session:
+                    books = list(session.scalars(select(Book).order_by(Book.id)))
+                    self._send_json([_book_option(book) for book in books])
                 return
             if parsed.path == "/api/snapshot":
                 query = parse_qs(parsed.query)
@@ -1404,6 +1456,16 @@ def _int_query(query: dict[str, list[str]], name: str, default: int) -> int:
     return int(values[0])
 
 
+def _book_option(book: Book) -> dict:
+    return {
+        "id": book.id,
+        "title": book.title,
+        "genre": book.genre,
+        "platform": book.target_platform,
+        "status": book.status,
+    }
+
+
 def _perform_action(session, payload: dict) -> dict:
     action = str(payload.get("action") or "")
     if action == "queue_health":
@@ -1447,6 +1509,39 @@ def _perform_action(session, payload: dict) -> dict:
             "backup_path": backup.backup_path,
             "size_bytes": backup.size_bytes,
         }
+    if action == "create_new_book":
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            raise ValueError("书名不能为空")
+        premise = str(payload.get("premise") or "").strip()
+        if not premise:
+            raise ValueError("一句话核心设定不能为空")
+        genre = str(payload.get("genre") or "玄幻脑洞").strip()
+        platform = str(payload.get("platform") or "番茄小说").strip()
+        promise = str(payload.get("reader_promise") or "").strip()
+        book = create_book(session, title=title, genre=genre, platform=platform)
+        foundation = create_foundation(
+            session,
+            book_id=book.id,
+            premise=premise,
+            reader_promise=promise,
+            world_engine=str(payload.get("world_engine") or ""),
+            protagonist_engine=str(payload.get("protagonist_engine") or ""),
+            conflict_engine=str(payload.get("conflict_engine") or ""),
+        )
+        bible = upsert_story_bible(
+            session,
+            book_id=book.id,
+            positioning=premise,
+            reader_promise=promise,
+            main_plot=str(payload.get("conflict_engine") or premise),
+            protagonist_arc=str(payload.get("protagonist_engine") or ""),
+            power_curve=str(payload.get("world_engine") or ""),
+            forbidden_rules="避免系统提示词、作者说明、元叙事泄露到正文。",
+            style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
+            status="draft",
+        )
+        return {"status": "created", "book": _book_option(book), "foundation_id": foundation.id, "story_bible_id": bible.id}
     if action == "publish_dry_run":
         job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
         return {"status": job.status, "publish_job_id": job.id}
