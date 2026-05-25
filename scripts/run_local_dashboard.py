@@ -47,6 +47,7 @@ from app.services.feedback import (
 )
 from app.services.llm_audit import llm_failure_suggestion, list_llm_request_logs, summarize_llm_failures, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
+from app.services.live_llm import run_live_llm_smoke
 from app.llm.providers import ArkOpenAIProvider
 from app.services.llm_queue import (
     QUEUE_TYPES,
@@ -347,12 +348,14 @@ HTML = r"""<!doctype html>
         创建完成后，系统会自动切换到新书，然后回到“生产流程”推进第一章。
       </div>
       <div class="helper-row">
+        <button id="checkLLMForIdeas">检测模型连接</button>
         <button id="brainstormNewBook">AI 构思 3 个方向</button>
         <button id="reviseNewBookIdeas">按补充意见重构思</button>
         <button id="fillNewBookDefaults">自动补全空白</button>
         <button id="applyFanqieTemplate">套用番茄玄幻模板</button>
         <button id="clearNewBookDraft">清空草稿</button>
       </div>
+      <div id="newBookLLMStatus" class="hint">AI 构思需要真实模型连接。若检测失败，请先处理模型配置或网络。</div>
       <div id="newBookIdeas"></div>
       <div class="hint">你可以先只写一段自然语言想法，比如“我想写一个底层少年靠推演能力逆袭，但不要太套路”。AI 会扩展成 3 个方向；不满意就写补充意见再重构思。</div>
       <div class="forms">
@@ -495,11 +498,25 @@ HTML = r"""<!doctype html>
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action, ...payload})
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(friendlyError(await response.text()));
       const result = await response.json();
       $('state').textContent = `${actionLabel(action)}：${statusLabel(result.status || 'done')}`;
       await refresh();
       return result;
+    }
+
+    function friendlyError(text) {
+      const value = String(text || '').replace(/^ERROR:\s*/, '');
+      if (value.includes('APIConnectionError') || value.includes('Connection error') || value.includes('network')) {
+        return '模型连接失败：当前无法连接到真实模型服务。请先点击“检测模型连接”，并检查网络、代理或 ARK_BASE_URL / ARK_API_KEY 配置。';
+      }
+      if (value.includes('ARK_API_KEY') || value.includes('ARK_BASE_URL')) {
+        return '模型配置不完整：请检查 .env 里的 ARK_API_KEY 和 ARK_BASE_URL。';
+      }
+      if (value.includes('JSON')) {
+        return '模型返回格式不符合要求，请点“按补充意见重构思”再试一次。原始错误：' + value;
+      }
+      return value;
     }
 
     function renderSummary(snapshot, health) {
@@ -1150,6 +1167,12 @@ HTML = r"""<!doctype html>
       $('newBookProtagonist').value = idea.protagonist_engine || '';
       $('newBookConflict').value = idea.conflict_engine || '';
     }
+    function renderLLMStatus(result) {
+      const ok = result.passed;
+      $('newBookLLMStatus').innerHTML = ok
+        ? `<span class="ok">模型连接正常：</span>${escapeHtml(result.model || '')}，耗时 ${escapeHtml(result.elapsed_ms || 0)} 毫秒`
+        : `<span class="bad">模型连接失败：</span>${escapeHtml(friendlyError(result.error || result.error_category || '未知错误'))}`;
+    }
     async function brainstormNewBookIdeas(revise = false) {
       const ideaText = $('newBookIdeaPrompt').value.trim();
       const title = $('newBookTitle').value.trim();
@@ -1296,6 +1319,15 @@ HTML = r"""<!doctype html>
     $('fillNewBookDefaults').addEventListener('click', fillNewBookDefaults);
     $('applyFanqieTemplate').addEventListener('click', applyFanqieTemplate);
     $('clearNewBookDraft').addEventListener('click', clearNewBookDraft);
+    $('checkLLMForIdeas').addEventListener('click', async () => {
+      try {
+        const result = await postAction('check_live_llm', {});
+        renderLLMStatus(result);
+      } catch (error) {
+        $('newBookLLMStatus').innerHTML = `<span class="bad">${escapeHtml(error.message)}</span>`;
+        showError(error);
+      }
+    });
     $('brainstormNewBook').addEventListener('click', async () => {
       try {
         await brainstormNewBookIdeas(false);
@@ -1644,6 +1676,19 @@ def _perform_action(session, payload: dict) -> dict:
             "backup_path": backup.backup_path,
             "size_bytes": backup.size_bytes,
         }
+    if action == "check_live_llm":
+        result = run_live_llm_smoke(session)
+        return {
+            "status": "completed" if result.passed else "failed",
+            "passed": result.passed,
+            "provider": result.provider,
+            "model": result.model,
+            "request_id": result.request_id,
+            "estimated_total_tokens": result.estimated_total_tokens,
+            "elapsed_ms": result.elapsed_ms,
+            "error_category": result.error_category,
+            "error": result.error,
+        }
     if action == "create_new_book":
         title = str(payload.get("title") or "").strip()
         if not title:
@@ -1848,7 +1893,13 @@ def _brainstorm_new_book_ideas(
 - 3 个方向要区分：一个偏强爽点，一个偏悬疑反转，一个偏人物成长或情绪张力。
 - 不要抄袭已知作品，不要出现“模板”“AI”“系统提示”等元叙事说明。
 """.strip()
-    response = ArkOpenAIProvider().generate(prompt, max_tokens=1800, temperature=0.9)
+    try:
+        response = ArkOpenAIProvider().generate(prompt, max_tokens=1800, temperature=0.9)
+    except Exception as exc:
+        message = str(exc) or type(exc).__name__
+        if "Connection error" in message or type(exc).__name__ == "APIConnectionError":
+            raise ValueError("模型连接失败：当前无法连接到真实模型服务。请检查网络、代理或 ARK 配置后再试。") from exc
+        raise ValueError(f"AI 构思调用失败：{type(exc).__name__}: {message}") from exc
     try:
         data = json.loads(_json_object_text(response.text))
     except json.JSONDecodeError as exc:
