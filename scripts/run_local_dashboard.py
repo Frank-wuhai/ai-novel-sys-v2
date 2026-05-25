@@ -1894,16 +1894,19 @@ def _brainstorm_new_book_ideas(
 - 不要抄袭已知作品，不要出现“模板”“AI”“系统提示”等元叙事说明。
 """.strip()
     try:
-        response = ArkOpenAIProvider().generate(prompt, max_tokens=1800, temperature=0.9)
+        provider = ArkOpenAIProvider()
+        response = provider.generate(
+            prompt,
+            max_tokens=3200,
+            temperature=0.8,
+            response_format={"type": "json_object"},
+        )
     except Exception as exc:
         message = str(exc) or type(exc).__name__
         if "Connection error" in message or type(exc).__name__ == "APIConnectionError":
             raise ValueError("模型连接失败：当前无法连接到真实模型服务。请检查网络、代理或 ARK 配置后再试。") from exc
         raise ValueError(f"AI 构思调用失败：{type(exc).__name__}: {message}") from exc
-    try:
-        data = json.loads(_json_object_text(response.text))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"AI 构思返回内容不是合法 JSON: {exc}") from exc
+    data = _load_brainstorm_json(provider, response.text)
     ideas = data.get("ideas") if isinstance(data, dict) else None
     if not isinstance(ideas, list):
         raise ValueError("AI 构思结果缺少 ideas 数组")
@@ -1938,6 +1941,34 @@ def _json_object_text(value: str) -> str:
     if start >= 0 and end > start:
         return text[start : end + 1]
     return text
+
+
+def _load_brainstorm_json(provider: ArkOpenAIProvider, text: str) -> dict:
+    try:
+        return json.loads(_json_object_text(text))
+    except json.JSONDecodeError as first_exc:
+        repair_prompt = f"""
+下面是一段模型输出，目标是番茄小说新书构思 JSON，但它不是合法 JSON。
+请修复成合法 JSON。只输出 JSON 对象，不要解释。
+格式必须是：
+{{"ideas":[{{"title":"","genre":"","reader_promise":"","premise":"","world_engine":"","protagonist_engine":"","conflict_engine":""}}]}}
+ideas 必须恰好 3 个元素。
+
+待修复内容：
+{text}
+""".strip()
+        try:
+            repaired = provider.generate(
+                repair_prompt,
+                max_tokens=2600,
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(_json_object_text(repaired.text))
+        except Exception as repair_exc:
+            raise ValueError(
+                f"AI 构思返回内容不是合法 JSON，自动修复也失败：{first_exc}"
+            ) from repair_exc
 
 
 def _latest_version_for_chapter(session, *, book_id: int, chapter_number: int) -> ChapterVersion:

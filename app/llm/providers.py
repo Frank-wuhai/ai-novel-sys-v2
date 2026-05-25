@@ -26,14 +26,28 @@ class LLMResponse:
 class BaseLLMProvider:
     name = "base"
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 2000,
+        temperature: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResponse:
         raise NotImplementedError
 
 
 class DryRunProvider(BaseLLMProvider):
     name = "dry_run"
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 2000,
+        temperature: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResponse:
         started = time.perf_counter()
         if "reviewer_json_schema" in prompt:
             text = json.dumps(
@@ -114,7 +128,14 @@ class ArkOpenAIProvider(BaseLLMProvider):
             raise RuntimeError("ARK_API_KEY and ARK_BASE_URL are required for live LLM calls")
         self.client = OpenAI(api_key=settings.ark_api_key, base_url=settings.ark_base_url)
 
-    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature: float | None = None) -> LLMResponse:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 2000,
+        temperature: float | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResponse:
         started = time.perf_counter()
         kwargs = {
             "model": settings.model_name,
@@ -126,6 +147,8 @@ class ArkOpenAIProvider(BaseLLMProvider):
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         result = self.client.chat.completions.create(
             **kwargs,
         )
