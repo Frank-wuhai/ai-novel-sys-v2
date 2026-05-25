@@ -217,6 +217,9 @@ HTML = r"""<!doctype html>
     .wizard-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
     .wizard-actions button { min-height: 38px; }
     .danger-note { color: var(--bad); font-size: 12px; padding: 0 14px 12px; }
+    .helper-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); background: #fbfcfd; }
+    .helper-row button { background: #ffffff; color: var(--ink); border-color: var(--line); }
+    .hint { color: var(--muted); font-size: 12px; padding: 0 14px 12px; line-height: 1.6; }
     .diff {
       background: #111827;
       color: #e5e7eb;
@@ -328,18 +331,24 @@ HTML = r"""<!doctype html>
     <section class="panel full" data-view="newbook">
       <h2>创建新书</h2>
       <div class="callout">
-        <strong>这里会创建一部新作品，并写入最基础的故事地基和故事圣经。</strong>
-        创建完成后，左上角作品列表会自动切换到新书，然后就可以回到“生产流程”推进第一章。
+        <strong>你只需要填书名；其他不会写的地方，可以让系统先补一版。</strong>
+        创建完成后，系统会自动切换到新书，然后回到“生产流程”推进第一章。
       </div>
+      <div class="helper-row">
+        <button id="fillNewBookDefaults">自动补全空白</button>
+        <button id="applyFanqieTemplate">套用番茄玄幻模板</button>
+        <button id="clearNewBookDraft">清空草稿</button>
+      </div>
+      <div class="hint">最低要求：书名。专业字段不用一次写对，后面可以继续改；系统会根据书名、类型和读者承诺补齐一版可运行的地基。</div>
       <div class="forms">
         <label>书名<input id="newBookTitle" placeholder="例如：我能推演超凡途径"></label>
         <label>类型<input id="newBookGenre" value="玄幻脑洞"></label>
         <label>目标平台<input id="newBookPlatform" value="番茄小说"></label>
-        <label>读者承诺<input id="newBookPromise" placeholder="例如：升级快、反转强、每章有钩子"></label>
+        <label>读者承诺<input id="newBookPromise" placeholder="不会写可留空，系统会补"></label>
         <label style="grid-column: 1 / -1;">一句话核心设定<textarea id="newBookPremise" placeholder="主角是谁，获得什么能力，面对什么冲突。"></textarea></label>
-        <label style="grid-column: 1 / -1;">世界引擎<textarea id="newBookWorld" placeholder="世界如何运转，力量体系或时代背景是什么。"></textarea></label>
-        <label style="grid-column: 1 / -1;">主角引擎<textarea id="newBookProtagonist" placeholder="主角的欲望、缺陷、成长方向。"></textarea></label>
-        <label style="grid-column: 1 / -1;">冲突引擎<textarea id="newBookConflict" placeholder="主要敌人、压力来源、长期矛盾。"></textarea></label>
+        <label style="grid-column: 1 / -1;">世界规则<textarea id="newBookWorld" placeholder="不会写可留空：系统会补世界如何运转、力量体系或时代背景。"></textarea></label>
+        <label style="grid-column: 1 / -1;">主角动力<textarea id="newBookProtagonist" placeholder="不会写可留空：系统会补主角欲望、缺陷、成长方向。"></textarea></label>
+        <label style="grid-column: 1 / -1;">长期冲突<textarea id="newBookConflict" placeholder="不会写可留空：系统会补主要敌人、压力来源、长期矛盾。"></textarea></label>
         <button id="createNewBook">创建并切换到新书</button>
       </div>
     </section>
@@ -1056,6 +1065,43 @@ HTML = r"""<!doctype html>
         .replaceAll('fanqie_plan=', '番茄计划=')
         .replaceAll('fanqie_command=', '番茄命令=');
     }
+    function newBookDraft() {
+      const title = $('newBookTitle').value.trim() || '新书';
+      const genre = $('newBookGenre').value.trim() || '玄幻脑洞';
+      const promise = $('newBookPromise').value.trim() || '升级快、冲突强、每章都有明确钩子';
+      const protagonist = title.includes('我') ? '主角以第一人称视角承接奇遇' : '主角从底层困境中获得改变命运的机会';
+      return {
+        promise,
+        premise: `${title}：${protagonist}，获得一种可以持续制造成长和反转的核心能力，在${genre}世界里一路破局，同时被更高层的势力盯上。`,
+        world: `${genre}世界分层清晰，资源、身份和力量等级决定生存空间。核心能力必须有代价和限制，每次升级都带来新的风险。`,
+        protagonist: `主角开局处境被压制，但目标明确：活下去、变强、夺回主动权。性格上有不服输的一面，也会因为力量增长不断付出代价。`,
+        conflict: `长期冲突来自三层压力：身边危机、同阶竞争者、隐藏在世界规则背后的高位势力。每一卷都要让主角赢一部分，同时暴露更大的问题。`
+      };
+    }
+    function fillNewBookDefaults() {
+      const draft = newBookDraft();
+      if (!$('newBookPromise').value.trim()) $('newBookPromise').value = draft.promise;
+      if (!$('newBookPremise').value.trim()) $('newBookPremise').value = draft.premise;
+      if (!$('newBookWorld').value.trim()) $('newBookWorld').value = draft.world;
+      if (!$('newBookProtagonist').value.trim()) $('newBookProtagonist').value = draft.protagonist;
+      if (!$('newBookConflict').value.trim()) $('newBookConflict').value = draft.conflict;
+    }
+    function applyFanqieTemplate() {
+      $('newBookGenre').value = $('newBookGenre').value.trim() || '玄幻脑洞';
+      const draft = newBookDraft();
+      $('newBookPromise').value = draft.promise;
+      $('newBookPremise').value = draft.premise;
+      $('newBookWorld').value = draft.world;
+      $('newBookProtagonist').value = draft.protagonist;
+      $('newBookConflict').value = draft.conflict;
+    }
+    function clearNewBookDraft() {
+      ['newBookTitle', 'newBookPromise', 'newBookPremise', 'newBookWorld', 'newBookProtagonist', 'newBookConflict'].forEach((id) => {
+        $(id).value = '';
+      });
+      $('newBookGenre').value = '玄幻脑洞';
+      $('newBookPlatform').value = '番茄小说';
+    }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
     function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
     function qualityLabel(value) {
@@ -1176,8 +1222,12 @@ HTML = r"""<!doctype html>
         config_json: $('publishTargetConfig').value
       }).catch(showError);
     });
+    $('fillNewBookDefaults').addEventListener('click', fillNewBookDefaults);
+    $('applyFanqieTemplate').addEventListener('click', applyFanqieTemplate);
+    $('clearNewBookDraft').addEventListener('click', clearNewBookDraft);
     $('createNewBook').addEventListener('click', async () => {
       try {
+        fillNewBookDefaults();
         const result = await postAction('create_new_book', {
           title: $('newBookTitle').value,
           genre: $('newBookGenre').value,
@@ -1513,30 +1563,31 @@ def _perform_action(session, payload: dict) -> dict:
         title = str(payload.get("title") or "").strip()
         if not title:
             raise ValueError("书名不能为空")
-        premise = str(payload.get("premise") or "").strip()
-        if not premise:
-            raise ValueError("一句话核心设定不能为空")
         genre = str(payload.get("genre") or "玄幻脑洞").strip()
         platform = str(payload.get("platform") or "番茄小说").strip()
-        promise = str(payload.get("reader_promise") or "").strip()
+        promise = str(payload.get("reader_promise") or "").strip() or "升级快、冲突强、每章都有明确钩子"
+        premise = str(payload.get("premise") or "").strip() or f"{title}：主角在{genre}世界获得改变命运的核心能力，一边变强一边被更高层的势力盯上。"
+        world_engine = str(payload.get("world_engine") or "").strip() or f"{genre}世界分层清晰，资源、身份和力量等级决定生存空间；核心能力必须有代价和限制。"
+        protagonist_engine = str(payload.get("protagonist_engine") or "").strip() or "主角开局被压制，但目标明确：活下去、变强、夺回主动权。"
+        conflict_engine = str(payload.get("conflict_engine") or "").strip() or "长期冲突来自身边危机、同阶竞争者，以及隐藏在世界规则背后的高位势力。"
         book = create_book(session, title=title, genre=genre, platform=platform)
         foundation = create_foundation(
             session,
             book_id=book.id,
             premise=premise,
             reader_promise=promise,
-            world_engine=str(payload.get("world_engine") or ""),
-            protagonist_engine=str(payload.get("protagonist_engine") or ""),
-            conflict_engine=str(payload.get("conflict_engine") or ""),
+            world_engine=world_engine,
+            protagonist_engine=protagonist_engine,
+            conflict_engine=conflict_engine,
         )
         bible = upsert_story_bible(
             session,
             book_id=book.id,
             positioning=premise,
             reader_promise=promise,
-            main_plot=str(payload.get("conflict_engine") or premise),
-            protagonist_arc=str(payload.get("protagonist_engine") or ""),
-            power_curve=str(payload.get("world_engine") or ""),
+            main_plot=conflict_engine or premise,
+            protagonist_arc=protagonist_engine,
+            power_curve=world_engine,
             forbidden_rules="避免系统提示词、作者说明、元叙事泄露到正文。",
             style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
             status="draft",
