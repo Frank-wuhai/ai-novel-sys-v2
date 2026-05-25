@@ -1906,7 +1906,18 @@ def _brainstorm_new_book_ideas(
         if "Connection error" in message or type(exc).__name__ == "APIConnectionError":
             raise ValueError("模型连接失败：当前无法连接到真实模型服务。请检查网络、代理或 ARK 配置后再试。") from exc
         raise ValueError(f"AI 构思调用失败：{type(exc).__name__}: {message}") from exc
-    data = _load_brainstorm_json(provider, response.text)
+    try:
+        data = _load_brainstorm_json(provider, response.text)
+    except ValueError:
+        return _brainstorm_new_book_ideas_individually(
+            provider,
+            idea_prompt=idea_prompt,
+            feedback=feedback,
+            seed_title=seed_title,
+            genre=genre,
+            reader_promise=reader_promise,
+            current_text=current_text,
+        )
     ideas = data.get("ideas") if isinstance(data, dict) else None
     if not isinstance(ideas, list):
         raise ValueError("AI 构思结果缺少 ideas 数组")
@@ -1914,20 +1925,71 @@ def _brainstorm_new_book_ideas(
     for item in ideas[:3]:
         if not isinstance(item, dict):
             continue
-        cleaned.append(
-            {
-                "title": str(item.get("title") or seed_title or ""),
-                "genre": str(item.get("genre") or genre or "玄幻脑洞"),
-                "reader_promise": str(item.get("reader_promise") or ""),
-                "premise": str(item.get("premise") or ""),
-                "world_engine": str(item.get("world_engine") or ""),
-                "protagonist_engine": str(item.get("protagonist_engine") or ""),
-                "conflict_engine": str(item.get("conflict_engine") or ""),
-            }
-        )
+        cleaned.append(_clean_idea(item, seed_title=seed_title, genre=genre))
     if not cleaned:
         raise ValueError("AI 构思没有返回可用方向")
     return cleaned
+
+
+def _brainstorm_new_book_ideas_individually(
+    provider: ArkOpenAIProvider,
+    *,
+    idea_prompt: str,
+    feedback: str,
+    seed_title: str,
+    genre: str,
+    reader_promise: str,
+    current_text: str,
+) -> list[dict]:
+    angles = [
+        "强爽点：开局压力强，能力带来明确爽感，但每次使用都有代价。",
+        "悬疑反转：核心能力背后有秘密，开局事件能牵出更大的真相。",
+        "人物成长：主角的欲望、缺陷和关系压力更突出，爽点服务于成长弧线。",
+    ]
+    ideas: list[dict] = []
+    for angle in angles:
+        prompt = f"""
+你是番茄小说男频新书策划。请只生成 1 个新书方向。
+
+用户自然语言想法：{idea_prompt or "未填写"}
+暂定书名：{seed_title or "未定"}
+类型：{genre or "玄幻脑洞"}
+读者承诺：{reader_promise or "未定"}
+补充意见：{feedback or "无"}
+上一版方向 JSON：{current_text}
+本次角度：{angle}
+
+只输出一个 JSON 对象，不要解释。字段必须是：
+title, genre, reader_promise, premise, world_engine, protagonist_engine, conflict_engine
+
+每个字段控制在 80 个汉字以内，避免长段落，避免抄袭已知作品，避免出现“模板”“AI”“系统提示”等元叙事说明。
+""".strip()
+        try:
+            response = provider.generate(
+                prompt,
+                max_tokens=900,
+                temperature=0.85,
+                response_format={"type": "json_object"},
+            )
+            data = json.loads(_json_object_text(response.text))
+        except Exception as exc:
+            raise ValueError(f"AI 构思逐条生成失败：{type(exc).__name__}: {exc}") from exc
+        ideas.append(_clean_idea(data, seed_title=seed_title, genre=genre))
+    return ideas
+
+
+def _clean_idea(item: dict, *, seed_title: str, genre: str) -> dict:
+    if not isinstance(item, dict):
+        item = {}
+    return {
+        "title": str(item.get("title") or seed_title or ""),
+        "genre": str(item.get("genre") or genre or "玄幻脑洞"),
+        "reader_promise": str(item.get("reader_promise") or ""),
+        "premise": str(item.get("premise") or ""),
+        "world_engine": str(item.get("world_engine") or ""),
+        "protagonist_engine": str(item.get("protagonist_engine") or ""),
+        "conflict_engine": str(item.get("conflict_engine") or ""),
+    }
 
 
 def _json_object_text(value: str) -> str:
