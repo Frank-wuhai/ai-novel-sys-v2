@@ -348,14 +348,17 @@ HTML = r"""<!doctype html>
       </div>
       <div class="helper-row">
         <button id="brainstormNewBook">AI 构思 3 个方向</button>
+        <button id="reviseNewBookIdeas">按补充意见重构思</button>
         <button id="fillNewBookDefaults">自动补全空白</button>
         <button id="applyFanqieTemplate">套用番茄玄幻模板</button>
         <button id="clearNewBookDraft">清空草稿</button>
       </div>
       <div id="newBookIdeas"></div>
-      <div class="hint">最低要求：书名。专业字段不用一次写对，后面可以继续改；系统会根据书名、类型和读者承诺补齐一版可运行的地基。</div>
+      <div class="hint">你可以先只写一段自然语言想法，比如“我想写一个底层少年靠推演能力逆袭，但不要太套路”。AI 会扩展成 3 个方向；不满意就写补充意见再重构思。</div>
       <div class="forms">
-        <label>书名<input id="newBookTitle" placeholder="例如：我能推演超凡途径"></label>
+        <label style="grid-column: 1 / -1;">我的想法<textarea id="newBookIdeaPrompt" placeholder="随便写：题材、主角、能力、爽点、禁忌、你不想要的套路都可以。"></textarea></label>
+        <label style="grid-column: 1 / -1;">补充意见<textarea id="newBookIdeaFeedback" placeholder="如果 3 个方向不满意，在这里写：比如更黑暗一点、不要系统流、女主少一点、节奏更快、换成都市背景。"></textarea></label>
+        <label>书名<input id="newBookTitle" placeholder="AI 会建议，也可手动改"></label>
         <label>类型<input id="newBookGenre" value="玄幻脑洞"></label>
         <label>目标平台<input id="newBookPlatform" value="番茄小说"></label>
         <label>读者承诺<input id="newBookPromise" placeholder="不会写可留空，系统会补"></label>
@@ -1079,8 +1082,12 @@ HTML = r"""<!doctype html>
         .replaceAll('fanqie_plan=', '番茄计划=')
         .replaceAll('fanqie_command=', '番茄命令=');
     }
+    function newBookSeedText() {
+      return $('newBookIdeaPrompt').value.trim() || $('newBookTitle').value.trim();
+    }
     function newBookDraft() {
-      const title = $('newBookTitle').value.trim() || '新书';
+      const seed = newBookSeedText();
+      const title = $('newBookTitle').value.trim() || seed || '新书';
       const genre = $('newBookGenre').value.trim() || '玄幻脑洞';
       const promise = $('newBookPromise').value.trim() || '升级快、冲突强、每章都有明确钩子';
       const protagonist = title.includes('我') ? '主角以第一人称视角承接奇遇' : '主角从底层困境中获得改变命运的机会';
@@ -1110,7 +1117,7 @@ HTML = r"""<!doctype html>
       $('newBookConflict').value = draft.conflict;
     }
     function clearNewBookDraft() {
-      ['newBookTitle', 'newBookPromise', 'newBookPremise', 'newBookWorld', 'newBookProtagonist', 'newBookConflict'].forEach((id) => {
+      ['newBookIdeaPrompt', 'newBookIdeaFeedback', 'newBookTitle', 'newBookPromise', 'newBookPremise', 'newBookWorld', 'newBookProtagonist', 'newBookConflict'].forEach((id) => {
         $(id).value = '';
       });
       $('newBookGenre').value = '玄幻脑洞';
@@ -1142,6 +1149,25 @@ HTML = r"""<!doctype html>
       $('newBookWorld').value = idea.world_engine || '';
       $('newBookProtagonist').value = idea.protagonist_engine || '';
       $('newBookConflict').value = idea.conflict_engine || '';
+    }
+    async function brainstormNewBookIdeas(revise = false) {
+      const ideaText = $('newBookIdeaPrompt').value.trim();
+      const title = $('newBookTitle').value.trim();
+      if (!ideaText && !title) {
+        showError(new Error('请先写一段“我的想法”，或者至少填一个书名'));
+        return;
+      }
+      if (!window.confirm('AI 构思会调用真实模型并消耗少量额度，确认继续吗？')) return;
+      $('state').textContent = revise ? '正在按补充意见重构思' : '正在构思新书方向';
+      const result = await postAction('brainstorm_new_book', {
+        idea_prompt: ideaText,
+        feedback: revise ? $('newBookIdeaFeedback').value : '',
+        seed_title: title,
+        genre: $('newBookGenre').value,
+        reader_promise: $('newBookPromise').value,
+        current_ideas: window.__newBookIdeas || []
+      });
+      renderNewBookIdeas(result.ideas || []);
     }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
     function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
@@ -1271,15 +1297,15 @@ HTML = r"""<!doctype html>
     $('applyFanqieTemplate').addEventListener('click', applyFanqieTemplate);
     $('clearNewBookDraft').addEventListener('click', clearNewBookDraft);
     $('brainstormNewBook').addEventListener('click', async () => {
-      if (!window.confirm('AI 构思会调用真实模型并消耗少量额度，确认继续吗？')) return;
       try {
-        $('state').textContent = '正在构思新书方向';
-        const result = await postAction('brainstorm_new_book', {
-          seed_title: $('newBookTitle').value,
-          genre: $('newBookGenre').value,
-          reader_promise: $('newBookPromise').value
-        });
-        renderNewBookIdeas(result.ideas || []);
+        await brainstormNewBookIdeas(false);
+      } catch (error) {
+        showError(error);
+      }
+    });
+    $('reviseNewBookIdeas').addEventListener('click', async () => {
+      try {
+        await brainstormNewBookIdeas(true);
       } catch (error) {
         showError(error);
       }
@@ -1656,9 +1682,12 @@ def _perform_action(session, payload: dict) -> dict:
         return {
             "status": "completed",
             "ideas": _brainstorm_new_book_ideas(
+                idea_prompt=str(payload.get("idea_prompt") or ""),
+                feedback=str(payload.get("feedback") or ""),
                 seed_title=str(payload.get("seed_title") or ""),
                 genre=str(payload.get("genre") or "玄幻脑洞"),
                 reader_promise=str(payload.get("reader_promise") or ""),
+                current_ideas=payload.get("current_ideas") if isinstance(payload.get("current_ideas"), list) else [],
             ),
         }
     if action == "publish_dry_run":
@@ -1788,14 +1817,26 @@ def _perform_restore_action(payload: dict) -> dict:
     }
 
 
-def _brainstorm_new_book_ideas(*, seed_title: str, genre: str, reader_promise: str) -> list[dict]:
+def _brainstorm_new_book_ideas(
+    *,
+    idea_prompt: str,
+    feedback: str,
+    seed_title: str,
+    genre: str,
+    reader_promise: str,
+    current_ideas: list,
+) -> list[dict]:
+    current_text = json.dumps(current_ideas[:3], ensure_ascii=False, indent=2) if current_ideas else "[]"
     prompt = f"""
-你是番茄小说男频新书策划。请基于用户输入，生成 3 个彼此差异明显的新书方向。
+你是番茄小说男频新书策划。请基于用户的一段自然语言想法，生成 3 个彼此差异明显的新书方向。
 
 用户输入：
+- 自然语言想法：{idea_prompt or "未填写"}
 - 暂定书名：{seed_title or "未定"}
 - 类型：{genre or "玄幻脑洞"}
 - 读者承诺：{reader_promise or "未定"}
+- 对上一版方向的补充意见：{feedback or "无"}
+- 上一版方向 JSON：{current_text}
 
 要求：
 - 只输出 JSON，不要解释。
@@ -1803,6 +1844,8 @@ def _brainstorm_new_book_ideas(*, seed_title: str, genre: str, reader_promise: s
 - 每个元素包含这些字符串字段：
   title, genre, reader_promise, premise, world_engine, protagonist_engine, conflict_engine
 - 方向要有番茄节奏：开局压力明确，能力/金手指有爽点但有代价，每章可留钩子。
+- 如果用户写了补充意见，必须明显吸收补充意见，并避开用户不想要的方向。
+- 3 个方向要区分：一个偏强爽点，一个偏悬疑反转，一个偏人物成长或情绪张力。
 - 不要抄袭已知作品，不要出现“模板”“AI”“系统提示”等元叙事说明。
 """.strip()
     response = ArkOpenAIProvider().generate(prompt, max_tokens=1800, temperature=0.9)
