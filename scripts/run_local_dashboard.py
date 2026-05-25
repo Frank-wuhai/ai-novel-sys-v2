@@ -47,6 +47,7 @@ from app.services.feedback import (
 )
 from app.services.llm_audit import llm_failure_suggestion, list_llm_request_logs, summarize_llm_failures, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
+from app.llm.providers import ArkOpenAIProvider
 from app.services.llm_queue import (
     QUEUE_TYPES,
     build_generation_queue_health,
@@ -220,6 +221,17 @@ HTML = r"""<!doctype html>
     .helper-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); background: #fbfcfd; }
     .helper-row button { background: #ffffff; color: var(--ink); border-color: var(--line); }
     .hint { color: var(--muted); font-size: 12px; padding: 0 14px 12px; line-height: 1.6; }
+    .idea-list { display: grid; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .idea {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      display: grid;
+      gap: 8px;
+    }
+    .idea h3 { margin: 0; font-size: 15px; }
+    .idea p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
     .diff {
       background: #111827;
       color: #e5e7eb;
@@ -335,10 +347,12 @@ HTML = r"""<!doctype html>
         创建完成后，系统会自动切换到新书，然后回到“生产流程”推进第一章。
       </div>
       <div class="helper-row">
+        <button id="brainstormNewBook">AI 构思 3 个方向</button>
         <button id="fillNewBookDefaults">自动补全空白</button>
         <button id="applyFanqieTemplate">套用番茄玄幻模板</button>
         <button id="clearNewBookDraft">清空草稿</button>
       </div>
+      <div id="newBookIdeas"></div>
       <div class="hint">最低要求：书名。专业字段不用一次写对，后面可以继续改；系统会根据书名、类型和读者承诺补齐一版可运行的地基。</div>
       <div class="forms">
         <label>书名<input id="newBookTitle" placeholder="例如：我能推演超凡途径"></label>
@@ -1101,6 +1115,33 @@ HTML = r"""<!doctype html>
       });
       $('newBookGenre').value = '玄幻脑洞';
       $('newBookPlatform').value = '番茄小说';
+      $('newBookIdeas').innerHTML = '';
+    }
+    function renderNewBookIdeas(ideas) {
+      if (!ideas || !ideas.length) {
+        $('newBookIdeas').innerHTML = '<div class="empty">没有生成可用方向</div>';
+        return;
+      }
+      $('newBookIdeas').innerHTML = `<div class="idea-list">${ideas.map((idea, index) => `
+        <div class="idea">
+          <h3>${escapeHtml(idea.title || `方向 ${index + 1}`)}</h3>
+          <p>${escapeHtml(idea.premise || '')}</p>
+          <p><strong>卖点：</strong>${escapeHtml(idea.reader_promise || '')}</p>
+          <button class="secondary" data-apply-new-book-idea="${index}">采用这个方向</button>
+        </div>
+      `).join('')}</div>`;
+      window.__newBookIdeas = ideas;
+    }
+    function applyNewBookIdea(idea) {
+      if (!idea) return;
+      $('newBookTitle').value = idea.title || $('newBookTitle').value;
+      $('newBookGenre').value = idea.genre || $('newBookGenre').value || '玄幻脑洞';
+      $('newBookPlatform').value = '番茄小说';
+      $('newBookPromise').value = idea.reader_promise || '';
+      $('newBookPremise').value = idea.premise || '';
+      $('newBookWorld').value = idea.world_engine || '';
+      $('newBookProtagonist').value = idea.protagonist_engine || '';
+      $('newBookConflict').value = idea.conflict_engine || '';
     }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
     function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
@@ -1142,6 +1183,10 @@ HTML = r"""<!doctype html>
       const backupButton = event.target.closest('button[data-use-backup-path]');
       if (backupButton) {
         $('databaseRestorePath').value = backupButton.dataset.useBackupPath;
+      }
+      const ideaButton = event.target.closest('button[data-apply-new-book-idea]');
+      if (ideaButton) {
+        applyNewBookIdea((window.__newBookIdeas || [])[Number(ideaButton.dataset.applyNewBookIdea)]);
       }
     });
     $('runQueue').addEventListener('click', () => {
@@ -1225,6 +1270,20 @@ HTML = r"""<!doctype html>
     $('fillNewBookDefaults').addEventListener('click', fillNewBookDefaults);
     $('applyFanqieTemplate').addEventListener('click', applyFanqieTemplate);
     $('clearNewBookDraft').addEventListener('click', clearNewBookDraft);
+    $('brainstormNewBook').addEventListener('click', async () => {
+      if (!window.confirm('AI 构思会调用真实模型并消耗少量额度，确认继续吗？')) return;
+      try {
+        $('state').textContent = '正在构思新书方向';
+        const result = await postAction('brainstorm_new_book', {
+          seed_title: $('newBookTitle').value,
+          genre: $('newBookGenre').value,
+          reader_promise: $('newBookPromise').value
+        });
+        renderNewBookIdeas(result.ideas || []);
+      } catch (error) {
+        showError(error);
+      }
+    });
     $('createNewBook').addEventListener('click', async () => {
       try {
         fillNewBookDefaults();
@@ -1593,6 +1652,15 @@ def _perform_action(session, payload: dict) -> dict:
             status="draft",
         )
         return {"status": "created", "book": _book_option(book), "foundation_id": foundation.id, "story_bible_id": bible.id}
+    if action == "brainstorm_new_book":
+        return {
+            "status": "completed",
+            "ideas": _brainstorm_new_book_ideas(
+                seed_title=str(payload.get("seed_title") or ""),
+                genre=str(payload.get("genre") or "玄幻脑洞"),
+                reader_promise=str(payload.get("reader_promise") or ""),
+            ),
+        }
     if action == "publish_dry_run":
         job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
         return {"status": job.status, "publish_job_id": job.id}
@@ -1718,6 +1786,64 @@ def _perform_restore_action(payload: dict) -> dict:
         "pre_restore_backup_path": result.pre_restore_backup_path,
         "restored_size_bytes": result.restored_size_bytes,
     }
+
+
+def _brainstorm_new_book_ideas(*, seed_title: str, genre: str, reader_promise: str) -> list[dict]:
+    prompt = f"""
+你是番茄小说男频新书策划。请基于用户输入，生成 3 个彼此差异明显的新书方向。
+
+用户输入：
+- 暂定书名：{seed_title or "未定"}
+- 类型：{genre or "玄幻脑洞"}
+- 读者承诺：{reader_promise or "未定"}
+
+要求：
+- 只输出 JSON，不要解释。
+- JSON 顶层为对象，字段 ideas 是数组，恰好 3 个元素。
+- 每个元素包含这些字符串字段：
+  title, genre, reader_promise, premise, world_engine, protagonist_engine, conflict_engine
+- 方向要有番茄节奏：开局压力明确，能力/金手指有爽点但有代价，每章可留钩子。
+- 不要抄袭已知作品，不要出现“模板”“AI”“系统提示”等元叙事说明。
+""".strip()
+    response = ArkOpenAIProvider().generate(prompt, max_tokens=1800, temperature=0.9)
+    try:
+        data = json.loads(_json_object_text(response.text))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"AI 构思返回内容不是合法 JSON: {exc}") from exc
+    ideas = data.get("ideas") if isinstance(data, dict) else None
+    if not isinstance(ideas, list):
+        raise ValueError("AI 构思结果缺少 ideas 数组")
+    cleaned = []
+    for item in ideas[:3]:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(
+            {
+                "title": str(item.get("title") or seed_title or ""),
+                "genre": str(item.get("genre") or genre or "玄幻脑洞"),
+                "reader_promise": str(item.get("reader_promise") or ""),
+                "premise": str(item.get("premise") or ""),
+                "world_engine": str(item.get("world_engine") or ""),
+                "protagonist_engine": str(item.get("protagonist_engine") or ""),
+                "conflict_engine": str(item.get("conflict_engine") or ""),
+            }
+        )
+    if not cleaned:
+        raise ValueError("AI 构思没有返回可用方向")
+    return cleaned
+
+
+def _json_object_text(value: str) -> str:
+    text = value.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        return text[start : end + 1]
+    return text
 
 
 def _latest_version_for_chapter(session, *, book_id: int, chapter_number: int) -> ChapterVersion:
