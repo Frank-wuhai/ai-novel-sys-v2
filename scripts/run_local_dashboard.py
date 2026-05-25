@@ -138,9 +138,9 @@ HTML = r"""<!doctype html>
     .metric { padding: 12px; min-height: 74px; }
     .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
     .metric strong { font-size: 20px; }
-    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 16px; align-items: start; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
     .full { margin-top: 16px; }
-    .forms { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .forms { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
     textarea {
       min-height: 72px;
       border: 1px solid var(--line);
@@ -178,6 +178,16 @@ HTML = r"""<!doctype html>
     .empty { padding: 14px; color: var(--muted); }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
     .actions button { height: 32px; font-size: 13px; }
+    .guide { display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px; margin-bottom: 16px; }
+    .callout { padding: 14px; background: #eef8f6; border-bottom: 1px solid var(--line); color: #12433f; }
+    .callout strong { display: block; margin-bottom: 6px; font-size: 15px; }
+    .step-list { display: grid; gap: 8px; padding: 12px 14px; }
+    .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
+    .step b { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12px; }
+    .step span { color: var(--muted); font-size: 12px; }
+    .wizard-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
+    .wizard-actions button { min-height: 38px; }
+    .danger-note { color: var(--bad); font-size: 12px; padding: 0 14px 12px; }
     .diff {
       background: #111827;
       color: #e5e7eb;
@@ -191,7 +201,7 @@ HTML = r"""<!doctype html>
     .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fff; }
     .actions button.secondary { background: #ffffff; color: var(--ink); border-color: var(--line); }
     @media (max-width: 900px) {
-      .toolbar, .summary, .grid, .forms { grid-template-columns: 1fr; }
+      .toolbar, .summary, .grid, .forms, .guide, .wizard-actions { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -209,17 +219,30 @@ HTML = r"""<!doctype html>
       <button id="refresh">刷新</button>
     </section>
     <section class="summary" id="summary"></section>
-    <section class="panel full">
-      <h2>当前章生产向导</h2>
-      <div class="forms">
-        <label>发布平台<input id="wizardPlatform" value="番茄小说"></label>
-        <label>最多推进步数<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
-        <label>模式<select id="wizardDryRun"><option value="false">真实生成</option><option value="true">安全演示</option></select></label>
-        <button id="runWizard">推进到下一人工点</button>
-        <button id="approveWizard">审批当前章</button>
-        <label style="grid-column: 1 / -1;">连续性摘要<textarea id="continuitySummary" placeholder="质检通过后，写一句本章发生了什么；留空则系统自动生成简短摘要。"></textarea></label>
-        <button id="recordContinuity">记录连续性</button>
-      </div>
+    <section class="guide">
+      <section class="panel">
+        <h2>下一步该做什么</h2>
+        <div id="operationGuide"></div>
+      </section>
+      <section class="panel">
+        <h2>当前章一键流程</h2>
+        <div class="callout">
+          <strong>先选左上角作品和当前章，再点下面按钮。</strong>
+          “安全演示”不会调用真实模型；“真实生成”可能消耗 LLM 额度。
+        </div>
+        <div class="forms">
+          <label>发布平台<input id="wizardPlatform" value="番茄小说"></label>
+          <label>最多推进步数<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
+          <label>运行模式<select id="wizardDryRun"><option value="false">真实生成</option><option value="true">安全演示</option></select></label>
+        </div>
+        <div class="wizard-actions">
+          <button id="runWizard">推进当前章</button>
+          <button id="recordContinuity" class="secondary">记录连续性</button>
+          <button id="approveWizard" class="secondary">审批当前章</button>
+        </div>
+        <label style="padding: 0 14px 12px;">连续性摘要<textarea id="continuitySummary" placeholder="质检通过后，写一句本章发生了什么；留空则系统自动生成简短摘要。"></textarea></label>
+        <div class="danger-note">真实发布仍需要番茄登录态和发布安全开关，不会因为生成章节而自动误发。</div>
+      </section>
     </section>
     <section class="grid">
       <div class="stack">
@@ -242,7 +265,7 @@ HTML = r"""<!doctype html>
           <div id="readiness"></div>
         </section>
         <section class="panel">
-          <h2>LLM 用量与成本</h2>
+          <h2>模型用量与成本</h2>
           <div id="llmUsage"></div>
         </section>
         <section class="panel">
@@ -283,12 +306,12 @@ HTML = r"""<!doctype html>
       <h2>发布配置与任务</h2>
       <div id="publishing"></div>
       <div class="forms">
-        <label>平台<input id="publishTargetPlatform" value="manual"></label>
-        <label>账号标签<input id="publishTargetAccount" value=""></label>
-        <label>作品标识<input id="publishTargetWork" value=""></label>
-        <label>自动化模式<input id="publishTargetMode" value="manual"></label>
+        <label>平台<input id="publishTargetPlatform" value="番茄小说"></label>
+        <label>账号标签<input id="publishTargetAccount" value="main"></label>
+        <label>作品标识<input id="publishTargetWork" value="fanqie-work-id"></label>
+        <label>自动化模式<input id="publishTargetMode" value="fanqie_playwright"></label>
         <button id="savePublishTarget">保存发布目标</button>
-        <label style="grid-column: 1 / -1;">配置 JSON<textarea id="publishTargetConfig">{}</textarea></label>
+        <label style="grid-column: 1 / -1;">番茄发布配置<textarea id="publishTargetConfig">{"writer_url":"https://fanqienovel.com/writer/zone","cdp_url":"http://127.0.0.1:9222","publish_mode":"immediate","enable_real_publish":false}</textarea></label>
       </div>
     </section>
     <section class="panel full">
@@ -351,7 +374,8 @@ HTML = r"""<!doctype html>
       renderPublishing(publishing);
       renderDatabaseOps(databaseOps);
       renderKnowledge(knowledge);
-      $('recommendation').innerHTML = `<div class="command">${escapeHtml(snapshot.recommendation)}</div>`;
+      renderOperationGuide(snapshot, health);
+      $('recommendation').innerHTML = `<div class="empty">${escapeHtml(nextStepText(snapshot, health))}</div>`;
       $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
     }
 
@@ -390,6 +414,64 @@ HTML = r"""<!doctype html>
       return `<div class="metric"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
     }
 
+    function renderOperationGuide(snapshot, health) {
+      const chapter = selectedChapter(snapshot);
+      const queueCounts = health.counts || {};
+      const steps = [
+        ['选章节', `当前选择第 ${$('chapter').value || 1} 章。`],
+        ['生成', chapter ? generationHint(chapter) : '没有找到当前章，请先刷新或调整章节号。'],
+        ['审核', chapter ? approvalHint(chapter) : '生成并质检通过后，这里会提示是否需要记录连续性和审批。'],
+        ['发布', publishHint(chapter)]
+      ];
+      $('operationGuide').innerHTML =
+        `<div class="callout"><strong>${escapeHtml(nextStepText(snapshot, health))}</strong><span>待生成任务：${queueCounts.pending || 0}，失败任务：${queueCounts.failed || 0}</span></div>` +
+        `<div class="step-list">${steps.map((item, index) => `
+          <div class="step"><b>${index + 1}</b><div><strong>${escapeHtml(item[0])}</strong><br><span>${escapeHtml(item[1])}</span></div></div>
+        `).join('')}</div>`;
+    }
+
+    function selectedChapter(snapshot) {
+      const number = Number($('chapter').value || 1);
+      return (snapshot.chapters || []).find((item) => Number(item.number) === number) || null;
+    }
+
+    function nextStepText(snapshot, health) {
+      const queueCounts = health.counts || {};
+      if ((queueCounts.pending || 0) > 0) return '有待执行生成任务，请先点“运行一次队列”。';
+      if ((queueCounts.failed || 0) > 0) return '有失败任务，请在“失败任务处理”里重试或取消。';
+      const chapter = selectedChapter(snapshot);
+      if (!chapter) return '请选择一个章节，然后点击刷新。';
+      if (chapter.next_action === 'record_chapter_continuity') return '当前章已质检通过，请点“记录连续性”。';
+      if (chapter.next_action === 'approve_chapter') return '连续性已记录，请点“审批当前章”。';
+      if (chapter.next_action === 'mark_publish_job') return '发布任务已入队，请在“发布配置与任务”里做最终检查。';
+      if (chapter.next_action === 'done') return '当前章已经完成。可以切到下一章。';
+      return `当前章下一步：${actionLabel(chapter.next_action)}。可点“推进当前章”。`;
+    }
+
+    function generationHint(chapter) {
+      const action = chapter.next_action;
+      if (['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter'].includes(action)) {
+        return `点击“推进当前章”，系统会执行：${actionLabel(action)}。`;
+      }
+      if (action === 'wait_generation_task') return '已有生成任务在队列里，请点“运行一次队列”或等待完成。';
+      return `生成阶段状态：${statusLabel(chapter.version_status || '') || '未开始'}。`;
+    }
+
+    function approvalHint(chapter) {
+      if (chapter.next_action === 'record_chapter_continuity') return '点“记录连续性”，留空也可以自动生成摘要。';
+      if (chapter.next_action === 'approve_chapter') return '点“审批当前章”，审批后才能创建发布任务。';
+      if (chapter.quality_passed) return '质检已通过。';
+      return '还没到人工审批阶段。';
+    }
+
+    function publishHint(chapter) {
+      if (!chapter) return '暂无发布信息。';
+      if (!chapter.publish_job_id && chapter.next_action !== 'create_publish_job') return '章节审批后才会出现发布任务。';
+      if (chapter.next_action === 'create_publish_job') return '点“推进当前章”会创建番茄发布任务。';
+      if (chapter.publish_status) return `发布任务状态：${statusLabel(chapter.publish_status)}。`;
+      return '暂无发布任务。';
+    }
+
     function renderChapters(chapters) {
       if (!chapters.length) return empty('chapters');
       $('chapters').innerHTML = table(['章', '版本状态', '质检', '下一步', '原因'], chapters.map((item) => [
@@ -403,11 +485,11 @@ HTML = r"""<!doctype html>
 
     function renderDecisions(items) {
       if (!items.length) return empty('decisions');
-      $('decisions').innerHTML = table(['类型', '章节', '原因', '命令'], items.map((item) => [
+      $('decisions').innerHTML = table(['类型', '章节', '原因', '建议'], items.map((item) => [
         decisionLabel(item.type),
         item.chapter,
-        item.reason,
-        `<span class="command">${escapeHtml(item.command_hint)}</span>`
+        reasonLabel(item.reason),
+        decisionSuggestion(item)
       ]), true);
     }
 
@@ -444,7 +526,7 @@ HTML = r"""<!doctype html>
 
     function modelParamLabel(params) {
       if (!params || !Object.keys(params).length) return '';
-      return `${params.provider_mode || ''} ${params.requested_model || ''} max=${params.max_tokens || ''} temp=${params.temperature ?? ''}`;
+      return `${params.provider_mode || ''} ${params.requested_model || ''} 上限=${params.max_tokens || ''} 温度=${params.temperature ?? ''}`;
     }
 
     function queueButtons(item) {
@@ -470,7 +552,7 @@ HTML = r"""<!doctype html>
       $('readiness').innerHTML = table(['检查项', '结果', '详情'], readiness.checks.map((item) => [
         readinessLabel(item.name),
         `<span class="${item.passed ? 'ok' : 'bad'}">${item.passed ? '通过' : '未通过'}</span>`,
-        item.detail
+        reasonLabel(item.detail)
       ]), true);
     }
 
@@ -482,11 +564,11 @@ HTML = r"""<!doctype html>
           ['请求数', usage.request_count],
           ['完成', usage.completed_count],
           ['失败', usage.failed_count],
-          ['估算 Token', usage.estimated_total_tokens],
-          ['实际 Token', usage.actual_total_tokens],
-          ['计费 Token', usage.billable_total_tokens],
-          ['输入 Token', usage.billable_prompt_tokens],
-          ['输出 Token', usage.billable_response_tokens],
+          ['估算用量', usage.estimated_total_tokens],
+          ['实际用量', usage.actual_total_tokens],
+          ['计费用量', usage.billable_total_tokens],
+          ['输入用量', usage.billable_prompt_tokens],
+          ['输出用量', usage.billable_response_tokens],
           ['估算成本', `${cost.estimated_cost} ${cost.currency}`],
           ['模型', cost.model]
         ]) +
@@ -496,7 +578,7 @@ HTML = r"""<!doctype html>
           statusLabel(item.status),
           item.model,
           item.actual_total_tokens || item.estimated_total_tokens,
-          `${item.elapsed_ms} ms`
+          `${item.elapsed_ms} 毫秒`
         ]));
     }
 
@@ -579,8 +661,8 @@ HTML = r"""<!doctype html>
     }
 
     function renderLLMReview(review) {
-      if (!review) return '<div class="empty">暂无 LLM 二审结果</div>';
-      return '<h2>LLM 二审</h2>' +
+      if (!review) return '<div class="empty">暂无模型二审结果</div>';
+      return '<h2>模型二审</h2>' +
         table(['字段', '值'], [
           ['状态', statusLabel(review.status || '')],
           ['结论', verdictLabel(review.verdict || '')],
@@ -644,7 +726,7 @@ HTML = r"""<!doctype html>
           item.platform,
           item.account_label,
           item.work_identifier,
-          item.automation_mode,
+          automationModeLabel(item.automation_mode),
           statusLabel(item.status)
         ])) +
         table(['任务', '版本', '章节', '平台', '状态', '预览', '操作'], payload.jobs.map((item) => [
@@ -653,7 +735,7 @@ HTML = r"""<!doctype html>
           item.chapter_number || '',
           item.platform,
           statusLabel(item.status),
-          `<details><summary>预览</summary><pre>${escapeHtml(item.preview.title + '\n字数：' + item.preview.content_chars + '\n\n' + item.preview.content_excerpt)}</pre><pre>${escapeHtml(item.result_report || '')}</pre></details>`,
+          `<details><summary>查看章节内容和执行报告</summary><pre>${escapeHtml(item.preview.title + '\n字数：' + item.preview.content_chars + '\n\n' + item.preview.content_excerpt)}</pre><pre>${escapeHtml(reportLabel(item.result_report || ''))}</pre></details>`,
           publishButtons(item)
         ]), true) +
         table(['执行', '任务', '平台', '状态', '模式', '报告'], payload.executions.map((item) => [
@@ -661,18 +743,18 @@ HTML = r"""<!doctype html>
           item.publish_job_id,
           item.platform,
           statusLabel(item.status),
-          item.automation_mode,
-          item.report
+          automationModeLabel(item.automation_mode),
+          reportLabel(item.report)
         ]));
     }
 
     function publishButtons(item) {
       const buttons = [];
-      if (item.status === 'pending') buttons.push(actionButton('发布干跑', 'publish_dry_run', item.id));
-      if (item.status === 'dry_run_ready') buttons.push(actionButton('发布入队', 'queue_publish_job', item.id));
+      if (item.status === 'pending') buttons.push(actionButton('生成发布预览', 'publish_dry_run', item.id));
+      if (item.status === 'dry_run_ready') buttons.push(actionButton('进入待发布', 'queue_publish_job', item.id));
       if (item.status === 'queued') {
-        buttons.push(actionButton('确认检查', 'execute_publish_job_blocked', item.id));
-        buttons.push(actionButton('确认发布', 'execute_publish_job_confirm', item.id));
+        buttons.push(actionButton('最终检查', 'execute_publish_job_blocked', item.id));
+        buttons.push(actionButton('尝试发布到平台', 'execute_publish_job_confirm', item.id));
       }
       if (item.status === 'failed') buttons.push(actionButton('重试发布', 'retry_publish_job', item.id));
       return `<div class="actions">${buttons.join('')}</div>`;
@@ -773,15 +855,15 @@ HTML = r"""<!doctype html>
       approve_chapter: '人工审批章节',
       backup_database: '创建数据库备份',
       cancel_queue_task: '取消队列任务',
-      create_chapter_brief: '创建章节 Brief',
+      create_chapter_brief: '创建写作说明',
       create_feedback_adjustment: '创建反馈调整',
       create_publish_job: '创建发布任务',
-      create_revision_brief: '创建修订 Brief',
+      create_revision_brief: '创建修订说明',
       draft_chapter: '生成章节草稿',
       mark_publish_job: '确认发布结果',
       pause_queue_task: '暂停队列任务',
-      publish_job_dry_run: '发布干跑',
-      queue_publish_job: '发布入队',
+      publish_job_dry_run: '生成发布预览',
+      queue_publish_job: '进入待发布',
       record_chapter_continuity: '回写连续性',
       record_feedback: '记录反馈',
       resume_queue_task: '恢复队列任务',
@@ -791,6 +873,9 @@ HTML = r"""<!doctype html>
       revise_chapter: '修订章节',
       restore_database: '恢复数据库',
       run_next_action: '执行安全下一步',
+      run_current_until_blocked: '推进当前章',
+      record_continuity_dashboard: '记录连续性',
+      approve_current_chapter: '审批当前章',
       run_queue: '运行队列',
       done: '已完成',
       wait_generation_task: '等待生成任务'
@@ -808,12 +893,12 @@ HTML = r"""<!doctype html>
       canon: 'Canon',
       chapter_queue: '章节队列',
       human_decisions: '人工决策',
-      llm: 'LLM 配置'
+      llm: '模型配置'
     };
     const DIMENSION_LABELS = {
       arc_alignment: '剧情段对齐',
       basic_publishability: '基础可发布性',
-      brief_coverage: 'Brief 覆盖',
+      brief_coverage: '写作说明覆盖',
       canon_consistency: 'Canon 一致性',
       choice_and_cost: '选择与代价',
       conflict_pressure: '冲突压力',
@@ -838,8 +923,8 @@ HTML = r"""<!doctype html>
     const TASK_TYPE_LABELS = {
       draft_chapter: '生成章节',
       revise_chapter: '修订章节',
-      llm_review_chapter: 'LLM 二审',
-      live_llm_smoke: '真实 LLM 小测'
+      llm_review_chapter: '模型二审',
+      live_llm_smoke: '真实模型小测'
     };
     function statusLabel(value) { return STATUS_LABELS[value] || value || ''; }
     function actionLabel(value) { return ACTION_LABELS[value] || value || ''; }
@@ -848,6 +933,51 @@ HTML = r"""<!doctype html>
     function dimensionLabel(value) { return DIMENSION_LABELS[value] || value || ''; }
     function errorLabel(value) { return ERROR_LABELS[value] || value || ''; }
     function taskTypeLabel(value) { return TASK_TYPE_LABELS[value] || value || ''; }
+    function automationModeLabel(value) {
+      if (value === 'fanqie_playwright') return '番茄浏览器自动化';
+      if (value === 'manual') return '人工处理';
+      return value || '';
+    }
+    function reasonLabel(value) {
+      const text = String(value || '');
+      const labels = {
+        'chapter and brief are missing': '章节和写作说明都还没有创建',
+        'chapter exists but brief is missing': '章节存在，但缺少写作说明',
+        'brief is ready and no chapter version exists': '写作说明已就绪，可以生成草稿',
+        'latest version is draft': '最新版本是草稿，需要质检',
+        'latest version failed quality': '最新版本质检未通过，需要修订',
+        'latest version failed quality and revision brief exists': '修订说明已生成，可以修订',
+        'quality passed but continuity has not been recorded': '质检通过，需要记录连续性',
+        'quality and continuity are complete': '质检和连续性已完成，可以审批',
+        'approved version has no publish job': '章节已审批，可以创建发布任务',
+        'publish job is pending dry-run': '发布任务待生成预览',
+        'publish dry-run is ready': '发布预览已生成，可以进入待发布',
+        'publish job is queued for platform automation': '发布任务已等待平台执行',
+        'publish job failed': '发布任务失败，可重试',
+        'chapter has been published': '章节已发布'
+      };
+      return labels[text] || text;
+    }
+    function decisionSuggestion(item) {
+      if (item.type === 'continuity_writeback') return '在上方“当前章一键流程”点“记录连续性”。';
+      if (item.type === 'human_approval') return '确认章节内容无误后，点“审批当前章”。';
+      if (item.type === 'final_publish_confirmation') return '在“发布配置与任务”中先做最终检查，再尝试发布。';
+      return '查看章节详情后再处理。';
+    }
+    function reportLabel(value) {
+      return String(value || '')
+        .replaceAll('Would publish to', '将发布到')
+        .replaceAll('Confirmed publish to', '已确认发布到')
+        .replaceAll('Final publish confirmation required.', '需要最终发布确认。')
+        .replaceAll('title=', '标题=')
+        .replaceAll('chars=', '字数=')
+        .replaceAll('artifact_path=', '证据目录=')
+        .replaceAll('fanqie publish requires target_config.enable_real_publish=true before real platform execution', '番茄真实发布需要先在配置中打开 enable_real_publish=true')
+        .replaceAll('fanqie publish requires cdp_url or user_data_dir for browser automation', '番茄发布需要配置浏览器接管地址 cdp_url 或 user_data_dir')
+        .replaceAll('fanqie browser execution script is prepared; run the recorded fanqie_command after logging in and verifying selectors', '番茄执行脚本已准备好；登录后台并确认页面选择器后，再运行记录的命令')
+        .replaceAll('fanqie_plan=', '番茄计划=')
+        .replaceAll('fanqie_command=', '番茄命令=');
+    }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
     function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
     function qualityLabel(value) {
