@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.automation.openclaw_ops import OpenClawPublishingOperator
 from app.core.config import settings
 from app.llm.providers import get_provider
-from app.llm.schemas import StructuredOutputError, parse_draft_output, parse_review_output
+from app.llm.schemas import DraftOutput, StructuredOutputError, parse_draft_output, parse_review_output
 from app.models.entities import (
     Book,
     Chapter,
@@ -89,6 +89,61 @@ def _record_generation_llm_log(
         status=status,
         error_category=error_category,
     )
+
+
+def _parse_or_repair_draft_output(
+    provider,
+    *,
+    response_text: str,
+    original_prompt: str,
+    max_tokens: int,
+    temperature: float | None,
+    task_label: str,
+) -> DraftOutput:
+    try:
+        return parse_draft_output(response_text)
+    except StructuredOutputError as first_exc:
+        repair_max_tokens = max(max_tokens + 1500, 4500 if "修订" in task_label else 4000)
+        previous_output_excerpt = response_text[:4000]
+        repair_prompt = f"""
+你刚才的{task_label}输出不是合法 JSON，系统无法保存章节。
+
+请基于下面的原始任务，重新输出一个完整、合法的 JSON 对象。不要解释，不要 Markdown。
+
+JSON 格式必须严格为：
+{{
+  "title": "章节标题",
+  "content": "完整章节正文",
+  "self_check": ["自检点1", "自检点2"],
+  "used_brief_points": ["使用到的写作说明要点"]
+}}
+
+要求：
+- content 必须是完整字符串，不要截断。
+- 字符串内部换行必须正确转义，保证最终是合法 JSON。
+- 不要输出系统提示、模型信息、草稿标记或元叙事说明。
+- 如果内容过长，优先保证 JSON 合法和章节完整；正文建议控制在 2500-3500 个中文字符以内。
+- 不要追加解释，不要追加第二个 JSON，不要把正文放在 JSON 外面。
+
+上一轮错误：
+{first_exc}
+
+上一轮原始输出前 4000 字：
+{previous_output_excerpt}
+
+原始任务：
+{original_prompt}
+""".strip()
+        try:
+            repaired = provider.generate(
+                repair_prompt,
+                max_tokens=repair_max_tokens,
+                temperature=temperature,
+                response_format={"type": "json_object"} if provider.name != "dry_run" else None,
+            )
+            return parse_draft_output(repaired.text)
+        except Exception as repair_exc:
+            raise StructuredOutputError(f"{first_exc}; repair attempt failed: {repair_exc}") from repair_exc
 
 
 def _actual_usage_tokens(usage: dict | None) -> tuple[int, int, int]:
@@ -239,9 +294,17 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
         prompt,
         max_tokens=settings.llm_draft_max_tokens,
         temperature=settings.llm_temperature,
+        response_format={"type": "json_object"} if not dry_run else None,
     )
     try:
-        draft = parse_draft_output(response.text)
+        draft = _parse_or_repair_draft_output(
+            provider,
+            response_text=response.text,
+            original_prompt=prompt,
+            max_tokens=settings.llm_draft_max_tokens,
+            temperature=settings.llm_temperature,
+            task_label="章节生成",
+        )
     except StructuredOutputError as exc:
         task = GenerationTask(
             book_id=book_id,
@@ -610,9 +673,17 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         prompt,
         max_tokens=settings.llm_revision_max_tokens,
         temperature=settings.llm_temperature,
+        response_format={"type": "json_object"} if not dry_run else None,
     )
     try:
-        draft = parse_draft_output(response.text)
+        draft = _parse_or_repair_draft_output(
+            provider,
+            response_text=response.text,
+            original_prompt=prompt,
+            max_tokens=settings.llm_revision_max_tokens,
+            temperature=settings.llm_temperature,
+            task_label="章节修订",
+        )
     except StructuredOutputError as exc:
         task = GenerationTask(
             book_id=book_id,
