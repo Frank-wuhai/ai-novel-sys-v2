@@ -58,12 +58,14 @@ from app.services.llm_queue import (
 )
 from app.services.planning import AUTO_ACTIONS, run_next_action
 from app.services.production import (
+    approve_chapter,
     execute_publish_job,
     publish_job_dry_run,
     queue_publish_job,
     retry_publish_job,
     upsert_publishing_target,
 )
+from app.services.continuity import record_chapter_continuity
 from app.services.story import format_story_control_context, get_story_bible
 
 
@@ -207,6 +209,18 @@ HTML = r"""<!doctype html>
       <button id="refresh">刷新</button>
     </section>
     <section class="summary" id="summary"></section>
+    <section class="panel full">
+      <h2>当前章生产向导</h2>
+      <div class="forms">
+        <label>发布平台<input id="wizardPlatform" value="番茄小说"></label>
+        <label>最多推进步数<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
+        <label>模式<select id="wizardDryRun"><option value="false">真实生成</option><option value="true">安全演示</option></select></label>
+        <button id="runWizard">推进到下一人工点</button>
+        <button id="approveWizard">审批当前章</button>
+        <label style="grid-column: 1 / -1;">连续性摘要<textarea id="continuitySummary" placeholder="质检通过后，写一句本章发生了什么；留空则系统自动生成简短摘要。"></textarea></label>
+        <button id="recordContinuity">记录连续性</button>
+      </div>
+    </section>
     <section class="grid">
       <div class="stack">
         <section class="panel">
@@ -875,7 +889,36 @@ HTML = r"""<!doctype html>
         showError(new Error('当前范围内没有可自动执行的安全动作'));
         return;
       }
-      postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true}).catch(showError);
+      postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true, platform: $('wizardPlatform').value}).catch(showError);
+    });
+    $('runWizard').addEventListener('click', () => {
+      if (!currentSnapshot?.book?.id) return;
+      const dryRun = $('wizardDryRun').value === 'true';
+      if (!dryRun && !window.confirm('确认要真实推进当前章吗？这可能会调用真实 LLM。')) return;
+      postAction('run_current_until_blocked', {
+        book_id: currentSnapshot.book.id,
+        chapter_number: Number($('chapter').value),
+        platform: $('wizardPlatform').value,
+        dry_run: dryRun,
+        max_steps: Number($('wizardMaxSteps').value || 5)
+      }).catch(showError);
+    });
+    $('recordContinuity').addEventListener('click', () => {
+      if (!currentSnapshot?.book?.id) return;
+      postAction('record_continuity_dashboard', {
+        book_id: currentSnapshot.book.id,
+        chapter_number: Number($('chapter').value),
+        summary: $('continuitySummary').value
+      }).catch(showError);
+    });
+    $('approveWizard').addEventListener('click', () => {
+      if (!currentSnapshot?.book?.id) return;
+      if (!window.confirm('确认审批当前章最新版本吗？审批后即可创建发布任务。')) return;
+      postAction('approve_current_chapter', {
+        book_id: currentSnapshot.book.id,
+        chapter_number: Number($('chapter').value),
+        reviewer: 'dashboard'
+      }).catch(showError);
     });
     document.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-action]');
@@ -1269,6 +1312,7 @@ def _perform_action(session, payload: dict) -> dict:
             book_id=book_id,
             chapter_number=chapter_number,
             dry_run=bool(payload.get("dry_run", True)),
+            platform=str(payload.get("platform") or "manual"),
         )
         if result.action not in AUTO_ACTIONS or result.status != "executed":
             raise ValueError(f"action is not safe or executable: {result.action} {result.status}")
@@ -1279,6 +1323,46 @@ def _perform_action(session, payload: dict) -> dict:
             "message": result.message,
             "object_id": result.object_id,
         }
+    if action == "run_current_until_blocked":
+        book_id = int(payload.get("book_id") or 0)
+        chapter_number = int(payload.get("chapter_number") or 0)
+        max_steps = int(payload.get("max_steps") or 5)
+        if max_steps < 1 or max_steps > 10:
+            raise ValueError("max_steps must be between 1 and 10")
+        executed = []
+        for _ in range(max_steps):
+            result = run_next_action(
+                session,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                dry_run=bool(payload.get("dry_run", True)),
+                platform=str(payload.get("platform") or "manual"),
+            )
+            if result.action not in AUTO_ACTIONS or result.status != "executed":
+                return {"status": "blocked", "blocked_action": result.action, "message": result.message, "executed": executed}
+            executed.append(
+                {
+                    "action": result.action,
+                    "status": result.status,
+                    "message": result.message,
+                    "object_id": result.object_id,
+                }
+            )
+        return {"status": "executed", "executed": executed}
+    if action == "record_continuity_dashboard":
+        book_id = int(payload.get("book_id") or 0)
+        chapter_number = int(payload.get("chapter_number") or 0)
+        summary = str(payload.get("summary") or "").strip() or _default_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
+        result = record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
+        return {"status": "recorded", "chapter_id": result.chapter_id}
+    if action == "approve_current_chapter":
+        version = _latest_version_for_chapter(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+        )
+        approved = approve_chapter(session, version_id=version.id, reviewer=str(payload.get("reviewer") or "dashboard"))
+        return {"status": approved.status, "version_id": approved.id}
     raise ValueError(f"unsupported action: {action}")
 
 
@@ -1294,6 +1378,22 @@ def _perform_restore_action(payload: dict) -> dict:
         "pre_restore_backup_path": result.pre_restore_backup_path,
         "restored_size_bytes": result.restored_size_bytes,
     }
+
+
+def _latest_version_for_chapter(session, *, book_id: int, chapter_number: int) -> ChapterVersion:
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        raise ValueError("chapter not found")
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    if not version:
+        raise ValueError("chapter version not found")
+    return version
+
+
+def _default_continuity_summary(session, *, book_id: int, chapter_number: int) -> str:
+    version = _latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
+    excerpt = " ".join(version.content.split())[:160]
+    return f"第{chapter_number}章已通过质检，最新版本《{version.title}》进入连续性记录。{excerpt}"
 
 
 def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
