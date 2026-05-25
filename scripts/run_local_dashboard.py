@@ -835,12 +835,19 @@ HTML = r"""<!doctype html>
       timeout: '超时',
       validation: '校验错误'
     };
+    const TASK_TYPE_LABELS = {
+      draft_chapter: '生成章节',
+      revise_chapter: '修订章节',
+      llm_review_chapter: 'LLM 二审',
+      live_llm_smoke: '真实 LLM 小测'
+    };
     function statusLabel(value) { return STATUS_LABELS[value] || value || ''; }
     function actionLabel(value) { return ACTION_LABELS[value] || value || ''; }
     function decisionLabel(value) { return DECISION_LABELS[value] || value || ''; }
     function readinessLabel(value) { return READINESS_LABELS[value] || value || ''; }
     function dimensionLabel(value) { return DIMENSION_LABELS[value] || value || ''; }
     function errorLabel(value) { return ERROR_LABELS[value] || value || ''; }
+    function taskTypeLabel(value) { return TASK_TYPE_LABELS[value] || value || ''; }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
     function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
     function qualityLabel(value) {
