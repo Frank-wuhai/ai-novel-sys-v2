@@ -1,0 +1,31 @@
+{
+  "description": "Quality regression cases for AI Novel System v2. These cases inspect existing database chapters without calling live models.",
+  "cases": [
+    {
+      "name": "current_book_first_three",
+      "book_title_contains": "武侠",
+      "start": 1,
+      "count": 3,
+      "expect": {
+        "min_chars": 3000,
+        "allow_missing": false,
+        "min_readability": 60,
+        "min_intent": 60,
+        "min_humanized": 60,
+        "min_design": 65,
+        "min_visual_staging": 60,
+        "min_imageable_paragraphs": 55,
+        "min_designed_nomenclature": 65,
+        "min_prose_voice": 65,
+        "min_native_chinese_flow": 60,
+        "min_dialogue_fullness": 50,
+        "min_character_voice": 60,
+        "min_expression_precision": 60,
+        "min_anti_ai_flavor": 60,
+        "min_writer_craft": 55,
+        "min_embodied_pov": 55,
+        "forbid_terms": ["送经验", "刷经验", "任务大厅", "机械 NPC", "系统任务"]
+      }
+    }
+  ]
+}

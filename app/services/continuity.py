@@ -87,3 +87,19 @@ def record_chapter_continuity(
         paid_foreshadow_ids=paid_foreshadow_ids,
         updated_plot_thread_ids=updated_plot_thread_ids,
     )
+
+
+def latest_version_for_chapter(session: Session, *, book_id: int, chapter_number: int) -> ChapterVersion:
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        raise ValueError("chapter not found")
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    if not version:
+        raise ValueError("chapter version not found")
+    return version
+
+
+def default_chapter_continuity_summary(session: Session, *, book_id: int, chapter_number: int) -> str:
+    version = latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
+    excerpt = " ".join(version.content.split())[:160]
+    return f"第{chapter_number}章已通过质检，最新版本《{version.title}》进入连续性记录。{excerpt}"

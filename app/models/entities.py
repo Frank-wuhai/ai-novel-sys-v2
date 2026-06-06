@@ -198,6 +198,40 @@ class ChapterBrief(Base):
     status: Mapped[str] = mapped_column(String(50), default="ready")
 
 
+class ChapterUnitPlan(Base):
+    __tablename__ = "chapter_unit_plans"
+    __table_args__ = (
+        Index("ix_chapter_unit_plans_chapter_created", "chapter_id", "created_at"),
+        Index("ix_chapter_unit_plans_chapter_status", "chapter_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id"), nullable=False)
+    chapter_brief_id: Mapped[int | None] = mapped_column(ForeignKey("chapter_briefs.id"), nullable=True)
+    source: Mapped[str] = mapped_column(String(120), default="system")
+    status: Mapped[str] = mapped_column(String(50), default="active")
+    plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ProductionRunReview(Base):
+    __tablename__ = "production_run_reviews"
+    __table_args__ = (
+        Index("ix_production_run_reviews_chapter_created", "chapter_id", "created_at"),
+        Index("ix_production_run_reviews_version", "chapter_version_id"),
+        Index("ix_production_run_reviews_task", "generation_task_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id"), nullable=False)
+    chapter_version_id: Mapped[int | None] = mapped_column(ForeignKey("chapter_versions.id"), nullable=True)
+    generation_task_id: Mapped[int | None] = mapped_column(ForeignKey("generation_tasks.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="recorded")
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class Foreshadow(Base):
     __tablename__ = "foreshadows"
     __table_args__ = (Index("ix_foreshadows_book_status", "book_id", "status"),)
@@ -413,4 +447,42 @@ class MarketSignal(Base):
     genre: Mapped[str] = mapped_column(String(120), default="")
     signal_text: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class KnowledgeEmbedding(Base):
+    __tablename__ = "knowledge_embeddings"
+    __table_args__ = (
+        Index("ix_knowledge_embeddings_book_source", "book_id", "source_type"),
+        Index("ix_knowledge_embeddings_book_created", "book_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    source_ref_id: Mapped[str] = mapped_column(String(120), default="")
+    source_label: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding_json: Mapped[str] = mapped_column(Text, default="[]")
+    model: Mapped[str] = mapped_column(String(160), default="")
+    dimensions: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class VisualAsset(Base):
+    __tablename__ = "visual_assets"
+    __table_args__ = (
+        Index("ix_visual_assets_book_type_status", "book_id", "asset_type", "status"),
+        Index("ix_visual_assets_chapter_type", "chapter_id", "asset_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    chapter_id: Mapped[int | None] = mapped_column(ForeignKey("chapters.id"), nullable=True)
+    asset_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(String(160), default="")
+    status: Mapped[str] = mapped_column(String(50), default="planned")
+    artifact_path: Mapped[str] = mapped_column(Text, default="")
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

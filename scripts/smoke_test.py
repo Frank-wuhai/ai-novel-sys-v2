@@ -10,8 +10,16 @@ import json
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from app.core.config import settings
+
 PYTHON = ROOT / "venv/bin/python"
 TEST_DB = "sqlite:///data/test-novel.db"
+
+
+def json_pair(name: str, value: str | int | float | bool | None) -> str:
+    return f'"{name}": {json.dumps(value, ensure_ascii=False)}'
 
 
 def run(args: list[str], *, expect: int = 0) -> str:
@@ -344,9 +352,9 @@ def main() -> int:
     if (
         '"task_timeout_seconds": 120' not in queued_draft_detail
         or '"llm_parameters":' not in queued_draft_detail
-        or '"requested_model": "deepseek-v3.2"' not in queued_draft_detail
-        or '"max_tokens": 3000' not in queued_draft_detail
-        or '"temperature": 0.7' not in queued_draft_detail
+        or json_pair("requested_model", settings.llm_draft_model) not in queued_draft_detail
+        or json_pair("max_tokens", settings.llm_draft_max_tokens) not in queued_draft_detail
+        or json_pair("temperature", settings.llm_draft_temperature) not in queued_draft_detail
     ):
         print("enqueue-draft did not record task timeout and model parameter snapshot")
         print(queued_draft_detail)
@@ -393,7 +401,7 @@ def main() -> int:
         '"child_generation_task_id":' not in queue_task_detail
         or f'"version_id": {queued_version_id}' not in queue_task_detail
         or '"llm_parameters":' not in queue_task_detail
-        or '"max_tokens": 3000' not in queue_task_detail
+        or json_pair("max_tokens", settings.llm_draft_max_tokens) not in queue_task_detail
     ):
         print("queue task audit did not record child task and version")
         print(queue_task_detail)
@@ -401,9 +409,9 @@ def main() -> int:
     child_task_detail = run(["show-generation-task", "--task-id", str(child_task_id)])
     if (
         '"llm_parameters":' not in child_task_detail
-        or '"requested_model": "deepseek-v3.2"' not in child_task_detail
-        or '"max_tokens": 3000' not in child_task_detail
-        or '"temperature": 0.7' not in child_task_detail
+        or json_pair("requested_model", settings.llm_draft_model) not in child_task_detail
+        or json_pair("max_tokens", settings.llm_draft_max_tokens) not in child_task_detail
+        or json_pair("temperature", settings.llm_draft_temperature) not in child_task_detail
     ):
         print("child draft task did not record model parameter snapshot")
         print(child_task_detail)
@@ -735,7 +743,7 @@ def main() -> int:
         print("run-next-action did not draft ready chapter")
         print(auto_draft)
         return 1
-    auto_review = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3"])
+    auto_review = run(["run-next-action", "--book-id", str(book_id), "--chapter-number", "3", "--dry-run"])
     if "action=review_chapter" not in auto_review or "status=executed" not in auto_review:
         print("run-next-action did not review draft chapter")
         print(auto_review)
@@ -817,7 +825,7 @@ def main() -> int:
         "--goal",
         "验证最小生产闭环",
         "--required-beats",
-        "开场压力,能力触发,代价落地,章末钩子",
+        "开篇牵引,能力触发,代价落地,章末钩子",
         "--constraints",
         "dry-run only",
     ])
@@ -843,7 +851,7 @@ def main() -> int:
     draft_task_id = int(task_list.split("\t", 1)[0])
     task_detail = run(["show-generation-task", "--task-id", str(draft_task_id)])
     if (
-        '"prompt_template": "draft_chapter@v3"' not in task_detail
+        '"prompt_template": "draft_chapter@v4"' not in task_detail
         or f'"version_id": {v1}' not in task_detail
         or '"estimated_total_tokens":' not in task_detail
         or '"actual_total_tokens":' not in task_detail
@@ -852,6 +860,15 @@ def main() -> int:
     ):
         print("show-generation-task did not include expected JSON")
         print(task_detail)
+        return 1
+    with sqlite3.connect(ROOT / "data/test-novel.db") as review_conn:
+        review_row = review_conn.execute(
+            "select review_json from production_run_reviews where chapter_version_id=? and generation_task_id=? order by id desc limit 1",
+            (v1, draft_task_id),
+        ).fetchone()
+    if not review_row or "production_run_review_v1" not in review_row[0] or "headline" not in review_row[0]:
+        print("production run review was not recorded for draft task")
+        print(review_row[0] if review_row else "")
         return 1
     llm_requests = run(["list-llm-requests", "--book-id", str(book_id), "--limit", "5"])
     if (
@@ -887,7 +904,11 @@ def main() -> int:
         print(cost_summary)
         return 1
     llm_config = run(["show-llm-config"])
-    if "model=deepseek-v3.2" not in llm_config or "draft_max_tokens=3000" not in llm_config or "review_max_tokens=1200" not in llm_config:
+    if (
+        f"model={settings.model_name}" not in llm_config
+        or f"draft_max_tokens={settings.llm_draft_max_tokens}" not in llm_config
+        or f"review_max_tokens={settings.llm_review_max_tokens}" not in llm_config
+    ):
         print("show-llm-config did not expose default LLM config")
         print(llm_config)
         return 1
@@ -902,7 +923,7 @@ def main() -> int:
         ).fetchone()
         input_data = json.loads(input_json)
         output_data = json.loads(output_json)
-        if input_data.get("prompt_template") != "draft_chapter@v3":
+        if input_data.get("prompt_template") != "draft_chapter@v4":
             print("draft did not use canon-aware prompt template")
             print(input_json)
             return 1
@@ -1012,7 +1033,15 @@ def main() -> int:
             "select required_beats, constraints from chapter_briefs where id=?",
             (adjustment_brief_id,),
         ).fetchone()
-        if not applied_brief or "回应读者反馈" not in applied_brief[0] or f"反馈调整#{adjustment_id}" not in applied_brief[1]:
+        if (
+            not applied_brief
+            or "按本次修订要求验收" not in applied_brief[0]
+            or f"反馈调整#{adjustment_id}" not in applied_brief[1]
+            or "修订执行摘要:" not in applied_brief[1]
+            or "修订模式:rewrite" not in applied_brief[1]
+            or "验收:" not in applied_brief[1]
+            or "第3章下一版必须能被人工意见逐条验收" not in applied_brief[1]
+        ):
             print("feedback adjustment was not applied to chapter brief")
             print(applied_brief)
             return 1
@@ -1051,11 +1080,21 @@ def main() -> int:
             "hook_strength",
             "prose_density",
             "arc_alignment",
+            "production_standard",
             "setting_risk",
             "platform_risk",
+            "author_intent",
+            "readability",
         }
         llm_review = quality_data.get("llm_review", {})
-        if quality_data.get("status") != "PASS" or set(quality_data.get("dimensions", {})) != expected_dimensions:
+        dimensions = set(quality_data.get("dimensions", {}))
+        if (
+            quality_data.get("status") != "PASS"
+            or not expected_dimensions.issubset(dimensions)
+            or not isinstance(quality_data.get("hard_gate"), dict)
+            or not isinstance(quality_data.get("readability_report"), dict)
+            or not isinstance(quality_data.get("intent_acceptance"), dict)
+        ):
             print("structured quality report is incomplete")
             print(quality_report)
             return 1
@@ -1076,7 +1115,7 @@ def main() -> int:
         print(reviewer_tasks)
         return 1
     reviewer_audit = run(["list-llm-requests", "--book-id", str(book_id), "--limit", "5"])
-    if "type=llm_review_chapter" not in reviewer_audit or "template=review_chapter@v1" not in reviewer_audit:
+    if "type=llm_review_chapter" not in reviewer_audit or "template=review_chapter@v2" not in reviewer_audit:
         print("LLM reviewer request log was not recorded")
         print(reviewer_audit)
         return 1
@@ -1124,7 +1163,11 @@ def main() -> int:
     finally:
         conn.close()
     revision_brief_detail = "\n".join(revision_brief_row or [])
-    if "依据质检报告" not in revision_brief_detail or "上次质检分数=" not in revision_brief_detail:
+    if (
+        "验证失败后的修订循环" not in revision_brief_detail
+        or "补足本章核心承诺" not in revision_brief_detail
+        or "必须按通用章节生产标准重写成完整章节" not in revision_brief_detail
+    ):
         print("auto revision brief did not include quality report context")
         print(revision_brief_detail)
         return 1
@@ -1415,7 +1458,7 @@ def main() -> int:
         return 1
     database_health = run(["database-health"])
     if (
-        "latest_migration=20260524_0006_indexes_and_constraints.py" not in database_health
+        "latest_migration=20260606_0009_production_run_reviews.py" not in database_health
         or "llm_request_logs" not in database_health
         or "publish_executions" not in database_health
         or "database_backups" not in database_health

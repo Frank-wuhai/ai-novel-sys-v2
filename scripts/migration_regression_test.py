@@ -11,22 +11,26 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTHON = ROOT / "venv/bin/python"
 TEST_DB = ROOT / "data/migration-regression.db"
 TEST_DB_URL = "sqlite:///data/migration-regression.db"
-EXPECTED_HEAD = "20260524_0006"
+EXPECTED_HEAD = "20260606_0009"
 
 REQUIRED_TABLES = {
     "alembic_version",
     "books",
     "chapter_versions",
+    "chapter_unit_plans",
     "database_backups",
     "feedback_adjustments",
     "generation_tasks",
     "llm_request_logs",
+    "knowledge_embeddings",
     "platform_feedback",
     "publish_executions",
     "publish_jobs",
     "publishing_targets",
+    "production_run_reviews",
     "quality_reports",
     "story_bibles",
+    "visual_assets",
 }
 
 REQUIRED_COLUMNS = {
@@ -65,6 +69,42 @@ REQUIRED_COLUMNS = {
         "status",
         "target_chapter_number",
     },
+    "knowledge_embeddings": {
+        "book_id",
+        "source_type",
+        "source_ref_id",
+        "source_label",
+        "embedding_json",
+        "model",
+        "dimensions",
+    },
+    "visual_assets": {
+        "book_id",
+        "chapter_id",
+        "asset_type",
+        "prompt",
+        "model",
+        "status",
+        "artifact_path",
+        "metadata_json",
+    },
+    "chapter_unit_plans": {
+        "chapter_id",
+        "chapter_brief_id",
+        "source",
+        "status",
+        "plan_json",
+        "created_at",
+    },
+    "production_run_reviews": {
+        "book_id",
+        "chapter_id",
+        "chapter_version_id",
+        "generation_task_id",
+        "status",
+        "review_json",
+        "created_at",
+    },
 }
 
 REQUIRED_INDEXES = {
@@ -81,6 +121,10 @@ REQUIRED_INDEXES = {
         "ix_llm_request_logs_book_status_created",
         "ix_llm_request_logs_generation_task",
     },
+    "knowledge_embeddings": {
+        "ix_knowledge_embeddings_book_created",
+        "ix_knowledge_embeddings_book_source",
+    },
     "platform_feedback": {
         "ix_platform_feedback_book_collected",
         "ix_platform_feedback_book_metric",
@@ -96,6 +140,19 @@ REQUIRED_INDEXES = {
     },
     "quality_reports": {
         "ix_quality_reports_version_created",
+    },
+    "visual_assets": {
+        "ix_visual_assets_book_type_status",
+        "ix_visual_assets_chapter_type",
+    },
+    "chapter_unit_plans": {
+        "ix_chapter_unit_plans_chapter_created",
+        "ix_chapter_unit_plans_chapter_status",
+    },
+    "production_run_reviews": {
+        "ix_production_run_reviews_chapter_created",
+        "ix_production_run_reviews_version",
+        "ix_production_run_reviews_task",
     },
 }
 

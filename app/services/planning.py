@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PublishJob, QualityReport, StoryArc
+from app.services.chapter_standards import ensure_chapter_production_standard
 from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REVISE, enqueue_draft_chapter, enqueue_revise_chapter
 from app.services.production import (
     create_chapter_brief,
@@ -82,9 +83,11 @@ class ChapterBriefFields:
 AUTO_ACTIONS = {
     "create_chapter_brief",
     "draft_chapter",
+    "enqueue_draft_chapter",
     "review_chapter",
     "create_revision_brief",
     "revise_chapter",
+    "enqueue_revise_chapter",
     "create_publish_job",
     "publish_job_dry_run",
     "queue_publish_job",
@@ -155,6 +158,29 @@ def create_arc_chapter_plan(
     )
 
 
+def upgrade_chapter_briefs_production_standards(session: Session, *, book_id: int) -> int:
+    chapters = list(session.scalars(select(Chapter).where(Chapter.book_id == book_id)))
+    updated = 0
+    for chapter in chapters:
+        brief = _latest_brief(session, chapter_id=chapter.id)
+        if not brief:
+            continue
+        arc = next(iter(arcs_for_chapter(session, book_id=book_id, chapter_number=chapter.chapter_number, limit=1)), None)
+        phase = _arc_phase(arc, chapter.chapter_number) if arc else ""
+        arc_goal = arc.goal if arc else ""
+        updated_constraints = ensure_chapter_production_standard(
+            brief.constraints,
+            chapter_number=chapter.chapter_number,
+            arc_phase=phase,
+            arc_goal=arc_goal,
+        )
+        if updated_constraints != brief.constraints:
+            brief.constraints = updated_constraints
+            updated += 1
+    session.flush()
+    return updated
+
+
 def plan_chapters(session: Session, *, book_id: int, start: int = 1, count: int = 10) -> list[ChapterPlanItem]:
     if start < 1:
         raise ValueError("start must be >= 1")
@@ -202,7 +228,13 @@ def run_next_action(
         version = draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
         return RunNextActionResult(chapter_number, action, "executed", "created draft version", version.id)
     if action == "review_chapter":
-        report = review_chapter(session, book_id=book_id, chapter_number=chapter_number)
+        report = review_chapter(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            llm_review=True,
+            review_dry_run=dry_run,
+        )
         return RunNextActionResult(chapter_number, action, "executed", f"quality passed={report.passed} score={report.score}", report.id)
     if action == "create_revision_brief":
         brief = create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
@@ -387,10 +419,14 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
         if queue_task:
             action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
-        elif revision_brief:
-            action, reason = "revise_chapter", "latest version failed quality and revision brief exists"
+        elif revision_brief and _revision_brief_has_feedback_marker(revision_brief) and quality is None:
+            action, reason = "revise_chapter", "latest version needs manual feedback revision"
+        elif revision_brief and quality and (_revision_brief_matches_quality(revision_brief, quality) or _revision_brief_matches_feedback_reopen(revision_brief, quality)):
+            action, reason = "revise_chapter", "latest version needs revision and revision brief exists"
+        elif revision_brief and _revision_brief_is_story_clean(revision_brief):
+            action, reason = "revise_chapter", "latest version needs revision and clean revision brief exists"
         else:
-            action, reason = "create_revision_brief", "latest version failed quality"
+            action, reason = "create_revision_brief", "latest version failed quality needs fresh revision brief"
     elif version.status == "reviewed_pass":
         if chapter.status != "continuity_recorded":
             action, reason = "record_chapter_continuity", "quality passed but continuity has not been recorded"
@@ -445,7 +481,10 @@ def _chapter_brief_fields(
         return ChapterBriefFields(
             goal=f"{goal_prefix} 第{chapter_number}章",
             required_beats=required_beats,
-            constraints=constraints,
+            constraints=ensure_chapter_production_standard(
+                constraints,
+                chapter_number=chapter_number,
+            ),
         )
     arc = arcs[0]
     phase = _arc_phase(arc, chapter_number)
@@ -485,7 +524,12 @@ def _chapter_brief_fields(
     return ChapterBriefFields(
         goal="；".join(goal_parts),
         required_beats="，".join(_dedupe(beat_parts)),
-        constraints="，".join(_dedupe(constraint_parts)),
+        constraints=ensure_chapter_production_standard(
+            "，".join(_dedupe(constraint_parts)),
+            chapter_number=chapter_number,
+            arc_phase=phase,
+            arc_goal=arc.goal,
+        ),
     )
 
 
@@ -542,6 +586,35 @@ def _latest_version(session: Session, *, chapter_id: int) -> ChapterVersion | No
 
 def _latest_quality(session: Session, *, version_id: int) -> QualityReport | None:
     return session.scalar(select(QualityReport).where(QualityReport.chapter_version_id == version_id).order_by(QualityReport.id.desc()))
+
+
+def _revision_brief_matches_quality(brief: ChapterBrief, quality: QualityReport) -> bool:
+    marker = f"质检报告 #{quality.id}"
+    return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
+
+
+def _revision_brief_matches_feedback_reopen(brief: ChapterBrief, quality: QualityReport) -> bool:
+    if not quality.passed:
+        return False
+    return _revision_brief_has_feedback_marker(brief)
+
+
+def _revision_brief_has_feedback_marker(brief: ChapterBrief) -> bool:
+    marker = "反馈调整#"
+    return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
+
+
+def _revision_brief_is_story_clean(brief: ChapterBrief) -> bool:
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    stale_markers = (
+        "依据质检报告",
+        "上次质检分数",
+        "质量门禁",
+        "修订合同:",
+        "原始人工意见",
+        "验收清单:",
+    )
+    return brief.status == "revision_ready" and not any(marker in text for marker in stale_markers)
 
 
 def _latest_publish_job(session: Session, *, version_id: int) -> PublishJob | None:

@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import ROOT_DIR, settings
@@ -22,7 +22,33 @@ def _database_url() -> str:
     return url
 
 
-engine = create_engine(_database_url(), future=True)
+def _engine_kwargs(database_url: str) -> dict:
+    if database_url.startswith("sqlite:///"):
+        return {"connect_args": {"timeout": 30}}
+    return {}
+
+
+def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+    finally:
+        cursor.close()
+
+
+def _create_engine(database_url: str):
+    engine_obj = create_engine(database_url, future=True, **_engine_kwargs(database_url))
+    if database_url.startswith("sqlite:///"):
+        event.listen(engine_obj, "connect", _configure_sqlite_connection)
+    return engine_obj
+
+
+engine = _create_engine(_database_url())
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
@@ -31,7 +57,7 @@ def configure_database(database_url: str) -> None:
     settings_url = settings.database_url
     object.__setattr__(settings, "database_url", database_url)
     try:
-        engine = create_engine(_database_url(), future=True)
+        engine = _create_engine(_database_url())
         SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     finally:
         object.__setattr__(settings, "database_url", database_url or settings_url)

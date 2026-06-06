@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Book, Chapter, ChapterBrief, FeedbackAdjustment, PlatformFeedback
+from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, FeedbackAdjustment, PlatformFeedback
 from app.services.evidence import add_evidence_source, add_market_signal
+from app.workflows.state_machine import move
+
+REVISION_MODE_POLISH = "polish"
+REVISION_MODE_LOCAL_PATCH = "local_patch"
+REVISION_MODE_TARGETED = "targeted"
+REVISION_MODE_REWRITE = "rewrite"
+REVISION_MODE_FRESH = "fresh"
+REVISION_MODES = {REVISION_MODE_POLISH, REVISION_MODE_LOCAL_PATCH, REVISION_MODE_TARGETED, REVISION_MODE_REWRITE, REVISION_MODE_FRESH}
+AUTHOR_PREFERENCE_METRIC = "author_preference"
 
 
 @dataclass(frozen=True)
@@ -73,6 +83,60 @@ def summarize_platform_feedback(session: Session, *, book_id: int, limit: int = 
         by_platform=dict(Counter(item.platform for item in items)),
         latest=items[:5],
     )
+
+
+def record_author_preference(
+    session: Session,
+    *,
+    book_id: int,
+    category: str,
+    preference_text: str,
+) -> PlatformFeedback:
+    text = preference_text.strip()
+    if not text:
+        raise ValueError("preference text is required")
+    value = (category or "general").strip()[:120] or "general"
+    return record_platform_feedback(
+        session,
+        book_id=book_id,
+        platform="author",
+        metric_name=AUTHOR_PREFERENCE_METRIC,
+        metric_value=value,
+        raw_text=text,
+    )
+
+
+def format_author_preference_context(session: Session, *, book_id: int, limit: int = 12) -> str:
+    rows = list_platform_feedback(
+        session,
+        book_id=book_id,
+        platform="author",
+        metric_name=AUTHOR_PREFERENCE_METRIC,
+        limit=limit,
+    )
+    if not rows:
+        return "未登记作者口味；以最新生产骨架、章节 brief 和本轮人工修订合同为准。"
+    labels = {
+        "like": "喜欢",
+        "dislike": "讨厌",
+        "must": "必须保留/强化",
+        "avoid": "绝对避免",
+        "style": "文风偏好",
+        "general": "一般偏好",
+    }
+    lines = ["作者口味库（低于本轮修订合同，高于泛化市场建议）："]
+    seen: set[tuple[str, str]] = set()
+    for item in rows:
+        text = item.raw_text.strip()
+        if not text:
+            continue
+        category = item.metric_value or "general"
+        key = (category, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {labels.get(category, category)}：{text}")
+    return "\n".join(lines) if len(lines) > 1 else "未登记作者口味；以最新生产骨架、章节 brief 和本轮人工修订合同为准。"
 
 
 def convert_feedback_to_market_signal(
@@ -153,7 +217,12 @@ def list_feedback_adjustments(
     return list(session.scalars(stmt))
 
 
-def apply_feedback_adjustment_to_brief(session: Session, *, adjustment_id: int) -> ChapterBrief:
+def apply_feedback_adjustment_to_brief(
+    session: Session,
+    *,
+    adjustment_id: int,
+    brief_status: str = "ready",
+) -> ChapterBrief:
     adjustment = session.get(FeedbackAdjustment, adjustment_id)
     if not adjustment:
         raise ValueError(f"feedback adjustment not found: {adjustment_id}")
@@ -164,26 +233,336 @@ def apply_feedback_adjustment_to_brief(session: Session, *, adjustment_id: int) 
     )
     latest = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
     label = f"反馈调整#{adjustment.id}"
+    mode, clean_text = _extract_revision_mode(adjustment.adjustment_text)
+    contract = build_revision_contract(adjustment.adjustment_text, chapter_number=adjustment.target_chapter_number)
+    brief_contract = build_brief_revision_contract(adjustment.adjustment_text, chapter_number=adjustment.target_chapter_number)
     if latest:
-        goal = latest.goal
-        required_beats = _append_unique(latest.required_beats, "回应读者反馈")
-        constraints = _append_unique(latest.constraints, f"{label}:{adjustment.adjustment_text}")
+        if mode in {REVISION_MODE_LOCAL_PATCH, REVISION_MODE_POLISH}:
+            goal = f"局部修订第{adjustment.target_chapter_number}章：{_compact_text(clean_text, limit=220)}"
+            required_beats = f"修订模式:{mode}；按本次修订要求验收，不扩大修改范围"
+        else:
+            goal = latest.goal
+            required_beats = _append_unique(
+                _strip_revision_beats(latest.required_beats),
+                "按本次修订要求验收，不扩大修改范围",
+            )
+        constraints = _append_unique(_strip_feedback_constraints(latest.constraints), f"{label}:\n{brief_contract}")
     else:
-        goal = f"根据平台反馈调整第{adjustment.target_chapter_number}章"
-        required_beats = "回应读者反馈"
-        constraints = f"{label}:{adjustment.adjustment_text}"
+        goal = f"根据人工校准合同修订第{adjustment.target_chapter_number}章"
+        required_beats = "按本次修订要求验收，不扩大修改范围"
+        constraints = f"{label}:\n{brief_contract}"
     brief = ChapterBrief(
         chapter_id=chapter.id,
         goal=goal,
         required_beats=required_beats,
         constraints=constraints,
-        status="ready",
+        status=brief_status,
     )
     session.add(brief)
     adjustment.chapter_id = chapter.id
     adjustment.status = "applied"
     session.flush()
     return brief
+
+
+def submit_revision_suggestion(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    suggestion_text: str,
+    platform: str = "manual",
+    revision_mode: str = REVISION_MODE_REWRITE,
+) -> tuple[PlatformFeedback, FeedbackAdjustment, ChapterBrief, ChapterVersion | None]:
+    text = suggestion_text.strip()
+    if not text:
+        raise ValueError("suggestion text is required")
+    mode = normalize_revision_mode(revision_mode)
+    _supersede_previous_adjustments(session, book_id=book_id, chapter_number=chapter_number)
+    feedback = record_platform_feedback(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        platform=platform or "manual",
+        metric_name="revision_suggestion",
+        metric_value=mode,
+        raw_text=text,
+    )
+    adjustment = create_feedback_adjustment(
+        session,
+        book_id=book_id,
+        target_chapter_number=chapter_number,
+        feedback_ids=[feedback.id],
+        adjustment_text=_revision_mode_prefix(mode) + text,
+    )
+    brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id, brief_status="revision_ready")
+    latest_version = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == brief.chapter_id)
+        .order_by(ChapterVersion.id.desc())
+    )
+    if latest_version and latest_version.status in {"draft", "reviewed_pass", "approved"}:
+        latest_version.status = move("chapter_version", latest_version.status, "needs_revision", "feedback_reopen")
+    session.flush()
+    return feedback, adjustment, brief, latest_version
+
+
+def build_rewrite_contract(suggestion_text: str, *, chapter_number: int) -> str:
+    return build_revision_contract(suggestion_text, chapter_number=chapter_number)
+
+
+def build_brief_revision_contract(suggestion_text: str, *, chapter_number: int) -> str:
+    text = suggestion_text.strip()
+    if not text:
+        raise ValueError("suggestion text is required")
+    mode, clean_text = _extract_revision_mode(text)
+    scope = {
+        REVISION_MODE_LOCAL_PATCH: "只修改明确命中的句子、词语或短段落，保留其余正文。",
+        REVISION_MODE_TARGETED: "保留可用结构和有效场景，只重写明确不合格的部分。",
+        REVISION_MODE_POLISH: "保留剧情结构，只润色表达、节奏密度和现场反应。",
+        REVISION_MODE_FRESH: "按最新生产骨架重启本章，旧稿不作为段落参照。",
+        REVISION_MODE_REWRITE: "允许结构性重写，以最新生产骨架和 Canon 为准。",
+    }.get(mode, "以最新生产骨架和人工意见为准。")
+    return "\n".join(
+        [
+            "修订执行摘要:",
+            f"修订模式:{mode}",
+            f"范围:{scope}",
+            "人工意图:",
+            _compact_text(clean_text, limit=900),
+            "验收:",
+            "- 保留人工明确认可的可用内容，除非它违反最新骨架或 Canon。",
+            "- 禁止把修订说明、质检术语、合同条目或系统信息写进正文。",
+            f"- 第{chapter_number}章下一版必须能被人工意见逐条验收。",
+        ]
+    )
+
+
+def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str:
+    text = suggestion_text.strip()
+    if not text:
+        raise ValueError("suggestion text is required")
+    mode, clean_text = _extract_revision_mode(text)
+    lines = [
+        line.strip(" -\t")
+        for line in re.split(r"[\n。；;]+", clean_text.replace("\r\n", "\n"))
+        if line.strip(" -\t")
+    ]
+    must: list[str] = []
+    must_not: list[str] = []
+    target: list[str] = []
+    for line in lines:
+        normalized = line.lstrip("0123456789.、)） ")
+        if _looks_like_forbidden(normalized):
+            must_not.append(normalized)
+        elif _looks_like_requirement(normalized):
+            must.append(normalized)
+        else:
+            target.append(normalized)
+    if not must:
+        must.append(f"逐条回应人工意见：{clean_text}")
+    if not target:
+        target.append(f"第{chapter_number}章修订后必须更贴近人工指定的读者体验。")
+    if mode == REVISION_MODE_POLISH:
+        mode_line = "修订模式:polish（小修：保留当前剧情结构，只改表达、节奏密度和局部自然度）"
+        must_not.extend(
+            [
+                "不要改变已成立的核心剧情走向、关键设定和章节结尾事实",
+                "不要把修订说明、质检术语、合同条目或系统信息写进正文",
+                "不要用总结式心理活动代替可见行动、对话、压力和后果",
+            ]
+        )
+    elif mode == REVISION_MODE_LOCAL_PATCH:
+        mode_line = "修订模式:local_patch（最小补丁：只修改明确命中的句子或段落，不改章节结构、场景顺序和章末事实）"
+        must.append("只修复人工指出的具体句子、词语或短段落，保留其余正文")
+        must_not.extend(
+            [
+                "不要整章重写",
+                "不要重排场景",
+                "不要改变已成立的剧情事实、人物关系和章末钩子",
+                "不要扩大修改范围",
+                "不要把修订说明、质检术语、合同条目或系统信息写进正文",
+            ]
+        )
+    elif mode == REVISION_MODE_TARGETED:
+        mode_line = "修订模式:targeted（定点修订：保留已可用的章节结构和有效场景，只重写明确不合格的部分）"
+        must.append("保留用户认为可用的段落、场景、人物行动链和章末钩子，除非它们违反最新骨架或 Canon")
+        must_not.extend(
+            [
+                "不要彻底重写整章，不要替换用户已经认可的有效内容",
+                "不要改变已成立的核心剧情走向、关键设定和章节结尾事实，除非人工意见明确要求",
+                "不要把局部问题扩大成整章重做",
+                "不要把修订说明、质检术语、合同条目或系统信息写进正文",
+                "不要用总结式心理活动代替可见行动、对话、压力和后果",
+            ]
+        )
+    elif mode == REVISION_MODE_FRESH:
+        mode_line = "修订模式:fresh（按最新生产骨架重启本章：旧稿已废弃，不进入创作参照）"
+        must_not.extend(
+            [
+                "不要参考旧稿段落顺序、旧场景推进、旧句式和旧桥段",
+                "不要采纳旧质检里已经被最新生产骨架推翻的具体名词、能力表现或场景建议",
+                "不要只做局部润色，必须重新设计开篇牵引、主角行动链、信息释放顺序、主要场景推进和章末钩子",
+                "不要把修订说明、质检术语、合同条目或系统信息写进正文",
+                "不要用总结式心理活动代替可见行动、对话、压力和后果",
+            ]
+        )
+    else:
+        mode_line = "修订模式:rewrite（结构性重写：以最新生产骨架为准，旧稿只作 Canon 弱参考）"
+        must_not.extend(
+            [
+                "不要只做局部润色，允许重排场景、重写开头、替换无效桥段",
+                "不要沿用旧稿段落顺序、句式和场景推进方式；旧稿只作 Canon 参考",
+                "不要把修订说明、质检术语、合同条目或系统信息写进正文",
+                "不要用总结式心理活动代替可见行动、对话、压力和后果",
+            ]
+        )
+    checks = [
+        "是否保留并准确回应原始人工意见的真实意图，而不是只复述关键词",
+        "开篇是否在前500字内进入具体处境，并用人物欲望、关系张力、异常细节、利益交换、行动后果或悬念形成牵引",
+        "主角是否做出主动选择，并产生收益、代价或后果",
+        "人工意见中的每个必须项是否在正文中有可见兑现",
+        "禁止项是否完全没有进入正文",
+        "章末是否留下具体危险、发现、转折或未解决压力",
+    ]
+    return "\n".join(
+        [
+            "修订合同:",
+            mode_line,
+            "原始人工意见（最高优先级，禁止改写含义）:",
+            clean_text,
+            "意见理解规则:",
+            "- 先判断用户真正不满意的是读者体验、人物动机、场景选择、节奏、爽点、设定兑现、文风还是章末期待。",
+            "- 如果人工意见是抽象判断，必须转化为正文里的可见变化：新增/删除/替换哪些场景，主角做什么不同选择，读者会获得什么不同感受。",
+            "- 不要只替换几个名词或句子；必须让正文结果能被人工意见逐条验收。",
+            "目标读者体验:",
+            *_bullet_lines(target[:6]),
+            "必须满足:",
+            *_bullet_lines(_dedupe(must)[:10]),
+            "禁止:",
+            *_bullet_lines(_dedupe(must_not)[:10]),
+            "验收清单:",
+            *_bullet_lines(checks),
+        ]
+    )
+
+
+def normalize_revision_mode(mode: str) -> str:
+    value = (mode or "").strip().lower()
+    aliases = {
+        "minor": REVISION_MODE_POLISH,
+        "light": REVISION_MODE_POLISH,
+        "partial": REVISION_MODE_TARGETED,
+        "local": REVISION_MODE_TARGETED,
+        "patch": REVISION_MODE_LOCAL_PATCH,
+        "local_patch": REVISION_MODE_LOCAL_PATCH,
+        "minimal": REVISION_MODE_LOCAL_PATCH,
+        "minimal_patch": REVISION_MODE_LOCAL_PATCH,
+        "target": REVISION_MODE_TARGETED,
+        "targeted_revision": REVISION_MODE_TARGETED,
+        "rebuild": REVISION_MODE_REWRITE,
+        "structural": REVISION_MODE_REWRITE,
+        "restart": REVISION_MODE_FRESH,
+        "fresh_rewrite": REVISION_MODE_FRESH,
+        "latest_skeleton": REVISION_MODE_FRESH,
+    }
+    value = aliases.get(value, value)
+    if value not in REVISION_MODES:
+        return REVISION_MODE_REWRITE
+    return value
+
+
+def _revision_mode_prefix(mode: str) -> str:
+    return f"修订模式:{normalize_revision_mode(mode)}\n"
+
+
+def _extract_revision_mode(text: str) -> tuple[str, str]:
+    match = re.match(r"\s*修订模式\s*[:：]\s*([a-zA-Z_]+)\s*\n?", text)
+    if not match:
+        return REVISION_MODE_REWRITE, text
+    mode = normalize_revision_mode(match.group(1))
+    return mode, text[match.end() :].strip()
+
+
+def _supersede_previous_adjustments(session: Session, *, book_id: int, chapter_number: int) -> None:
+    previous = session.scalars(
+        select(FeedbackAdjustment).where(
+            FeedbackAdjustment.book_id == book_id,
+            FeedbackAdjustment.target_chapter_number == chapter_number,
+            FeedbackAdjustment.status.in_(["ready", "applied"]),
+        )
+    )
+    for adjustment in previous:
+        adjustment.status = "superseded"
+
+
+def _strip_feedback_constraints(value: str) -> str:
+    if "反馈调整#" not in value:
+        return value
+    cleaned = re.sub(r"(?:^|[，,；;]\s*)反馈调整#\d+:[\s\S]*", "", value).strip(" ，,；;")
+    return cleaned
+
+
+def _strip_internal_revision_markers(value: str) -> str:
+    markers = (
+        "执行修订合同，逐条兑现人工验收标准",
+        "按本次修订要求验收，不扩大修改范围",
+    )
+    result = value or ""
+    for marker in markers:
+        result = result.replace(marker, "")
+    return result.strip(" ，,；;")
+
+
+def _strip_revision_beats(value: str) -> str:
+    blocked_prefixes = (
+        "修订模式:",
+        "本章按最新",
+        "执行修订合同",
+        "按本次修订要求验收",
+        "结构重写时",
+    )
+    keep = []
+    for part in (value or "").replace("\n", "；").split("；"):
+        item = part.strip(" ，,；;")
+        if not item:
+            continue
+        if item.startswith(blocked_prefixes):
+            continue
+        keep.append(item)
+    return "；".join(keep)
+
+
+def _compact_text(value: str, *, limit: int = 900) -> str:
+    compact = "\n".join(line.strip() for line in (value or "").splitlines() if line.strip())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
+
+
+def _looks_like_requirement(line: str) -> bool:
+    markers = ("必须", "需要", "要", "前", "结尾", "开头", "主角", "能力", "钩子", "冲突", "代价", "压力")
+    return any(marker in line for marker in markers)
+
+
+def _looks_like_forbidden(line: str) -> bool:
+    markers = ("不要", "不能", "禁止", "不得", "删除", "避免", "别")
+    return any(marker in line for marker in markers)
+
+
+def _bullet_lines(items: list[str]) -> list[str]:
+    return [f"- {item}" for item in items if item]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _feedback_items(session: Session, *, book_id: int, feedback_ids: list[int]) -> list[PlatformFeedback]:

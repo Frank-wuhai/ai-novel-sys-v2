@@ -1,0 +1,273 @@
+from __future__ import annotations
+
+import json
+from collections import Counter
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.entities import Book, GenerationTask
+from app.services.llm_queue import QUEUE_TYPES
+from app.services.planning import AUTO_ACTIONS, plan_chapters
+from app.services.readiness import check_production_readiness
+
+
+def build_author_command_center(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int = 1,
+    start: int = 1,
+    count: int = 20,
+) -> dict[str, Any]:
+    book = session.get(Book, book_id)
+    if not book:
+        raise ValueError(f"book not found: {book_id}")
+    readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
+    current = next((item for item in plan_items if item.chapter_number == chapter_number), None)
+    auto_item = next((item for item in plan_items if item.next_action in AUTO_ACTIONS), None)
+    tasks = list(session.scalars(select(GenerationTask).where(GenerationTask.book_id == book_id).order_by(GenerationTask.id.desc()).limit(80)))
+    counts = Counter(task.status for task in tasks)
+    running = counts.get("running", 0)
+    pending = counts.get("pending", 0)
+    failed_tasks = _active_failed_tasks(session, book_id=book_id, limit=5)
+    failed = len(failed_tasks)
+
+    if not readiness.passed:
+        blockers = [f"{item.name}: {item.detail}" for item in readiness.blockers]
+        return _center(
+            status="blocked",
+            stage="setup",
+            headline="先修复生产准备度",
+            detail=blockers[0] if blockers else "生产门禁未通过。",
+            primary_label="查看并修复作品设定",
+            primary_intent="open_skeleton",
+            blockers=blockers,
+            next_actions=["先处理生产门禁，再进入章节生产。"],
+        )
+    if running:
+        return _center(
+            status="running",
+            stage="generate",
+            headline="后台正在生成",
+            detail="模型任务正在运行，等待完成后页面会刷新到下一步。",
+            primary_label="等待自动刷新",
+            primary_intent="wait",
+            next_actions=["不要重复启动生产；等待后台任务完成。"],
+        )
+    if pending:
+        return _center(
+            status="queued",
+            stage="generate",
+            headline="有生成任务待启动",
+            detail="队列里已有待启动任务，点击主按钮启动后台生成。",
+            primary_label="启动后台生成",
+            primary_intent="continue",
+            next_actions=["启动后台生成。"],
+        )
+    if failed:
+        first = failed_tasks[0] if failed_tasks else {}
+        chapter_text = f"第 {first.get('chapter_number')} 章" if first.get("chapter_number") else "未知章节"
+        type_text = _task_type_label(str(first.get("task_type") or ""))
+        error_text = str(first.get("error") or first.get("error_category") or "未记录具体错误")
+        return _center(
+            status="blocked",
+            stage="diagnose",
+            headline="有生成任务需要处理",
+            detail=f"{chapter_text}的{type_text}失败：{error_text}",
+            primary_label="查看处理建议",
+            primary_intent="inspect_failure",
+            blockers=["generation_queue_failed"],
+            next_actions=["在写作台的“卡在哪里”里重试或取消失败任务。"],
+            failed_tasks=failed_tasks,
+        )
+    if not current:
+        return _center(
+            status="idle",
+            stage="select",
+            headline="请选择有效章节",
+            detail="当前章不在加载范围内。",
+            primary_label="刷新章节地图",
+            primary_intent="refresh",
+            next_actions=["调整当前章或扩大章节范围后刷新。"],
+        )
+
+    action = current.next_action
+    if action in {"approve_chapter", "record_chapter_continuity"}:
+        return _center(
+            status="needs_author",
+            stage="approve",
+            headline="可读稿等待你的判断",
+            detail="满意就通过；不满意就写修改意见，系统会转成修订任务。",
+            primary_label="阅读并审批当前章",
+            primary_intent="approve",
+            next_actions=["阅读当前章，然后通过、局部改或整章重写。"],
+        )
+    if action == "mark_publish_job":
+        return _center(
+            status="needs_author",
+            stage="publish",
+            headline="章节已到发布准备",
+            detail="当前章已进入待发布状态，到发布区处理平台发布。",
+            primary_label="查看发布任务",
+            primary_intent="open_publish",
+            next_actions=["打开后台发布区，检查预览后确认发布。"],
+        )
+    if action == "done":
+        return _center(
+            status="done",
+            stage="complete",
+            headline="当前章已完成",
+            detail="可以切换到下一章继续生产。",
+            primary_label="切换下一章",
+            primary_intent="next_chapter",
+            next_actions=["选择下一章。"],
+        )
+    if action in AUTO_ACTIONS:
+        return _center(
+            status="can_produce",
+            stage="produce",
+            headline="可以继续生产当前章",
+            detail=current.reason,
+            primary_label="生产到可读稿",
+            primary_intent="continue",
+            next_actions=[current.reason],
+        )
+    if auto_item:
+        return _center(
+            status="can_produce",
+            stage="produce",
+            headline=f"当前章需人工处理，可先推进第 {auto_item.chapter_number} 章",
+            detail=auto_item.reason,
+            primary_label=f"切到第 {auto_item.chapter_number} 章继续",
+            primary_intent="continue_auto_chapter",
+            target_chapter_number=auto_item.chapter_number,
+            next_actions=[auto_item.reason],
+        )
+    return _center(
+        status="idle",
+        stage="idle",
+        headline="当前范围暂无可自动推进事项",
+        detail=current.reason,
+        primary_label="刷新状态",
+        primary_intent="refresh",
+        next_actions=[current.reason],
+    )
+
+
+def _center(
+    *,
+    status: str,
+    stage: str,
+    headline: str,
+    detail: str,
+    primary_label: str,
+    primary_intent: str,
+    blockers: list[str] | None = None,
+    next_actions: list[str] | None = None,
+    target_chapter_number: int | None = None,
+    failed_tasks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "stage": stage,
+        "headline": headline,
+        "detail": detail,
+        "primary_action": {
+            "label": primary_label,
+            "intent": primary_intent,
+            "target_chapter_number": target_chapter_number,
+        },
+        "secondary_actions": ["作品设定", "修改与审批", "后台诊断"],
+        "blockers": blockers or [],
+        "next_actions": next_actions or [],
+        "failed_tasks": failed_tasks or [],
+    }
+
+
+def _active_failed_tasks(session: Session, *, book_id: int, limit: int = 5) -> list[dict[str, Any]]:
+    tasks = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.book_id == book_id, GenerationTask.status == "failed")
+            .order_by(GenerationTask.id.desc())
+            .limit(40)
+        )
+    )
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        if _obsolete_failed_generation_task(session, task):
+            continue
+        input_data = _loads_json(task.input_json)
+        output_data = _loads_json(task.output_json)
+        rows.append(
+            {
+                "id": task.id,
+                "task_type": task.task_type,
+                "task_label": _task_type_label(task.task_type),
+                "chapter_number": input_data.get("chapter_number"),
+                "error_category": str(output_data.get("error_category") or ""),
+                "error": str(output_data.get("error") or "")[:220],
+                "is_queue_task": task.task_type in QUEUE_TYPES,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _obsolete_failed_generation_task(session: Session, task: GenerationTask) -> bool:
+    if task.task_type in QUEUE_TYPES:
+        return False
+    input_data = _loads_json(task.input_json)
+    chapter_number = input_data.get("chapter_number")
+    source_version_id = input_data.get("source_version_id")
+    revision_brief_id = input_data.get("revision_brief_id")
+    quality_report_id = input_data.get("quality_report_id")
+    stmt = (
+        select(GenerationTask)
+        .where(
+            GenerationTask.book_id == task.book_id,
+            GenerationTask.task_type == task.task_type,
+            GenerationTask.status == "completed",
+            GenerationTask.created_at > task.created_at,
+        )
+        .order_by(GenerationTask.id.desc())
+    )
+    for candidate in session.scalars(stmt):
+        candidate_input = _loads_json(candidate.input_json)
+        if chapter_number and candidate_input.get("chapter_number") != chapter_number:
+            continue
+        if source_version_id and candidate_input.get("source_version_id") != source_version_id:
+            continue
+        if revision_brief_id and candidate_input.get("revision_brief_id") != revision_brief_id:
+            continue
+        if quality_report_id and candidate_input.get("quality_report_id") != quality_report_id:
+            continue
+        return True
+    return False
+
+
+def _loads_json(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        data = json.loads(value)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _task_type_label(value: str) -> str:
+    labels = {
+        "draft_chapter": "章节草稿",
+        "queue_draft_chapter": "草稿生成",
+        "revise_chapter": "章节修订",
+        "queue_revise_chapter": "修订生成",
+        "review_chapter": "章节质检",
+        "llm_review_chapter": "模型审稿",
+        "chapter_sample_lab": "章节小样",
+    }
+    return labels.get(value, value or "生成任务")

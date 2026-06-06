@@ -1,0 +1,53 @@
+{
+  "description": "Sentence-level calibration cases for expression precision.",
+  "cases": [
+    {
+      "name": "bad_knife_tassel_and_shoe_sole",
+      "text": "他声音压低：“你穿的是青阳镇布庄的料子，腰上别的是关外的刀穗，鞋底却是江南船工的草编。你要么是逃出来的，要么是装出来的。装出来的，今天得给个说法。”",
+      "expect": {
+        "max_score": 72,
+        "must_examples_contain": ["刀穗", "鞋底", "装出来的"]
+      }
+    },
+    {
+      "name": "good_visible_shoe_mark",
+      "text": "汉子把脚踩上长凳，鞋底边露出一圈防滑草结，泥印里还压着细碎盐粒。掌柜这才眯起眼：“这编法像江南船工的，不像本地鞋。”",
+      "expect": {
+        "min_score": 78,
+        "forbid_examples_contain": ["鞋底判断"]
+      }
+    },
+    {
+      "name": "good_knife_tassel_collocation",
+      "text": "他腰间佩着一把短刀，刀柄末端垂着红黑相间的刀穗，结法细密，不像青阳镇铺子里的手艺。",
+      "expect": {
+        "min_score": 82,
+        "forbid_examples_contain": ["刀穗通常"]
+      }
+    },
+    {
+      "name": "borderline_soft_inference",
+      "text": "他衣袖是青阳布庄的织纹，刀鞘上却系着关外常见的红黑结，鞋沿还沾着江船上的黑泥。掌柜没把话说死，只低声问：“小兄弟，你这身行头看着不像一路来的，若是替人探路，最好先说清凭据。”",
+      "expect": {
+        "min_score": 76,
+        "forbid_examples_contain": ["强推断"]
+      }
+    },
+    {
+      "name": "bad_mixed_signing_action",
+      "text": "老头把手印递过来让他签，催道：“按下名字，你就能走。”",
+      "expect": {
+        "max_score": 78,
+        "must_examples_contain": ["签字和按手印"]
+      }
+    },
+    {
+      "name": "bad_sensor_crossing",
+      "text": "陈默看见一股腥味从门缝里钻出来，听见那片红色越来越近。",
+      "expect": {
+        "max_score": 76,
+        "must_examples_contain": ["气味不能被看见", "颜色不能被听见"]
+      }
+    }
+  ]
+}

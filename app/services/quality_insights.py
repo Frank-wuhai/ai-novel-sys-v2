@@ -100,8 +100,8 @@ def build_quality_calibration(
     min_average_score: float = 70.0,
 ) -> QualityCalibrationReport:
     trends = build_quality_trends(session, book_id=book_id, limit=limit)
-    failed_report_ids = {item.quality_report_id for item in trends.snapshots if not item.passed}
-    auto_brief_count = _auto_revision_brief_count(session, book_id=book_id, failed_report_ids=failed_report_ids)
+    failed_snapshots = [item for item in trends.snapshots if not item.passed]
+    auto_brief_count = _auto_revision_brief_count(session, book_id=book_id, failed_snapshots=failed_snapshots)
     failure_rate = round(trends.failed_count / trends.report_count, 4) if trends.report_count else 0.0
     coverage = round(auto_brief_count / trends.failed_count, 4) if trends.failed_count else 1.0
     blockers: list[str] = []
@@ -128,20 +128,34 @@ def build_quality_calibration(
     )
 
 
-def _auto_revision_brief_count(session: Session, *, book_id: int, failed_report_ids: set[int]) -> int:
-    if not failed_report_ids:
+def _auto_revision_brief_count(session: Session, *, book_id: int, failed_snapshots: list[ChapterQualitySnapshot]) -> int:
+    if not failed_snapshots:
         return 0
-    rows = session.execute(
-        select(ChapterBrief)
-        .join(Chapter, Chapter.id == ChapterBrief.chapter_id)
-        .where(Chapter.book_id == book_id, ChapterBrief.status == "revision_ready")
-    ).scalars()
     count = 0
-    for brief in rows:
-        text = f"{brief.goal}\n{brief.required_beats}\n{brief.constraints}"
-        if any(f"质检报告 #{report_id}" in text for report_id in failed_report_ids):
+    for snapshot in failed_snapshots:
+        chapter = session.scalar(
+            select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == snapshot.chapter_number)
+        )
+        if not chapter:
+            continue
+        briefs = session.scalars(
+            select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")
+        )
+        if any(_brief_covers_failed_quality(brief, quality_report_id=snapshot.quality_report_id) for brief in briefs):
             count += 1
     return count
+
+
+def _brief_covers_failed_quality(brief: ChapterBrief, *, quality_report_id: int) -> bool:
+    text = f"{brief.goal}\n{brief.required_beats}\n{brief.constraints}"
+    legacy_marker = f"质检报告 #{quality_report_id}"
+    current_markers = (
+        "验证失败后的修订循环",
+        "补足本章核心承诺",
+        "必须按通用章节生产标准重写成完整章节",
+        "补足关键场景，使正文字数达到最低要求",
+    )
+    return legacy_marker in text or any(marker in text for marker in current_markers)
 
 
 def _parse_quality_report(report: str) -> tuple[list[str], int]:

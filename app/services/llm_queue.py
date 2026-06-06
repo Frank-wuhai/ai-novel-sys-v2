@@ -194,6 +194,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     task.status = "running"
     task.input_json = _dumps_json(input_data)
     session.flush()
+    session.commit()
     try:
         if task.task_type == QUEUE_DRAFT:
             version = draft_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)

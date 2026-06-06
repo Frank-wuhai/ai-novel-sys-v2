@@ -4,14 +4,17 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.db.init import current_sqlite_path, init_db, reset_db
 from app.db.session import configure_database, session_scope
 from app.core.config import settings
 from app.models.entities import Chapter, ChapterBrief
 from app.services.budget import check_token_budget
+from app.services.bias import evaluate_generation_bias
 from app.services.audit import (
     compare_versions,
     get_generation_task,
@@ -21,6 +24,17 @@ from app.services.audit import (
     pretty_json,
     task_summary,
 )
+from app.services.agent_plan_intelligence import (
+    create_market_research_pack,
+    create_visual_asset,
+    index_book_knowledge,
+    ingest_market_research_results,
+    list_visual_assets,
+    retrieve_book_knowledge,
+    run_agent_plan_enhancement_cycle,
+    summarize_semantic_memory,
+)
+from app.services.author_command_center import build_author_command_center
 from app.services.canon import (
     add_character,
     add_character_state,
@@ -57,6 +71,7 @@ from app.services.llm_queue import (
 )
 from app.services.production import (
     approve_chapter,
+    auto_prepare_publish_job,
     create_book,
     create_chapter_brief,
     create_foundation,
@@ -105,11 +120,19 @@ from app.services.feedback import (
     list_feedback_adjustments,
     list_platform_feedback,
     record_platform_feedback,
+    submit_revision_suggestion,
     summarize_platform_feedback,
 )
 from app.services.prompts import get_prompt_template
 from app.services.quality_insights import build_quality_calibration, build_quality_trends
+from app.services.production_control import build_production_control_report
+from app.services.production_scaffold import repair_production_scaffold
+from app.services.data_governance import audit_book_data_governance
+from app.services.development_governance import build_development_status
+from app.services.model_strategy import build_model_strategy
+from app.services.publish_preflight import build_publish_preflight
 from app.services.readiness import check_production_readiness
+from app.services.story_alignment import build_story_alignment_audit
 from app.services.story import (
     create_story_arc,
     create_volume,
@@ -258,6 +281,50 @@ def main() -> None:
     p.add_argument("--count", type=int, default=10)
     p.add_argument("--live-llm", action="store_true")
 
+    p = sub.add_parser("semantic-memory-status")
+    p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("agent-plan-cycle")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, default=0)
+    p.add_argument("--market-query", default="")
+    p.add_argument("--platform", default="")
+    p.add_argument("--live-embedding", action="store_true")
+    p.add_argument("--skip-memory", action="store_true")
+    p.add_argument("--skip-visuals", action="store_true")
+
+    p = sub.add_parser("production-control")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=8)
+
+    p = sub.add_parser("repair-production-scaffold")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--apply", action="store_true")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--no-approve", action="store_true")
+    p.add_argument("--chapter-count", type=int, default=5)
+
+    p = sub.add_parser("data-governance-audit")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-limit", type=int, default=12)
+
+    p = sub.add_parser("development-status")
+    p.add_argument("--book-id", type=int, default=0)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=5)
+
+    p = sub.add_parser("author-command-center")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, default=1)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=20)
+
+    sub.add_parser("model-strategy")
+
+    p = sub.add_parser("publish-preflight")
+    p.add_argument("--version-id", type=int, required=True)
+
     p = sub.add_parser("project-dashboard")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--start", type=int, default=1)
@@ -266,6 +333,7 @@ def main() -> None:
 
     p = sub.add_parser("project-snapshot-json")
     p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, default=0)
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--count", type=int, default=20)
     p.add_argument("--recent-tasks", type=int, default=10)
@@ -365,6 +433,11 @@ def main() -> None:
     p.add_argument("--version-id", type=int, required=True)
     p.add_argument("--platform", required=True)
 
+    p = sub.add_parser("one-click-publish")
+    p.add_argument("--version-id", type=int, required=True)
+    p.add_argument("--platform", required=True)
+    p.add_argument("--confirm-real-platform", action="store_true")
+
     p = sub.add_parser("upsert-publishing-target")
     p.add_argument("--platform", required=True)
     p.add_argument("--account-label", default="")
@@ -438,6 +511,14 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--max-failure-rate", type=float, default=0.35)
     p.add_argument("--min-average-score", type=float, default=70.0)
+
+    p = sub.add_parser("story-alignment-audit")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-limit", type=int, default=8)
+
+    p = sub.add_parser("chapter-bias-audit")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
 
     p = sub.add_parser("list-publish-jobs")
     p.add_argument("--status", default="")
@@ -522,6 +603,41 @@ def main() -> None:
     p.add_argument("--genre", default="")
     p.add_argument("--min-confidence", type=int, default=0)
 
+    p = sub.add_parser("create-market-research-pack")
+    p.add_argument("--genre", required=True)
+    p.add_argument("--query", required=True)
+    p.add_argument("--platform", default="番茄小说")
+
+    p = sub.add_parser("ingest-market-research-results")
+    p.add_argument("--genre", required=True)
+    p.add_argument("--result-json", default="")
+    p.add_argument("--result-path", default="")
+    p.add_argument("--source-prefix", default="agent-search")
+
+    p = sub.add_parser("index-book-knowledge")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--reset", action="store_true")
+    p.add_argument("--limit-chapters", type=int, default=80)
+
+    p = sub.add_parser("retrieve-book-knowledge")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--query", required=True)
+    p.add_argument("--limit", type=int, default=8)
+    p.add_argument("--dry-run", action="store_true")
+
+    p = sub.add_parser("create-visual-asset")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--asset-type", choices=["cover", "chapter_illustration"], required=True)
+    p.add_argument("--chapter-number", type=int, default=0)
+    p.add_argument("--style", default="")
+    p.add_argument("--live", action="store_true")
+
+    p = sub.add_parser("list-visual-assets")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--asset-type", default="")
+    p.add_argument("--limit", type=int, default=20)
+
     p = sub.add_parser("record-feedback")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--platform", required=True)
@@ -562,6 +678,13 @@ def main() -> None:
 
     p = sub.add_parser("apply-feedback-adjustment")
     p.add_argument("--adjustment-id", type=int, required=True)
+
+    p = sub.add_parser("submit-revision-suggestion")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--suggestion", required=True)
+    p.add_argument("--platform", default="manual")
+    p.add_argument("--revision-mode", choices=["polish", "local_patch", "targeted", "rewrite", "fresh"], default="targeted")
 
     p = sub.add_parser("add-character")
     p.add_argument("--book-id", type=int, required=True)
@@ -874,6 +997,74 @@ def main() -> None:
                 print(f"passed={report.passed}")
                 for check in report.checks:
                     print(f"check\t{check.name}\tpassed={check.passed}\tdetail={check.detail}")
+            elif args.cmd == "semantic-memory-status":
+                try:
+                    summary = summarize_semantic_memory(session, book_id=args.book_id)
+                except OperationalError:
+                    session.rollback()
+                    summary = {
+                        "book_id": args.book_id,
+                        "ready": False,
+                        "indexed_count": 0,
+                        "stale": False,
+                        "attention": "migration missing; run alembic upgrade head",
+                    }
+                print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "agent-plan-cycle":
+                result = run_agent_plan_enhancement_cycle(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number or None,
+                    market_query=args.market_query,
+                    platform=args.platform,
+                    dry_run=not args.live_embedding,
+                    rebuild_memory=not args.skip_memory,
+                    create_visuals=not args.skip_visuals,
+                )
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "production-control":
+                report = build_production_control_report(
+                    session,
+                    book_id=args.book_id,
+                    start=args.start,
+                    count=args.count,
+                )
+                for line in report.lines:
+                    print(line)
+            elif args.cmd == "repair-production-scaffold":
+                result = repair_production_scaffold(
+                    session,
+                    book_id=args.book_id,
+                    only_missing=not args.overwrite,
+                    approve_skeleton=not args.no_approve,
+                    chapter_count=args.chapter_count,
+                    apply=args.apply,
+                )
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "data-governance-audit":
+                report = audit_book_data_governance(session, book_id=args.book_id, chapter_limit=args.chapter_limit)
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "development-status":
+                report = build_development_status(
+                    session,
+                    book_id=args.book_id or None,
+                    start=args.start,
+                    count=args.count,
+                )
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "author-command-center":
+                report = build_author_command_center(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    start=args.start,
+                    count=args.count,
+                )
+                print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "model-strategy":
+                print(json.dumps(build_model_strategy(), ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "publish-preflight":
+                print(json.dumps(build_publish_preflight(session, version_id=args.version_id), ensure_ascii=False, indent=2, sort_keys=True))
             elif args.cmd == "project-dashboard":
                 report = build_project_dashboard(
                     session,
@@ -888,6 +1079,7 @@ def main() -> None:
                 snapshot = build_project_snapshot(
                     session,
                     book_id=args.book_id,
+                    chapter_number=args.chapter_number or args.start,
                     start=args.start,
                     count=args.count,
                     recent_tasks=args.recent_tasks,
@@ -1162,6 +1354,33 @@ def main() -> None:
                 job = create_publish_job(session, version_id=args.version_id, platform=args.platform)
                 print(f"publish_job_id={job.id}")
                 print(f"status={job.status}")
+            elif args.cmd == "one-click-publish":
+                result = auto_prepare_publish_job(
+                    session,
+                    version_id=args.version_id,
+                    platform=args.platform,
+                    confirm_real_platform=args.confirm_real_platform,
+                )
+                job = result.get("job") or {}
+                print(f"status={result['status']}")
+                print(f"message={result['message']}")
+                print(f"publish_job_id={job.get('id', '')}")
+                print(f"publish_job_status={job.get('status', '')}")
+                preflight = result.get("preflight") or {}
+                print(f"preflight_passed={preflight.get('passed', False)}")
+                print("preflight_blockers=" + ";".join(preflight.get("blockers", [])))
+                for step in result.get("steps", []):
+                    print(
+                        "\t".join(
+                            [
+                                "step",
+                                f"action={step.get('action', '')}",
+                                f"status={step.get('status', '')}",
+                                f"publish_job_id={step.get('publish_job_id', '')}",
+                                f"publish_execution_id={step.get('publish_execution_id', '')}",
+                            ]
+                        )
+                    )
             elif args.cmd == "upsert-publishing-target":
                 target = upsert_publishing_target(
                     session,
@@ -1335,8 +1554,28 @@ def main() -> None:
                 print(f"estimated_cost={cost.estimated_cost}")
                 print(f"currency={cost.currency}")
             elif args.cmd == "show-llm-config":
+                effective_plan = "coding_plan" if settings.llm_require_coding_plan else settings.llm_plan
+                print(f"llm_plan={settings.llm_plan}")
+                print(f"effective_llm_plan={effective_plan}")
                 print(f"model={settings.model_name}")
+                print(f"planning_model={settings.llm_planning_model}")
+                print(f"draft_model={settings.llm_draft_model}")
+                print(f"revision_model={settings.llm_revision_model}")
+                print(f"review_model={settings.llm_review_model}")
+                print(f"ark_base_url={settings.ark_base_url}")
+                print(f"ark_api_key_configured={bool(settings.ark_api_key)}")
+                print(f"ark_agent_plan_api_key_configured={bool(settings.ark_agent_plan_api_key)}")
+                print(f"ark_search_api_key_configured={bool(settings.ark_search_api_key)}")
+                print(f"ark_embedding_model={settings.ark_embedding_model}")
+                print(f"ark_vision_model={settings.ark_vision_model}")
+                print(f"ark_image_model={settings.ark_image_model}")
+                print(f"ark_video_model={settings.ark_video_model}")
+                print(f"legacy_require_coding_plan={settings.llm_require_coding_plan}")
                 print(f"temperature={settings.llm_temperature}")
+                print(f"planning_temperature={settings.llm_planning_temperature}")
+                print(f"draft_temperature={settings.llm_draft_temperature}")
+                print(f"revision_temperature={settings.llm_revision_temperature}")
+                print(f"review_temperature={settings.llm_review_temperature}")
                 print(f"draft_max_tokens={settings.llm_draft_max_tokens}")
                 print(f"revision_max_tokens={settings.llm_revision_max_tokens}")
                 print(f"review_max_tokens={settings.llm_review_max_tokens}")
@@ -1405,6 +1644,79 @@ def main() -> None:
                 print(f"ready_for_trial={report.ready_for_trial}")
                 print(f"weak_dimensions={weak_counts}")
                 print(f"blockers={blockers}")
+            elif args.cmd == "story-alignment-audit":
+                audit = build_story_alignment_audit(
+                    session,
+                    book_id=args.book_id,
+                    chapter_limit=args.chapter_limit,
+                )
+                print(f"story_alignment book_id={audit.book_id}")
+                print(f"title={audit.book_title}")
+                print(f"status={audit.status}")
+                print(f"score={audit.score}")
+                print(f"blockers={';'.join(audit.blockers)}")
+                for item in audit.recommendations:
+                    print(f"recommendation={item}")
+                for source in audit.source_summary:
+                    print(
+                        "\t".join(
+                            [
+                                "source",
+                                f"kind={source.kind}",
+                                f"name={source.name}",
+                                f"positive={','.join(source.positive_hits)}",
+                                f"negative={','.join(source.negative_hits)}",
+                                f"stale={','.join(source.stale_hits)}",
+                                f"preview={source.preview}",
+                            ]
+                        )
+                    )
+                for chapter in audit.chapters:
+                    print(
+                        "\t".join(
+                            [
+                                "chapter",
+                                f"number={chapter.chapter_number}",
+                                f"brief_id={chapter.brief_id or ''}",
+                                f"brief_status={chapter.brief_status}",
+                                f"brief_positive={','.join(chapter.brief_positive_hits)}",
+                                f"brief_negative={','.join(chapter.brief_negative_hits)}",
+                                f"brief_stale={','.join(chapter.brief_stale_hits)}",
+                                f"version_id={chapter.latest_version_id or ''}",
+                                f"version_status={chapter.latest_version_status}",
+                                f"content_chars={chapter.content_chars}",
+                                f"content_positive={','.join(chapter.content_positive_hits)}",
+                                f"content_negative={','.join(chapter.content_negative_hits)}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "chapter-bias-audit":
+                chapter = session.scalar(
+                    select(Chapter).where(Chapter.book_id == args.book_id, Chapter.chapter_number == args.chapter_number)
+                )
+                if not chapter:
+                    raise ValueError("chapter not found")
+                brief = session.scalar(
+                    select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc())
+                )
+                version = latest_chapter_version(session, chapter_id=chapter.id)
+                canon_context, _ = format_canon_context(session, book_id=args.book_id, chapter_number=args.chapter_number)
+                report = evaluate_generation_bias(
+                    content=version.content if version else "",
+                    goal=brief.goal if brief else "",
+                    required_beats=brief.required_beats if brief else "",
+                    constraints=brief.constraints if brief else "",
+                    canon_context=canon_context,
+                )
+                print(f"chapter_bias book_id={args.book_id}")
+                print(f"chapter_number={args.chapter_number}")
+                print(f"version_id={version.id if version else ''}")
+                print(f"version_status={version.status if version else ''}")
+                print(f"passed={report.passed}")
+                print(f"system_bias_hits={','.join(report.system_bias_hits)}")
+                print(f"model_bias_hits={','.join(report.model_bias_hits)}")
+                print(f"blockers={';'.join(report.blockers)}")
+                print(f"warnings={';'.join(report.warnings)}")
             elif args.cmd == "list-publish-jobs":
                 for job in list_publish_jobs(session, status=args.status):
                     print(f"{job.id}\tversion={job.chapter_version_id}\t{job.platform}\t{job.status}\tpayload={job.automation_payload}")
@@ -1584,6 +1896,88 @@ def main() -> None:
                             ]
                         )
                     )
+            elif args.cmd == "create-market-research-pack":
+                payload = create_market_research_pack(
+                    session,
+                    genre=args.genre,
+                    query=args.query,
+                    platform=args.platform,
+                )
+                print(f"artifact_path={payload['artifact_path']}")
+                print("queries=" + " | ".join(payload["queries"]))
+            elif args.cmd == "ingest-market-research-results":
+                if args.result_path:
+                    raw_result = Path(args.result_path).read_text(encoding="utf-8")
+                else:
+                    raw_result = args.result_json
+                if not raw_result:
+                    raise ValueError("provide --result-json or --result-path")
+                result = ingest_market_research_results(
+                    session,
+                    genre=args.genre,
+                    result_json=raw_result,
+                    source_prefix=args.source_prefix,
+                )
+                print(f"source_ids={','.join(str(item) for item in result['source_ids'])}")
+                print(f"market_signal_ids={','.join(str(item) for item in result['market_signal_ids'])}")
+            elif args.cmd == "index-book-knowledge":
+                result = index_book_knowledge(
+                    session,
+                    book_id=args.book_id,
+                    dry_run=args.dry_run,
+                    reset=args.reset,
+                    limit_chapters=args.limit_chapters,
+                )
+                print(f"book_id={result['book_id']}")
+                print(f"indexed_count={result['indexed_count']}")
+                print(f"embedding_ids={','.join(str(item) for item in result['embedding_ids'])}")
+            elif args.cmd == "retrieve-book-knowledge":
+                for hit in retrieve_book_knowledge(
+                    session,
+                    book_id=args.book_id,
+                    query=args.query,
+                    limit=args.limit,
+                    dry_run=args.dry_run,
+                ):
+                    print(
+                        "\t".join(
+                            [
+                                f"embedding_id={hit.embedding_id}",
+                                f"score={hit.score:.4f}",
+                                f"type={hit.source_type}",
+                                f"ref={hit.source_ref_id}",
+                                f"label={hit.source_label}",
+                                f"text={hit.text}",
+                            ]
+                        )
+                    )
+            elif args.cmd == "create-visual-asset":
+                asset = create_visual_asset(
+                    session,
+                    book_id=args.book_id,
+                    asset_type=args.asset_type,
+                    chapter_number=args.chapter_number or None,
+                    style=args.style,
+                    dry_run=not args.live,
+                )
+                print(f"visual_asset_id={asset.id}")
+                print(f"status={asset.status}")
+                print(f"model={asset.model}")
+                print(f"artifact_path={asset.artifact_path}")
+            elif args.cmd == "list-visual-assets":
+                for asset in list_visual_assets(session, book_id=args.book_id, asset_type=args.asset_type, limit=args.limit):
+                    print(
+                        "\t".join(
+                            [
+                                str(asset.id),
+                                f"type={asset.asset_type}",
+                                f"chapter_id={asset.chapter_id or ''}",
+                                f"status={asset.status}",
+                                f"model={asset.model}",
+                                f"artifact={asset.artifact_path}",
+                            ]
+                        )
+                    )
             elif args.cmd == "record-feedback":
                 feedback = record_platform_feedback(
                     session,
@@ -1694,6 +2088,21 @@ def main() -> None:
                 print(f"brief_id={brief.id}")
                 print(f"chapter_id={brief.chapter_id}")
                 print(f"status={brief.status}")
+            elif args.cmd == "submit-revision-suggestion":
+                feedback, adjustment, brief, version = submit_revision_suggestion(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    suggestion_text=args.suggestion,
+                    platform=args.platform,
+                    revision_mode=args.revision_mode,
+                )
+                print(f"feedback_id={feedback.id}")
+                print(f"feedback_adjustment_id={adjustment.id}")
+                print(f"brief_id={brief.id}")
+                print(f"brief_status={brief.status}")
+                print(f"latest_version_id={version.id if version else ''}")
+                print(f"latest_version_status={version.status if version else ''}")
             elif args.cmd == "add-character":
                 character = add_character(
                     session,

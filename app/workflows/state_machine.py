@@ -18,8 +18,16 @@ class Transition:
 CHAPTER_VERSION_TRANSITIONS = {
     ("draft", "reviewed_pass", "quality_pass"),
     ("draft", "needs_revision", "quality_fail"),
+    ("draft", "needs_revision", "feedback_reopen"),
     ("needs_revision", "reviewed_pass", "quality_pass"),
+    ("needs_revision", "needs_revision", "quality_fail"),
+    ("reviewed_pass", "reviewed_pass", "quality_pass"),
+    ("reviewed_pass", "needs_revision", "quality_fail"),
+    ("reviewed_pass", "needs_revision", "feedback_reopen"),
     ("reviewed_pass", "approved", "human_approve"),
+    ("approved", "approved", "quality_pass"),
+    ("approved", "needs_revision", "quality_fail"),
+    ("approved", "needs_revision", "feedback_reopen"),
 }
 
 PUBLISH_JOB_TRANSITIONS = {
@@ -46,4 +54,3 @@ def assert_transition(entity: str, current: str, target: str, action: str) -> Tr
 def move(entity: str, current: str, target: str, action: str) -> str:
     assert_transition(entity, current, target, action)
     return target
-

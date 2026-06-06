@@ -44,11 +44,14 @@ python -m app.cli llm-failure-summary --book-id 1
 python -m app.cli llm-cost-summary --book-id 1
 python -m app.cli show-llm-config
 python -m app.cli live-llm-smoke --yes --book-id 1
+python -m app.cli author-command-center --book-id 1 --chapter-number 1 --start 1 --count 20
 python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
-python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
+python -m app.cli project-snapshot-json --book-id 1 --chapter-number 1 --start 1 --count 20
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 python -m app.cli human-decision-package --book-id 1 --start 1 --count 5
 python -m app.cli production-readiness --book-id 1 --start 1 --count 5
+python -m app.cli repair-production-scaffold --book-id 1
+python -m app.cli repair-production-scaffold --book-id 1 --apply
 python -m app.cli create-chapter-brief --book-id 1 --chapter-number 1 --goal "..."
 python -m app.cli draft-chapter --book-id 1 --chapter-number 1 --dry-run
 python -m app.cli enqueue-revision --book-id 1 --chapter-number 1 --max-attempts 3
@@ -76,6 +79,37 @@ python -m app.cli restore-database --backup-path data/backups/novel-YYYYMMDD-HHM
 ```
 
 OpenClaw should not decide story canon or quality gates. It can execute approved `publish_jobs`.
+
+## Humanized Production
+
+Development documents and prior session decisions are consolidated in [`docs/README.md`](docs/README.md) and [`docs/development_archive.md`](docs/development_archive.md).
+
+The project uses a humanized writing pipeline instead of one-shot chapter generation. The source specification is in [`docs/humanized_production.md`](docs/humanized_production.md).
+
+The current product direction and staged development plan are tracked in [`docs/production_roadmap.md`](docs/production_roadmap.md). Future development should prioritize the author-mode experience: one-click production to a readable draft, soft/hard quality separation, chapter director sheets, and fewer manual workflow decisions.
+
+When a book keeps drifting away from the author's intended direction, use the root-cause workflow in [`docs/root_cause_alignment.md`](docs/root_cause_alignment.md) and run:
+
+```bash
+python -m app.cli story-alignment-audit --book-id 1 --chapter-limit 5
+```
+
+This checks whether the story foundation, bible, world rules, chapter briefs, and latest drafts are aligned before spending more tokens on rewriting.
+
+For a single chapter, separate system-context drift from model-default drift with:
+
+```bash
+python -m app.cli chapter-bias-audit --book-id 1 --chapter-number 1
+```
+
+In short:
+
+- Confirm the story promise and production skeleton item by item before drafting.
+- Turn each chapter into a 3000-4500 Chinese-character deliverable.
+- Produce chapters as a chain of roughly 500-character creative units.
+- Each unit needs a small goal, obstacle, character reaction, information gain, and micro-change.
+- If output is too short, the system appends additional small units instead of asking for a vague full-chapter expansion.
+- Revision keeps the original human note and translates it into visible scene, action, causality, and reader-experience changes.
 
 ## Inspection Commands
 
@@ -116,9 +150,26 @@ python -m app.cli show-outline --book-id 1
 python -m app.cli show-story-context --book-id 1 --chapter-number 1
 python -m app.cli plan-chapters --book-id 1 --start 1 --count 10
 python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 10
+python -m app.cli development-status --book-id 1
+```
+
+## Regression Commands
+
+Run the local regression suite before changing prompts, workflow gates, or database behavior:
+
+```bash
+venv/bin/python scripts/run_regressions.py
+```
+
+Quality sample attention is reported but does not fail the default suite. Use strict mode when the fixed quality sample set must be fully green:
+
+```bash
+venv/bin/python scripts/run_regressions.py --strict-quality
 ```
 
 ## Architecture Boundary
+
+Development follows the DNA spiral rule in [`docs/dna_spiral_development.md`](docs/dna_spiral_development.md): every capability increment should be paired with a stability anchor, CLI recovery path, Web surface, and regression check.
 
 - Python owns database state, workflow gates, chapter versions, reviews, approvals, and publish jobs.
 - LLM providers only produce draft text through controlled service calls.
@@ -227,6 +278,18 @@ python -m app.cli create-revision-brief --book-id 1 --chapter-number 2
 ```
 
 The generated revision brief includes the failed quality report ID, score, weak dimensions, rule issues, and any LLM reviewer revision suggestions/risk flags available in the quality report.
+
+When real production feels off, stop batch generation and submit a concrete rewrite contract for one chapter:
+
+```bash
+python -m app.cli submit-revision-suggestion \
+  --book-id 1 \
+  --chapter-number 2 \
+  --revision-mode fresh \
+  --suggestion "前500字必须有外部压力。主角必须主动冒险选择。不要大段解释设定。结尾要有具体危险。"
+```
+
+`--revision-mode` can be `polish` (keep structure, polish prose), `rewrite` (structural rewrite with old draft as weak Canon reference), or `fresh` (restart the chapter from the latest story skeleton and avoid old draft/old quality specifics). This records the human note, converts it into a `revision_ready` brief with must-have, must-not, and acceptance checks, and reopens the latest draft as `needs_revision`.
 
 Then create a revised draft version:
 
@@ -411,13 +474,37 @@ python -m app.cli project-dashboard --book-id 1 --start 1 --count 20
 
 It reports readiness checks, chapter next-action counts, per-chapter state, generation queue state, recent generation usage estimates, human decision counts, and one recommended next command.
 
+Use the author command center when you need the single mainline answer for the selected chapter:
+
+```bash
+python -m app.cli author-command-center --book-id 1 --chapter-number 1 --start 1 --count 20
+```
+
+It returns the current stage, headline, blockers, next actions, and the primary UI intent. The Web dashboard uses the same service so the main button and CLI diagnosis stay aligned.
+
 Use the JSON snapshot when another process needs the same state in a structured form:
 
 ```bash
-python -m app.cli project-snapshot-json --book-id 1 --start 1 --count 20
+python -m app.cli project-snapshot-json --book-id 1 --chapter-number 1 --start 1 --count 20
 ```
 
-The snapshot includes book metadata, readiness checks, chapter actions, queue status, recent generation usage, human decision items, and the recommended next command.
+The snapshot includes book metadata, readiness checks, chapter actions, queue status, recent generation usage, human decision items, the command center, and the recommended next command.
+
+Use the DNA development status report when resuming work across sessions:
+
+```bash
+python -m app.cli development-status --book-id 1
+```
+
+It combines active development documents, schema status, Agent Plan configuration, production readiness, semantic memory, blockers, and the recommended next spiral.
+
+When readiness is blocked by missing Story Bible, market evidence, or Canon scaffolding, run the DNA scaffold repair:
+
+```bash
+python -m app.cli repair-production-scaffold --book-id 1
+```
+
+By default this only previews planned changes and does not write the database. Add `--apply` to fill missing production scaffold records, record skeleton approvals, create initial chapter briefs, and keep the original production state machine intact.
 
 For a lightweight local web operator console:
 
@@ -425,7 +512,7 @@ For a lightweight local web operator console:
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` to inspect books, readiness, chapter next actions, queue health, LLM usage/cost, failed task handling, publishing targets/jobs/executions, database health/backups, chapter detail, feedback, Story/Canon/Evidence context, human decisions, and the recommended next command. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, publish dry-run, publish queue, publish retry, explicit publish confirmation, database backup, confirmed sqlite restore, plus feedback recording and feedback adjustment creation. Manual approvals and continuity writeback still require CLI confirmation.
+Open `http://127.0.0.1:8765` to use the author command center as the primary flow: readiness, selected chapter, background generation, reading/approval, and publishing preparation are presented as one mainline. Supporting panels remain available for queue health, LLM usage/cost, failed task handling, publishing targets/jobs/executions, database health/backups, chapter detail, feedback, Story/Canon/Evidence context, and human decisions. The console can run a small safe-action whitelist: one queue pass, one safe planner next action, queue task controls for pause, resume, cancel, and retry, publish dry-run, publish queue, publish retry, explicit publish confirmation, database backup, confirmed sqlite restore, plus feedback recording and feedback adjustment creation.
 
 ## Human Decision Package
 
@@ -462,7 +549,7 @@ It checks:
 - human decision package state
 - LLM configuration
 
-To verify the live Volcano Ark/Coding Plan model path, opt in explicitly:
+To verify the live Volcano Ark model path, opt in explicitly:
 
 ```bash
 python -m app.cli production-readiness --book-id 1 --start 1 --count 10 --live-llm
@@ -555,9 +642,9 @@ Draft generation uses versioned prompt templates stored in `prompt_templates`.
 
 The default drafting template is:
 
-- `draft_chapter@v3`
+- `draft_chapter@v4`
 
-`draft_chapter@v3` injects usable market evidence and Canon context into the prompt. A market signal is usable only when:
+`draft_chapter@v4` injects usable market evidence and Canon context into the prompt. A market signal is usable only when:
 
 - it has `confidence >= 60`
 - it is linked to an evidence source
@@ -613,17 +700,85 @@ python -m app.cli llm-cost-summary --book-id 1 --input-price-per-1m 1.0 --output
 
 When provider `usage` is available, the system records actual prompt/completion/total tokens. Otherwise cost reporting falls back to estimated tokens.
 
-LLM runtime settings come from `.env`:
+LLM runtime settings come from `.env`. For Agent Plan, use the dedicated Agent Plan OpenAI-compatible base URL and the dedicated Agent Plan API Key from the Volcano Ark Agent Plan console. Do not reuse a regular Ark API key for Agent Plan calls.
 
 ```bash
-MODEL_NAME=deepseek-v3.2
-LLM_TEMPERATURE=0.7
+LLM_PLAN=agent_plan
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/plan/v3
+ARK_AGENT_PLAN_API_KEY=...
+ARK_SEARCH_API_KEY=...
+TAVILY_API_KEY=...
+WEB_SEARCH_PROVIDER_ORDER=tavily,agent_plan_manual
+AGENT_PLAN_SEARCH_MONTHLY_LIMIT=150
+TAVILY_SEARCH_MONTHLY_LIMIT=1000
+MODEL_NAME=deepseek-v4-pro
+LLM_PLANNING_MODEL=deepseek-v4-flash
+LLM_DRAFT_MODEL=deepseek-v4-pro
+LLM_REVISION_MODEL=deepseek-v4-pro
+LLM_REVIEW_MODEL=deepseek-v4-flash
+ARK_EMBEDDING_MODEL=doubao-embedding-vision-251215
+ARK_VISION_MODEL=doubao-seed-2.0-lite
+ARK_IMAGE_MODEL=doubao-seedream-5.0-lite
+ARK_VIDEO_MODEL=doubao-seedance-2.0-fast
+LLM_TEMPERATURE=0.55
 LLM_DRAFT_MAX_TOKENS=3000
 LLM_REVISION_MAX_TOKENS=3000
 LLM_REVIEW_MAX_TOKENS=1200
 LLM_SMOKE_MAX_TOKENS=20
 LLM_INPUT_PRICE_PER_1M_TOKENS=0
 LLM_OUTPUT_PRICE_PER_1M_TOKENS=0
+```
+
+Agent Plan separates capabilities:
+
+- language models use the OpenAI-compatible chat API through `ARK_BASE_URL` and `ARK_AGENT_PLAN_API_KEY`
+- embedding uses `ARK_EMBEDDING_MODEL`
+- visual understanding uses `ARK_VISION_MODEL`
+- image/video generation use `ARK_IMAGE_MODEL` and `ARK_VIDEO_MODEL`
+- web search Harness uses the separate `ARK_SEARCH_API_KEY`
+- optional fallback web search can use `TAVILY_API_KEY`; the dashboard routes market search through `WEB_SEARCH_PROVIDER_ORDER`
+
+Recommended search budget split:
+
+- Use Tavily for routine market scans, trend checks, and source discovery.
+- Use Agent Plan Search for high-value final confirmation or searches that must stay inside the Agent Plan workflow.
+- Keep Tavily routine scans on `basic` depth; advanced search consumes more credits.
+- The dashboard keeps a local monthly usage counter under `outputs/web_search_usage/`; it is a safety guard, not a billing source of truth.
+- The Agent Plan enhancement cycle now performs background market evidence routing: if recent high-confidence market signals already exist, it skips search; otherwise it tries the configured provider order, imports results into Evidence/MarketSignal, and falls back to an Agent Plan manual search pack when live search is unavailable.
+- Story skeleton repair drafts use imported market signals as reader-expectation constraints. The repair layer may add platform-facing promises such as opening pressure, chapter-end hooks, visible payoff, pacing, and avoidance rules, but market signals must not override the author's core direction.
+- The dashboard includes a safe readiness repair action. It may refresh market evidence, rebuild semantic memory, and create a skeleton repair preview, but it does not apply skeleton changes, draft chapters, publish content, or spend live generation tokens without an explicit production action.
+
+Agent Plan intelligence commands:
+
+```bash
+python -m app.cli agent-plan-cycle --book-id 1 --chapter-number 1
+
+python -m app.cli create-market-research-pack --genre "玄幻都市" --platform "番茄小说" --query "2026 番茄小说 玄幻都市 爆款 趋势"
+python -m app.cli ingest-market-research-results --genre "玄幻都市" --result-path outputs/agent_plan/search-result.json
+python -m app.cli audit-evidence --genre "玄幻都市"
+
+python -m app.cli index-book-knowledge --book-id 1 --reset --dry-run
+python -m app.cli semantic-memory-status --book-id 1
+python -m app.cli retrieve-book-knowledge --book-id 1 --query "主角当前能力代价和上一章伏笔" --dry-run
+
+python -m app.cli create-visual-asset --book-id 1 --asset-type cover
+python -m app.cli create-visual-asset --book-id 1 --asset-type chapter_illustration --chapter-number 3
+python -m app.cli list-visual-assets --book-id 1
+```
+
+`agent-plan-cycle` is the recommended spiral loop for each production pass. It creates a market research pack, rebuilds semantic memory, creates Canon-bound visual prompt artifacts, and returns a compact status report. By default it uses local deterministic embeddings to avoid surprise model spend; add `--live-embedding` when you want to call the Agent Plan embedding model.
+
+`create-market-research-pack` writes a search task package for Agent Plan web search Harness/MCP. Import the returned JSON with `ingest-market-research-results`; the system stores every source as Evidence and every conclusion as a Market Signal so normal evidence auditing still applies.
+
+`index-book-knowledge` builds a semantic memory layer over Story Bible, Canon, chapters, and feedback. Use `--dry-run` for local deterministic vectors; omit it after `ARK_AGENT_PLAN_API_KEY` is configured to call the Agent Plan embedding model. `production-readiness` reports semantic memory as an Agent Plan enhancement and warns when the index is empty or older than the latest chapter version; `semantic-memory-status` prints the same status directly.
+
+`create-visual-asset` creates a Canon-bound visual prompt artifact for covers or chapter illustrations. The asset is recorded in `visual_assets` and can be passed to Agent Plan image/video generation tools without letting visual generation change story canon.
+
+The old Coding Plan gateway is only valid when intentionally using `LLM_PLAN=coding_plan` or the legacy `LLM_REQUIRE_CODING_PLAN=true` guard:
+
+```bash
+LLM_PLAN=coding_plan
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3
 ```
 
 Inspect the active values:
@@ -677,7 +832,9 @@ python -m app.cli list-feedback-adjustments --book-id 1 --status ready
 python -m app.cli apply-feedback-adjustment --adjustment-id 1
 ```
 
-`apply-feedback-adjustment` writes a new latest `chapter_brief` for the target chapter. It preserves the existing goal, adds `回应读者反馈` to required beats, and appends the adjustment text to constraints. Use `--apply-to-brief` on `create-feedback-adjustment` when you want to create and apply in one step.
+`apply-feedback-adjustment` writes a new latest `chapter_brief` for the target chapter. It preserves the existing goal, adds an explicit rewrite-contract beat, and converts the adjustment text into must-have, must-not, and acceptance-check sections. Use `--apply-to-brief` on `create-feedback-adjustment` when you want to create and apply in one step.
+
+The local dashboard wraps this same flow. In normal operation, use the frontend "修改建议" panel or the quick suggestion box on "继续生产"; the backend will record the note, generate a `revision_ready` brief, and reopen the latest chapter version as `needs_revision` when applicable.
 
 ## Story Bible And Outline
 

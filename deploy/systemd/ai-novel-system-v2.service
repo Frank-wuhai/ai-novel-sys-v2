@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Novel System v2 Local Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/frank/ai-novel-system-v2
+ExecStart=/home/frank/ai-novel-system-v2/venv/bin/python /home/frank/ai-novel-system-v2/scripts/run_local_dashboard.py --host 127.0.0.1 --port 8784
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

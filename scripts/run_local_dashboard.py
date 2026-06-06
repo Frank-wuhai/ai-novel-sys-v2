@@ -4,30 +4,57 @@ import argparse
 import difflib
 import json
 import sys
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.db.session import configure_database, session_scope
+from app.core.config import settings
 from app.models.entities import (
     Book,
     Chapter,
     ChapterBrief,
     ChapterVersion,
+    Character,
+    EvidenceSource,
     GenerationTask,
+    KnowledgeEmbedding,
+    MarketSignal,
+    PlotThread,
+    PlatformFeedback,
     PublishExecution,
     PublishJob,
     PublishingTarget,
     QualityReport,
+    PowerSystem,
+    StoryBible,
+    StoryFoundation,
+    StoryArc,
+    VisualAsset,
+    Volume,
+    WorldRule,
 )
-from app.services.canon import format_canon_context
+from app.services.agent_plan_intelligence import (
+    create_market_research_pack,
+    create_visual_asset,
+    ensure_market_research_evidence,
+    index_book_knowledge,
+    ingest_market_research_results,
+    list_visual_assets,
+    run_agent_plan_enhancement_cycle,
+)
+from app.services.web_search import run_market_web_search, web_search_status
+from app.services.canon import add_character, add_plot_thread, add_power_system, add_world_rule, format_canon_context
 from app.services.dashboard import build_project_snapshot
 from app.services.db_ops import (
     check_database_health,
@@ -36,18 +63,47 @@ from app.services.db_ops import (
     list_database_backups,
     restore_database_from_backup,
 )
-from app.services.evidence import audit_market_evidence, format_market_evidence_context
+from app.services.evidence import add_evidence_source, add_market_signal, audit_market_evidence, format_market_evidence_context
 from app.services.feedback import (
     apply_feedback_adjustment_to_brief,
     create_feedback_adjustment,
+    format_author_preference_context,
     list_feedback_adjustments,
     list_platform_feedback,
+    record_author_preference,
     record_platform_feedback,
+    submit_revision_suggestion,
     summarize_platform_feedback,
 )
 from app.services.llm_audit import llm_failure_suggestion, list_llm_request_logs, summarize_llm_failures, summarize_llm_usage
 from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
+from app.services.bias import evaluate_generation_bias
+from app.services.author_workbench import build_author_workbench_report
+from app.services.chapter_samples import (
+    adopt_chapter_sample,
+    build_chapter_sample_learning,
+    generate_chapter_samples,
+    latest_chapter_samples,
+    sync_chapter_sample_learning,
+)
+from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.author_runner import author_background_timeout_seconds, author_terminal_status, run_author_mode
+from app.services.failure_attribution import attribute_generation_failure
+from app.services.intent_acceptance import evaluate_author_intent
+from app.services.model_strategy import build_model_strategy
+from app.services.production_packet import build_chapter_production_packet
+from app.services.production_run_review import build_production_pattern_memory, latest_production_run_review, production_run_review_payload
+from app.services.production_scaffold import repair_production_scaffold
+from app.services.publish_preflight import build_publish_preflight
+from app.services.readiness import check_production_readiness
+from app.services.skeleton_governance import (
+    audit_skeleton_sources,
+    audit_story_skeleton_with_agent_evidence,
+    repair_skeleton_until_pass,
+    repair_story_skeleton_with_market_evidence,
+)
+from app.services.writer_loop import build_writer_loop_plan
 from app.llm.providers import ArkOpenAIProvider
 from app.services.llm_queue import (
     QUEUE_TYPES,
@@ -57,1343 +113,413 @@ from app.services.llm_queue import (
     resume_generation_queue_task,
     retry_generation_queue_task,
     run_generation_queue,
+    run_generation_queue_task,
 )
-from app.services.planning import AUTO_ACTIONS, run_next_action
+from app.services.planning import AUTO_ACTIONS, create_chapter_plan, plan_chapters, run_next_action, upgrade_chapter_briefs_production_standards
 from app.services.production import (
     approve_chapter,
+    auto_prepare_publish_job,
     create_book,
     create_foundation,
     execute_publish_job,
     publish_job_dry_run,
     queue_publish_job,
     retry_publish_job,
+    seed_prompts,
     upsert_publishing_target,
 )
-from app.services.continuity import record_chapter_continuity
-from app.services.story import format_story_control_context, get_story_bible, upsert_story_bible
+from app.services.continuity import default_chapter_continuity_summary, latest_version_for_chapter, record_chapter_continuity
+from app.services.story import create_story_arc, create_volume, format_story_control_context, get_story_bible, upsert_story_bible
+from app.services.story_alignment import build_story_alignment_audit
+from app.dashboard_assets import DASHBOARD_HTML as HTML
 
 
-HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AI 小说生产系统 v2</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --bg: #f6f7f9;
-      --panel: #ffffff;
-      --ink: #1f2933;
-      --muted: #627282;
-      --line: #d8dee6;
-      --accent: #0f766e;
-      --warn: #b45309;
-      --bad: #b91c1c;
-      --ok: #166534;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-    }
-    header {
-      padding: 16px 24px;
-      background: #20262e;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-    }
-    h1 { font-size: 18px; margin: 0; font-weight: 650; letter-spacing: 0; }
-    main { max-width: 1400px; margin: 0 auto; padding: 20px; }
-    .app-shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
-    .sidebar {
-      position: sticky;
-      top: 16px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-    .sidebar-title { padding: 12px 14px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); background: #fbfcfd; }
-    .nav-button {
-      width: 100%;
-      height: 42px;
-      display: flex;
-      align-items: center;
-      justify-content: flex-start;
-      border: 0;
-      border-bottom: 1px solid var(--line);
-      border-radius: 0;
-      background: #fff;
-      color: var(--ink);
-      font-weight: 600;
-    }
-    .nav-button:last-child { border-bottom: 0; }
-    .nav-button.active { background: #e7f5f2; color: #0f5f59; box-shadow: inset 3px 0 0 var(--accent); }
-    .content { min-width: 0; }
-    .module-hidden { display: none !important; }
-    .toolbar {
-      display: grid;
-      grid-template-columns: 1fr 90px 90px 90px auto;
-      gap: 10px;
-      align-items: end;
-      margin-bottom: 16px;
-    }
-    label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
-    select, input, button {
-      height: 36px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fff;
-      color: var(--ink);
-      font: inherit;
-      padding: 0 10px;
-    }
-    button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
-    .summary {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 10px;
-      margin-bottom: 16px;
-    }
-    .metric, .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-    }
-    .metric { padding: 12px; min-height: 74px; }
-    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .metric strong { font-size: 20px; }
-    .grid { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px; align-items: start; }
-    .full { margin-top: 16px; }
-    .forms { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
-    textarea {
-      min-height: 72px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 8px 10px;
-      font: inherit;
-      resize: vertical;
-    }
-    pre {
-      margin: 0;
-      padding: 12px 14px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-      color: var(--ink);
-    }
-    .panel { overflow: hidden; }
-    .panel h2 {
-      margin: 0;
-      padding: 12px 14px;
-      font-size: 14px;
-      border-bottom: 1px solid var(--line);
-      background: #fbfcfd;
-    }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    th { color: var(--muted); font-weight: 600; background: #fbfcfd; }
-    .status { font-weight: 650; }
-    .ok { color: var(--ok); }
-    .warn { color: var(--warn); }
-    .bad { color: var(--bad); }
-    .muted { color: var(--muted); }
-    .command { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
-    .stack { display: grid; gap: 16px; }
-    .empty { padding: 14px; color: var(--muted); }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
-    .actions button { height: 32px; font-size: 13px; }
-    .guide { display: grid; grid-template-columns: 1.15fr .85fr; gap: 16px; margin-bottom: 16px; }
-    .callout { padding: 14px; background: #eef8f6; border-bottom: 1px solid var(--line); color: #12433f; }
-    .callout strong { display: block; margin-bottom: 6px; font-size: 15px; }
-    .step-list { display: grid; gap: 8px; padding: 12px 14px; }
-    .step { display: grid; grid-template-columns: 28px 1fr; gap: 10px; align-items: start; }
-    .step b { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12px; }
-    .step span { color: var(--muted); font-size: 12px; }
-    .wizard-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
-    .wizard-actions button { min-height: 38px; }
-    .danger-note { color: var(--bad); font-size: 12px; padding: 0 14px 12px; }
-    .helper-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); background: #fbfcfd; }
-    .helper-row button { background: #ffffff; color: var(--ink); border-color: var(--line); }
-    .hint { color: var(--muted); font-size: 12px; padding: 0 14px 12px; line-height: 1.6; }
-    .idea-list { display: grid; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--line); }
-    .idea {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 12px;
-      background: #fff;
-      display: grid;
-      gap: 8px;
-    }
-    .idea h3 { margin: 0; font-size: 15px; }
-    .idea p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
-    .diff {
-      background: #111827;
-      color: #e5e7eb;
-      max-height: 360px;
-      overflow: auto;
-    }
-    .diff .add { color: #86efac; }
-    .diff .del { color: #fca5a5; }
-    .diff .meta { color: #93c5fd; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; border-top: 1px solid var(--line); }
-    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fff; }
-    .actions button.secondary { background: #ffffff; color: var(--ink); border-color: var(--line); }
-    @media (max-width: 900px) {
-      .app-shell, .toolbar, .summary, .grid, .forms, .guide, .wizard-actions { grid-template-columns: 1fr; }
-      .sidebar { position: static; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .sidebar-title { grid-column: 1 / -1; }
-      .nav-button { justify-content: center; }
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>AI 小说生产系统 v2</h1>
-    <div id="state" class="muted">加载中</div>
-  </header>
-  <main class="app-shell">
-    <aside class="sidebar" aria-label="功能模块">
-      <div class="sidebar-title">功能模块</div>
-      <button class="nav-button active" data-view-button="production">生产流程</button>
-      <button class="nav-button" data-view-button="newbook">创建新书</button>
-      <button class="nav-button" data-view-button="chapter">章节详情</button>
-      <button class="nav-button" data-view-button="publishing">番茄发布</button>
-      <button class="nav-button" data-view-button="feedback">读者反馈</button>
-      <button class="nav-button" data-view-button="knowledge">知识库</button>
-      <button class="nav-button" data-view-button="database">数据库</button>
-    </aside>
-    <div class="content">
-    <section class="toolbar">
-      <label>作品<select id="book"></select></label>
-      <label>起始章<input id="start" type="number" min="1" value="1"></label>
-      <label>章数<input id="count" type="number" min="1" value="20"></label>
-      <label>当前章<input id="chapter" type="number" min="1" value="1"></label>
-      <button id="refresh">刷新</button>
-    </section>
-    <section class="summary" id="summary" data-view="production"></section>
-    <section class="guide" data-view="production">
-      <section class="panel">
-        <h2>下一步该做什么</h2>
-        <div id="operationGuide"></div>
-      </section>
-      <section class="panel">
-        <h2>当前章一键流程</h2>
-        <div class="callout">
-          <strong>先选左上角作品和当前章，再点下面按钮。</strong>
-          “安全演示”不会调用真实模型；“真实生成”可能消耗 LLM 额度。
-        </div>
-        <div class="forms">
-          <label>发布平台<input id="wizardPlatform" value="番茄小说"></label>
-          <label>运行模式<select id="wizardDryRun"><option value="false">真实生成</option><option value="true">安全演示</option></select></label>
-          <label>安全上限<input id="wizardMaxSteps" type="number" min="1" max="10" value="5"></label>
-        </div>
-        <div class="wizard-actions">
-          <button id="runWizard">推进当前章</button>
-          <button id="recordContinuity" class="secondary">记录连续性</button>
-          <button id="approveWizard" class="secondary">审批当前章</button>
-        </div>
-        <label style="padding: 0 14px 12px;">连续性摘要<textarea id="continuitySummary" placeholder="质检通过后，写一句本章发生了什么；留空则系统自动生成简短摘要。"></textarea></label>
-        <div class="danger-note">“安全上限”是防止一次点击连续执行太多步骤的保险，不是章节数量。真实发布仍需要番茄登录态和发布安全开关。</div>
-      </section>
-    </section>
-    <section class="grid" data-view="production">
-      <div class="stack">
-        <section class="panel">
-          <h2>章节列表</h2>
-          <div id="chapters"></div>
-        </section>
-        <section class="panel">
-          <h2>人工决策</h2>
-          <div id="decisions"></div>
-        </section>
-      </div>
-      <div class="stack">
-        <section class="panel">
-          <h2>队列健康</h2>
-          <div id="queue"></div>
-        </section>
-        <section class="panel">
-          <h2>生产就绪</h2>
-          <div id="readiness"></div>
-        </section>
-        <section class="panel">
-          <h2>模型用量与成本</h2>
-          <div id="llmUsage"></div>
-        </section>
-        <section class="panel">
-          <h2>失败任务处理</h2>
-          <div id="failedTasks"></div>
-        </section>
-        <section class="panel">
-          <h2>下一步建议</h2>
-          <div id="recommendation" class="empty"></div>
-          <div class="actions">
-            <button id="runQueue">运行一次队列</button>
-            <button id="runNext" class="secondary">执行安全下一步</button>
-          </div>
-        </section>
-      </div>
-    </section>
-    <section class="panel full" data-view="newbook">
-      <h2>创建新书</h2>
-      <div class="callout">
-        <strong>你只需要填书名；其他不会写的地方，可以让系统先补一版。</strong>
-        创建完成后，系统会自动切换到新书，然后回到“生产流程”推进第一章。
-      </div>
-      <div class="helper-row">
-        <button id="checkLLMForIdeas">检测模型连接</button>
-        <button id="brainstormNewBook">AI 构思 3 个方向</button>
-        <button id="reviseNewBookIdeas">按补充意见重构思</button>
-        <button id="fillNewBookDefaults">自动补全空白</button>
-        <button id="applyFanqieTemplate">套用番茄玄幻模板</button>
-        <button id="clearNewBookDraft">清空草稿</button>
-      </div>
-      <div id="newBookLLMStatus" class="hint">AI 构思需要真实模型连接。若检测失败，请先处理模型配置或网络。</div>
-      <div id="newBookIdeas"></div>
-      <div class="hint">你可以先只写一段自然语言想法，比如“我想写一个底层少年靠推演能力逆袭，但不要太套路”。AI 会扩展成 3 个方向；不满意就写补充意见再重构思。</div>
-      <div class="forms">
-        <label style="grid-column: 1 / -1;">我的想法<textarea id="newBookIdeaPrompt" placeholder="随便写：题材、主角、能力、爽点、禁忌、你不想要的套路都可以。"></textarea></label>
-        <label style="grid-column: 1 / -1;">补充意见<textarea id="newBookIdeaFeedback" placeholder="如果 3 个方向不满意，在这里写：比如更黑暗一点、不要系统流、女主少一点、节奏更快、换成都市背景。"></textarea></label>
-        <label>书名<input id="newBookTitle" placeholder="AI 会建议，也可手动改"></label>
-        <label>类型<input id="newBookGenre" value="玄幻脑洞"></label>
-        <label>目标平台<input id="newBookPlatform" value="番茄小说"></label>
-        <label>读者承诺<input id="newBookPromise" placeholder="不会写可留空，系统会补"></label>
-        <label style="grid-column: 1 / -1;">一句话核心设定<textarea id="newBookPremise" placeholder="主角是谁，获得什么能力，面对什么冲突。"></textarea></label>
-        <label style="grid-column: 1 / -1;">世界规则<textarea id="newBookWorld" placeholder="不会写可留空：系统会补世界如何运转、力量体系或时代背景。"></textarea></label>
-        <label style="grid-column: 1 / -1;">主角动力<textarea id="newBookProtagonist" placeholder="不会写可留空：系统会补主角欲望、缺陷、成长方向。"></textarea></label>
-        <label style="grid-column: 1 / -1;">长期冲突<textarea id="newBookConflict" placeholder="不会写可留空：系统会补主要敌人、压力来源、长期矛盾。"></textarea></label>
-        <button id="createNewBook">创建并切换到新书</button>
-      </div>
-    </section>
-    <section class="panel full" data-view="chapter">
-      <h2>章节详情</h2>
-      <div id="chapterDetail"></div>
-    </section>
-    <section class="panel full" data-view="feedback">
-      <h2>读者反馈</h2>
-      <div id="feedback"></div>
-      <div class="forms">
-        <label>平台<input id="feedbackPlatform" value="manual"></label>
-        <label>指标<input id="feedbackMetric" value="comment"></label>
-        <label>数值<input id="feedbackValue" value=""></label>
-        <label>目标章<input id="feedbackTarget" type="number" min="1" value="1"></label>
-        <button id="recordFeedback">记录反馈</button>
-        <label style="grid-column: 1 / -1;">反馈原文<textarea id="feedbackRaw"></textarea></label>
-        <label>反馈 ID<input id="adjustmentFeedbackIds" placeholder="1,2"></label>
-        <label>调整目标章<input id="adjustmentTarget" type="number" min="1" value="1"></label>
-        <label style="grid-column: span 2;">调整内容<input id="adjustmentText"></label>
-        <button id="createAdjustment">创建调整</button>
-      </div>
-    </section>
-    <section class="panel full" data-view="publishing">
-      <h2>发布配置与任务</h2>
-      <div id="publishing"></div>
-      <div class="forms">
-        <label>平台<input id="publishTargetPlatform" value="番茄小说"></label>
-        <label>账号标签<input id="publishTargetAccount" value="main"></label>
-        <label>作品标识<input id="publishTargetWork" value="fanqie-work-id"></label>
-        <label>自动化模式<input id="publishTargetMode" value="fanqie_playwright"></label>
-        <button id="savePublishTarget">保存发布目标</button>
-        <label style="grid-column: 1 / -1;">番茄发布配置<textarea id="publishTargetConfig">{"writer_url":"https://fanqienovel.com/writer/zone","cdp_url":"http://127.0.0.1:9222","publish_mode":"immediate","enable_real_publish":false}</textarea></label>
-      </div>
-    </section>
-    <section class="panel full" data-view="database">
-      <h2>数据库安全</h2>
-      <div id="databaseOps"></div>
-      <div class="forms">
-        <label>备份标签<input id="databaseBackupLabel" value="dashboard"></label>
-        <button id="createDatabaseBackup">创建备份</button>
-        <label style="grid-column: 1 / -1;">恢复备份路径<input id="databaseRestorePath" placeholder="data/backups/example.db"></label>
-        <button id="restoreDatabase">恢复数据库</button>
-      </div>
-    </section>
-    <section class="panel full" data-view="knowledge">
-      <h2>知识上下文</h2>
-      <div id="knowledge"></div>
-    </section>
-    </div>
-  </main>
-  <script>
-    const $ = (id) => document.getElementById(id);
-    let currentSnapshot = null;
-    let activeView = 'production';
+_BACKGROUND_LOCK = threading.Lock()
+_BACKGROUND_RUNS: dict[str, dict] = {}
 
-    function setActiveView(view) {
-      activeView = view;
-      document.querySelectorAll('[data-view]').forEach((section) => {
-        section.classList.toggle('module-hidden', section.dataset.view !== activeView);
-      });
-      document.querySelectorAll('[data-view-button]').forEach((button) => {
-        button.classList.toggle('active', button.dataset.viewButton === activeView);
-      });
-    }
 
-    async function loadBooks() {
-      const books = await fetchJson('/api/books');
-      renderBookOptions(books);
-      if (books.length) await refresh();
-      else $('state').textContent = '暂无作品';
-    }
-
-    function renderBookOptions(books, selectedId = '') {
-      $('book').innerHTML = books.map((book) =>
-        `<option value="${book.id}" ${String(book.id) === String(selectedId) ? 'selected' : ''}>${escapeHtml(book.title)} #${book.id}</option>`
-      ).join('');
-    }
-
-    async function refresh() {
-      const bookId = $('book').value;
-      if (!bookId) return;
-      $('state').textContent = '刷新中';
-      const params = new URLSearchParams({book_id: bookId, start: $('start').value, count: $('count').value});
-      const chapterParams = new URLSearchParams({book_id: bookId, chapter_number: $('chapter').value});
-      const [snapshot, health] = await Promise.all([
-        fetchJson('/api/snapshot?' + params.toString()),
-        fetchJson('/api/queue-health')
-      ]);
-      const [detail, feedback, knowledge, llmUsage, failedTasks, publishing, databaseOps] = await Promise.all([
-        fetchJson('/api/chapter-detail?' + chapterParams.toString()),
-        fetchJson('/api/feedback?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/knowledge?' + chapterParams.toString()),
-        fetchJson('/api/llm-usage?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/failed-tasks?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/publishing?book_id=' + encodeURIComponent(bookId)),
-        fetchJson('/api/database')
-      ]);
-      currentSnapshot = snapshot;
-      renderSummary(snapshot, health);
-      renderChapters(snapshot.chapters);
-      renderDecisions(snapshot.human_decisions.items);
-      renderQueue(snapshot, health);
-      renderReadiness(snapshot.readiness);
-      renderLLMUsage(llmUsage);
-      renderFailedTasks(failedTasks);
-      renderChapterDetail(detail);
-      renderFeedback(feedback);
-      renderPublishing(publishing);
-      renderDatabaseOps(databaseOps);
-      renderKnowledge(knowledge);
-      renderOperationGuide(snapshot, health);
-      $('recommendation').innerHTML = `<div class="empty">${escapeHtml(nextStepText(snapshot, health))}</div>`;
-      $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
-    }
-
-    async function fetchJson(path) {
-      const response = await fetch(path);
-      if (!response.ok) throw new Error(await response.text());
-      return response.json();
-    }
-
-    async function postAction(action, payload = {}) {
-      $('state').textContent = `执行中：${actionLabel(action)}`;
-      const response = await fetch('/api/action', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({action, ...payload})
-      });
-      if (!response.ok) throw new Error(friendlyError(await response.text()));
-      const result = await response.json();
-      $('state').textContent = `${actionLabel(action)}：${statusLabel(result.status || 'done')}`;
-      await refresh();
-      return result;
-    }
-
-    function friendlyError(text) {
-      const value = String(text || '').replace(/^ERROR:\s*/, '');
-      if (value.includes('APIConnectionError') || value.includes('Connection error') || value.includes('network')) {
-        return '模型连接失败：当前无法连接到真实模型服务。请先点击“检测模型连接”，并检查网络、代理或 ARK_BASE_URL / ARK_API_KEY 配置。';
-      }
-      if (value.includes('ARK_API_KEY') || value.includes('ARK_BASE_URL')) {
-        return '模型配置不完整：请检查 .env 里的 ARK_API_KEY 和 ARK_BASE_URL。';
-      }
-      if (value.includes('JSON')) {
-        return '模型返回格式不符合要求，请点“按补充意见重构思”再试一次。原始错误：' + value;
-      }
-      return value;
-    }
-
-    function renderSummary(snapshot, health) {
-      const queueCounts = health.counts || {};
-      const decisions = snapshot.human_decisions;
-      $('summary').innerHTML = [
-        metric('就绪状态', snapshot.readiness.passed ? '通过' : '阻塞', snapshot.readiness.passed ? 'ok' : 'bad'),
-        metric('待执行', queueCounts.pending || 0, 'warn'),
-        metric('失败', queueCounts.failed || 0, (queueCounts.failed || 0) ? 'bad' : 'ok'),
-        metric('Token', snapshot.generation_recent.estimated_tokens || 0, ''),
-        metric('人工事项', decisions.continuity + decisions.approval + decisions.publish + decisions.inspect, 'warn')
-      ].join('');
-    }
-
-    function metric(label, value, cls) {
-      return `<div class="metric"><span>${label}</span><strong class="${cls}">${value}</strong></div>`;
-    }
-
-    function renderOperationGuide(snapshot, health) {
-      const chapter = selectedChapter(snapshot);
-      const queueCounts = health.counts || {};
-      const steps = [
-        ['选章节', `当前选择第 ${$('chapter').value || 1} 章。`],
-        ['生成', chapter ? generationHint(chapter) : '没有找到当前章，请先刷新或调整章节号。'],
-        ['审核', chapter ? approvalHint(chapter) : '生成并质检通过后，这里会提示是否需要记录连续性和审批。'],
-        ['发布', publishHint(chapter)]
-      ];
-      $('operationGuide').innerHTML =
-        `<div class="callout"><strong>${escapeHtml(nextStepText(snapshot, health))}</strong><span>待生成任务：${queueCounts.pending || 0}，失败任务：${queueCounts.failed || 0}</span></div>` +
-        `<div class="step-list">${steps.map((item, index) => `
-          <div class="step"><b>${index + 1}</b><div><strong>${escapeHtml(item[0])}</strong><br><span>${escapeHtml(item[1])}</span></div></div>
-        `).join('')}</div>`;
-    }
-
-    function selectedChapter(snapshot) {
-      const number = Number($('chapter').value || 1);
-      return (snapshot.chapters || []).find((item) => Number(item.number) === number) || null;
-    }
-
-    function nextStepText(snapshot, health) {
-      const queueCounts = health.counts || {};
-      if ((queueCounts.pending || 0) > 0) return '有待执行生成任务，请先点“运行一次队列”。';
-      if ((queueCounts.failed || 0) > 0) return '有失败任务，请在“失败任务处理”里重试或取消。';
-      const chapter = selectedChapter(snapshot);
-      if (!chapter) return '请选择一个章节，然后点击刷新。';
-      if (chapter.next_action === 'record_chapter_continuity') return '当前章已质检通过，请点“记录连续性”。';
-      if (chapter.next_action === 'approve_chapter') return '连续性已记录，请点“审批当前章”。';
-      if (chapter.next_action === 'mark_publish_job') return '发布任务已入队，请在“发布配置与任务”里做最终检查。';
-      if (chapter.next_action === 'done') return '当前章已经完成。可以切到下一章。';
-      return `当前章下一步：${actionLabel(chapter.next_action)}。可点“推进当前章”。`;
-    }
-
-    function generationHint(chapter) {
-      const action = chapter.next_action;
-      if (['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter'].includes(action)) {
-        return `点击“推进当前章”，系统会执行：${actionLabel(action)}。`;
-      }
-      if (action === 'wait_generation_task') return '已有生成任务在队列里，请点“运行一次队列”或等待完成。';
-      return `生成阶段状态：${statusLabel(chapter.version_status || '') || '未开始'}。`;
-    }
-
-    function approvalHint(chapter) {
-      if (chapter.next_action === 'record_chapter_continuity') return '点“记录连续性”，留空也可以自动生成摘要。';
-      if (chapter.next_action === 'approve_chapter') return '点“审批当前章”，审批后才能创建发布任务。';
-      if (chapter.quality_passed) return '质检已通过。';
-      return '还没到人工审批阶段。';
-    }
-
-    function publishHint(chapter) {
-      if (!chapter) return '暂无发布信息。';
-      if (!chapter.publish_job_id && chapter.next_action !== 'create_publish_job') return '章节审批后才会出现发布任务。';
-      if (chapter.next_action === 'create_publish_job') return '点“推进当前章”会创建番茄发布任务。';
-      if (chapter.publish_status) return `发布任务状态：${statusLabel(chapter.publish_status)}。`;
-      return '暂无发布任务。';
-    }
-
-    function renderChapters(chapters) {
-      if (!chapters.length) return empty('chapters');
-      $('chapters').innerHTML = table(['章', '版本状态', '质检', '下一步', '原因'], chapters.map((item) => [
-        `<button class="secondary" data-select-chapter="${item.number}">${item.number}</button>`,
-        escapeHtml(statusLabel(item.version_status || 'missing')),
-        escapeHtml(qualityLabel(item.quality_passed)),
-        escapeHtml(actionLabel(item.next_action)),
-        escapeHtml(item.reason)
-      ]), true);
-    }
-
-    function renderDecisions(items) {
-      if (!items.length) return empty('decisions');
-      $('decisions').innerHTML = table(['类型', '章节', '原因', '建议'], items.map((item) => [
-        decisionLabel(item.type),
-        item.chapter,
-        reasonLabel(item.reason),
-        decisionSuggestion(item)
-      ]), true);
-    }
-
-    function renderQueue(snapshot, health) {
-      const rows = Object.entries(health.counts || {}).map(([name, count]) => [name, count]);
-      const runningRows = (health.running_tasks || []).map((item) => [
-        `运行 #${item.task_id}`,
-        item.chapter_number || '',
-        `${item.running_age_seconds || 0}s`,
-        `${item.timeout_seconds || 0}s`,
-        item.stale ? '<span class="bad">已超时</span>' : '<span class="ok">运行中</span>',
-        item.recoverable ? '是' : '否'
-      ]);
-      const failureRows = (health.latest_failures || []).map((item) => [
-        `失败 #${item.task_id}`,
-        item.chapter_number || '',
-        errorLabel(item.error_category || ''),
-        item.error || ''
-      ]);
-      const taskRows = (snapshot.generation_queue.tasks || []).map((item) => [
-        escapeHtml(`任务 #${item.id}`),
-        escapeHtml(item.chapter || ''),
-        escapeHtml(statusLabel(item.status)),
-        escapeHtml(modelParamLabel(item.llm_parameters || {})),
-        escapeHtml(item.status === 'running' ? `${item.running_age_seconds || 0}s / ${item.timeout_seconds || 0}s` : errorLabel(item.error_category || '')),
-        queueButtons(item)
-      ]);
-      $('queue').innerHTML =
-        table(['状态', '数量'], rows.map(([name, count]) => [statusLabel(name), count])) +
-        table(['运行任务', '章节', '已运行', '超时阈值', '状态', '可恢复'], runningRows, true) +
-        table(['最近失败', '章节', '类型', '详情'], failureRows) +
-        table(['任务', '章节', '状态', '模型参数', '运行/详情', '操作'], taskRows, true);
-    }
-
-    function modelParamLabel(params) {
-      if (!params || !Object.keys(params).length) return '';
-      return `${params.provider_mode || ''} ${params.requested_model || ''} 上限=${params.max_tokens || ''} 温度=${params.temperature ?? ''}`;
-    }
-
-    function queueButtons(item) {
-      const buttons = [];
-      if (item.status === 'pending') {
-        buttons.push(actionButton('暂停', 'pause_queue_task', item.id));
-        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
-      } else if (item.status === 'paused') {
-        buttons.push(actionButton('恢复', 'resume_queue_task', item.id));
-        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
-      } else if (item.status === 'failed') {
-        buttons.push(actionButton('重试', 'retry_queue_task', item.id));
-        buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
-      }
-      return `<div class="actions">${buttons.join('')}</div>`;
-    }
-
-    function actionButton(label, action, taskId) {
-      return `<button class="secondary" data-action="${action}" data-task-id="${taskId}">${label}</button>`;
-    }
-
-    function renderReadiness(readiness) {
-      $('readiness').innerHTML = table(['检查项', '结果', '详情'], readiness.checks.map((item) => [
-        readinessLabel(item.name),
-        `<span class="${item.passed ? 'ok' : 'bad'}">${item.passed ? '通过' : '未通过'}</span>`,
-        reasonLabel(item.detail)
-      ]), true);
-    }
-
-    function renderLLMUsage(payload) {
-      const usage = payload.usage;
-      const cost = payload.cost;
-      $('llmUsage').innerHTML =
-        table(['指标', '值'], [
-          ['请求数', usage.request_count],
-          ['完成', usage.completed_count],
-          ['失败', usage.failed_count],
-          ['估算用量', usage.estimated_total_tokens],
-          ['实际用量', usage.actual_total_tokens],
-          ['计费用量', usage.billable_total_tokens],
-          ['输入用量', usage.billable_prompt_tokens],
-          ['输出用量', usage.billable_response_tokens],
-          ['估算成本', `${cost.estimated_cost} ${cost.currency}`],
-          ['模型', cost.model]
-        ]) +
-        table(['请求', '类型', '状态', '模型', 'Token', '耗时'], payload.recent_requests.map((item) => [
-          item.id,
-          taskTypeLabel(item.task_type),
-          statusLabel(item.status),
-          item.model,
-          item.actual_total_tokens || item.estimated_total_tokens,
-          `${item.elapsed_ms} 毫秒`
-        ]));
-    }
-
-    function renderFailedTasks(payload) {
-      const counts = Object.entries(payload.by_error_category || {}).map(([name, count]) => [errorLabel(name), count]);
-      const llmRows = (payload.llm_failures || []).map((item) => [
-        errorLabel(item.error_category),
-        item.count,
-        item.latest_request_id,
-        taskTypeLabel(item.latest_task_type),
-        item.latest_model,
-        item.suggestion
-      ]);
-      const rows = payload.items.map((item) => [
-        item.id,
-        taskTypeLabel(item.task_type),
-        item.chapter_number || '',
-        errorLabel(item.error_category || ''),
-        item.error || '',
-        item.is_queue_task ? queueFailureButtons(item) : '<span class="muted">查看任务详情</span>'
-      ]);
-      $('failedTasks').innerHTML =
-        table(['错误类型', '数量'], counts) +
-        table(['LLM 错误', '次数', '最近请求', '类型', '模型', '处理建议'], llmRows) +
-        table(['任务', '类型', '章节', '错误', '详情', '操作'], rows, true);
-    }
-
-    function queueFailureButtons(item) {
-      return `<div class="actions">${actionButton('重试', 'retry_queue_task', item.id)}${actionButton('取消', 'cancel_queue_task', item.id)}</div>`;
-    }
-
-    function renderChapterDetail(detail) {
-      if (!detail.chapter) {
-        $('chapterDetail').innerHTML = '<div class="empty">章节不存在</div>';
-        return;
-      }
-      const brief = detail.latest_brief;
-      const quality = detail.latest_quality;
-      const qualityData = quality?.data || null;
-      const llmReview = qualityData?.llm_review || null;
-      $('chapterDetail').innerHTML =
-        table(['字段', '值'], [
-          ['章节 ID', detail.chapter.id],
-          ['章节号', detail.chapter.number],
-          ['状态', statusLabel(detail.chapter.status)],
-          ['最新 Brief', brief ? `#${brief.id} ${statusLabel(brief.status)}` : ''],
-          ['最新质检', quality ? `${quality.passed ? '通过' : '未通过'} 分数=${quality.score}` : '']
-        ]) +
-        (brief ? `<pre>${escapeHtml(['目标：' + brief.goal, '必要节拍：' + brief.required_beats, '硬约束：' + brief.constraints].join('\n'))}</pre>` : '') +
-        renderQualityDetail(qualityData) +
-        renderLLMReview(llmReview) +
-        renderVersionDiff(detail.version_diff) +
-        table(['版本', '状态', '来源', '字数', '标题'], detail.versions.map((item) => [
-          item.id,
-          statusLabel(item.status),
-          item.source,
-          item.content_chars,
-          item.title
-        ])) +
-        table(['任务', '类型', '状态', '尝试', '错误'], detail.generation_tasks.map((item) => [
-          item.id,
-          taskTypeLabel(item.type),
-          statusLabel(item.status),
-          item.attempt || '',
-          errorLabel(item.error_category || '')
-        ]));
-    }
-
-    function renderQualityDetail(data) {
-      if (!data) return '<div class="empty">暂无质检报告</div>';
-      const dimensions = Object.entries(data.dimensions || {}).sort((a, b) => a[0].localeCompare(b[0]));
-      const issues = data.issues || [];
-      return '<h2>质检报告</h2>' +
-        table(['状态', '分数', '中文字数'], [[qualityStatusLabel(data.status || ''), data.score ?? '', data.chinese_chars ?? '']]) +
-        table(['维度', '分数'], dimensions.map(([name, score]) => [
-          escapeHtml(dimensionLabel(name)),
-          `<span class="${score < 50 ? 'bad' : score < 70 ? 'warn' : 'ok'}">${score}</span>`
-        ]), true) +
-        chips('问题', issues);
-    }
-
-    function renderLLMReview(review) {
-      if (!review) return '<div class="empty">暂无模型二审结果</div>';
-      return '<h2>模型二审</h2>' +
-        table(['字段', '值'], [
-          ['状态', statusLabel(review.status || '')],
-          ['结论', verdictLabel(review.verdict || '')],
-          ['分数', review.score ?? ''],
-          ['供应商', review.provider || ''],
-          ['模型', review.model || ''],
-          ['任务', review.generation_task_id || '']
-        ]) +
-        chips('优点', review.strengths || []) +
-        chips('二审问题', review.issues || []) +
-        chips('修订建议', review.revision_suggestions || []) +
-        chips('风险标记', review.risk_flags || []);
-    }
-
-    function renderVersionDiff(diff) {
-      if (!diff || !diff.text) return '<div class="empty">暂无版本对比</div>';
-      return '<h2>最新版本对比</h2>' +
-        table(['旧版本', '新版本'], [[`#${diff.left_version_id}`, `#${diff.right_version_id}`]]) +
-        `<pre class="diff">${formatDiff(diff.text)}</pre>`;
-    }
-
-    function formatDiff(text) {
-      return escapeHtml(text).split('\n').map((line) => {
-        if (line.startsWith('+') && !line.startsWith('+++')) return `<span class="add">${line}</span>`;
-        if (line.startsWith('-') && !line.startsWith('---')) return `<span class="del">${line}</span>`;
-        if (line.startsWith('@@') || line.startsWith('---') || line.startsWith('+++')) return `<span class="meta">${line}</span>`;
-        return line;
-      }).join('\n');
-    }
-
-    function chips(title, items) {
-      const values = (items || []).map((item) => `<span class="chip">${escapeHtml(item)}</span>`).join('');
-      return `<div class="chips"><strong>${escapeHtml(title)}</strong>${values || '<span class="muted">无</span>'}</div>`;
-    }
-
-    function renderFeedback(payload) {
-      $('feedbackTarget').value = $('chapter').value;
-      $('adjustmentTarget').value = $('chapter').value;
-      $('feedback').innerHTML =
-        table(['指标', '数量'], Object.entries(payload.summary.by_metric || {})) +
-        table(['反馈', '平台', '指标', '数值', '原文'], payload.items.map((item) => [
-          `<button class="secondary" data-add-feedback-id="${item.id}">${item.id}</button>`,
-          escapeHtml(item.platform),
-          escapeHtml(item.metric_name),
-          escapeHtml(item.metric_value),
-          escapeHtml(item.raw_text)
-        ]), true) +
-        table(['调整', '目标章', '状态', '反馈', '内容'], payload.adjustments.map((item) => [
-          item.id,
-          item.target_chapter_number,
-          statusLabel(item.status),
-          item.feedback_ids,
-          item.adjustment_text
-        ]));
-    }
-
-    function renderPublishing(payload) {
-      $('publishing').innerHTML =
-        table(['目标', '平台', '账号', '作品', '模式', '状态'], payload.targets.map((item) => [
-          item.id,
-          item.platform,
-          item.account_label,
-          item.work_identifier,
-          automationModeLabel(item.automation_mode),
-          statusLabel(item.status)
-        ])) +
-        table(['任务', '版本', '章节', '平台', '状态', '预览', '操作'], payload.jobs.map((item) => [
-          item.id,
-          item.version_id,
-          item.chapter_number || '',
-          item.platform,
-          statusLabel(item.status),
-          `<details><summary>查看章节内容和执行报告</summary><pre>${escapeHtml(item.preview.title + '\n字数：' + item.preview.content_chars + '\n\n' + item.preview.content_excerpt)}</pre><pre>${escapeHtml(reportLabel(item.result_report || ''))}</pre></details>`,
-          publishButtons(item)
-        ]), true) +
-        table(['执行', '任务', '平台', '状态', '模式', '报告'], payload.executions.map((item) => [
-          item.id,
-          item.publish_job_id,
-          item.platform,
-          statusLabel(item.status),
-          automationModeLabel(item.automation_mode),
-          reportLabel(item.report)
-        ]));
-    }
-
-    function publishButtons(item) {
-      const buttons = [];
-      if (item.status === 'pending') buttons.push(actionButton('生成发布预览', 'publish_dry_run', item.id));
-      if (item.status === 'dry_run_ready') buttons.push(actionButton('进入待发布', 'queue_publish_job', item.id));
-      if (item.status === 'queued') {
-        buttons.push(actionButton('最终检查', 'execute_publish_job_blocked', item.id));
-        buttons.push(actionButton('尝试发布到平台', 'execute_publish_job_confirm', item.id));
-      }
-      if (item.status === 'failed') buttons.push(actionButton('重试发布', 'retry_publish_job', item.id));
-      return `<div class="actions">${buttons.join('')}</div>`;
-    }
-
-    function renderDatabaseOps(payload) {
-      const health = payload.health;
-      const schema = payload.schema_version;
-      $('databaseOps').innerHTML =
-        table(['检查项', '值'], [
-          ['数据库地址', health.database_url],
-          ['SQLite 文件', health.sqlite_path],
-          ['数据表数量', health.table_count],
-          ['迁移脚本数量', health.migration_count],
-          ['最新迁移', health.latest_migration],
-          ['备份数量', health.backup_count]
-        ]) +
-        table(['Schema', '值'], [
-          ['状态', statusLabel(schema.status)],
-          ['当前版本', schema.current_versions.join(',')],
-          ['代码期望版本', schema.expected_head],
-          ['说明', schema.message]
-        ]) +
-        table(['备份', '状态', '大小', '路径', '报告'], payload.backups.map((item) => [
-          `<button class="secondary" data-use-backup-path="${escapeHtml(item.backup_path)}">#${item.id}</button>`,
-          statusLabel(item.status),
-          formatBytes(item.size_bytes),
-          `<span class="command">${escapeHtml(item.backup_path)}</span>`,
-          escapeHtml(item.report)
-        ]), true);
-    }
-
-    function renderKnowledge(payload) {
-      $('knowledge').innerHTML =
-        table(['故事圣经', '状态'], [[payload.story_bible?.id || '', statusLabel(payload.story_bible?.status || 'missing')]]) +
-        `<pre>${escapeHtml('故事上下文\n' + payload.story_context + '\n\nCanon 上下文\n' + payload.canon_context + '\n\n市场证据\n' + payload.evidence_context)}</pre>` +
-        table(['信号', '可用', '原因', '来源'], payload.evidence_audit.map((item) => [
-          item.signal_id,
-          item.usable ? '是' : '否',
-          item.reasons.join(',') || '可用',
-          item.source
-        ]));
-    }
-
-    function table(headers, rows, trusted = false) {
-      const head = headers.map((item) => `<th>${escapeHtml(String(item))}</th>`).join('');
-      const body = rows.map((row) => `<tr>${row.map((item) => `<td>${trusted ? item : escapeHtml(String(item ?? ''))}</td>`).join('')}</tr>`).join('');
-      return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-    }
-
-    function empty(id) {
-      $(id).innerHTML = '<div class="empty">暂无数据</div>';
-    }
-
-    function escapeHtml(value) {
-      return String(value).replace(/[&<>"']/g, (char) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'}[char]));
-    }
-
-    const STATUS_LABELS = {
-      active: '启用',
-      approved: '已审批',
-      applied: '已应用',
-      blocked: '阻塞',
-      canceled: '已取消',
-      created: '已创建',
-      completed: '已完成',
-      done: '完成',
-      draft: '草稿',
-      dry_run_ready: '干跑通过',
-      executed: '已执行',
-      failed: '失败',
-      missing: '缺失',
-      needs_revision: '需修订',
-      ok: '正常',
-      no_version: '无版本',
-      pass: '通过',
-      paused: '已暂停',
-      pending: '待执行',
-      planned: '已规划',
-      planning: '规划中',
-      published: '已发布',
-      queued: '已入队',
-      ready: '就绪',
-      recorded: '已记录',
-      reviewed_pass: '质检通过',
-      restored: '已恢复',
-      revision_ready: '修订就绪',
-      running: '运行中',
-      saved: '已保存',
-      ahead_or_diverged: '版本异常',
-      current: '当前最新',
-      current_with_extra_heads: '当前含额外分支',
-      behind: '落后',
-      no_migrations: '无迁移',
-      unversioned: '未版本化'
-    };
-    const ACTION_LABELS = {
-      approve_chapter: '人工审批章节',
-      backup_database: '创建数据库备份',
-      cancel_queue_task: '取消队列任务',
-      create_chapter_brief: '创建写作说明',
-      create_feedback_adjustment: '创建反馈调整',
-      create_publish_job: '创建发布任务',
-      create_revision_brief: '创建修订说明',
-      draft_chapter: '生成章节草稿',
-      mark_publish_job: '确认发布结果',
-      pause_queue_task: '暂停队列任务',
-      publish_job_dry_run: '生成发布预览',
-      queue_publish_job: '进入待发布',
-      record_chapter_continuity: '回写连续性',
-      record_feedback: '记录反馈',
-      resume_queue_task: '恢复队列任务',
-      retry_publish_job: '重试发布任务',
-      retry_queue_task: '重试队列任务',
-      review_chapter: '质检章节',
-      revise_chapter: '修订章节',
-      restore_database: '恢复数据库',
-      run_next_action: '执行安全下一步',
-      run_current_until_blocked: '推进当前章',
-      record_continuity_dashboard: '记录连续性',
-      approve_current_chapter: '审批当前章',
-      run_queue: '运行队列',
-      done: '已完成',
-      wait_generation_task: '等待生成任务'
-    };
-    const DECISION_LABELS = {
-      continuity_writeback: '连续性回写',
-      human_approval: '人工审批',
-      final_publish_confirmation: '最终发布确认',
-      manual_inspection: '人工检查'
-    };
-    const READINESS_LABELS = {
-      foundation: '故事地基',
-      story_bible: '故事圣经',
-      evidence: '市场证据',
-      canon: 'Canon',
-      chapter_queue: '章节队列',
-      human_decisions: '人工决策',
-      llm: '模型配置'
-    };
-    const DIMENSION_LABELS = {
-      arc_alignment: '剧情段对齐',
-      basic_publishability: '基础可发布性',
-      brief_coverage: '写作说明覆盖',
-      canon_consistency: 'Canon 一致性',
-      choice_and_cost: '选择与代价',
-      conflict_pressure: '冲突压力',
-      hook_strength: '章末钩子',
-      platform_risk: '平台风险',
-      prose_density: '文本密度',
-      reader_momentum: '读者推动力',
-      setting_risk: '设定风险'
-    };
-    const ERROR_LABELS = {
-      auth: '鉴权失败',
-      context_length: '上下文过长',
-      execution: '执行错误',
-      network: '网络错误',
-      permission: '权限错误',
-      provider: '供应商错误',
-      rate_limit: '限流',
-      structured_output: '结构化输出错误',
-      timeout: '超时',
-      validation: '校验错误'
-    };
-    const TASK_TYPE_LABELS = {
-      draft_chapter: '生成章节',
-      revise_chapter: '修订章节',
-      llm_review_chapter: '模型二审',
-      live_llm_smoke: '真实模型小测'
-    };
-    function statusLabel(value) { return STATUS_LABELS[value] || value || ''; }
-    function actionLabel(value) { return ACTION_LABELS[value] || value || ''; }
-    function decisionLabel(value) { return DECISION_LABELS[value] || value || ''; }
-    function readinessLabel(value) { return READINESS_LABELS[value] || value || ''; }
-    function dimensionLabel(value) { return DIMENSION_LABELS[value] || value || ''; }
-    function errorLabel(value) { return ERROR_LABELS[value] || value || ''; }
-    function taskTypeLabel(value) { return TASK_TYPE_LABELS[value] || value || ''; }
-    function automationModeLabel(value) {
-      if (value === 'fanqie_playwright') return '番茄浏览器自动化';
-      if (value === 'manual') return '人工处理';
-      return value || '';
-    }
-    function reasonLabel(value) {
-      const text = String(value || '');
-      const labels = {
-        'chapter and brief are missing': '章节和写作说明都还没有创建',
-        'chapter exists but brief is missing': '章节存在，但缺少写作说明',
-        'brief is ready and no chapter version exists': '写作说明已就绪，可以生成草稿',
-        'latest version is draft': '最新版本是草稿，需要质检',
-        'latest version failed quality': '最新版本质检未通过，需要修订',
-        'latest version failed quality and revision brief exists': '修订说明已生成，可以修订',
-        'quality passed but continuity has not been recorded': '质检通过，需要记录连续性',
-        'quality and continuity are complete': '质检和连续性已完成，可以审批',
-        'approved version has no publish job': '章节已审批，可以创建发布任务',
-        'publish job is pending dry-run': '发布任务待生成预览',
-        'publish dry-run is ready': '发布预览已生成，可以进入待发布',
-        'publish job is queued for platform automation': '发布任务已等待平台执行',
-        'publish job failed': '发布任务失败，可重试',
-        'chapter has been published': '章节已发布'
-      };
-      return labels[text] || text;
-    }
-    function decisionSuggestion(item) {
-      if (item.type === 'continuity_writeback') return '在上方“当前章一键流程”点“记录连续性”。';
-      if (item.type === 'human_approval') return '确认章节内容无误后，点“审批当前章”。';
-      if (item.type === 'final_publish_confirmation') return '在“发布配置与任务”中先做最终检查，再尝试发布。';
-      return '查看章节详情后再处理。';
-    }
-    function reportLabel(value) {
-      return String(value || '')
-        .replaceAll('Would publish to', '将发布到')
-        .replaceAll('Confirmed publish to', '已确认发布到')
-        .replaceAll('Final publish confirmation required.', '需要最终发布确认。')
-        .replaceAll('title=', '标题=')
-        .replaceAll('chars=', '字数=')
-        .replaceAll('artifact_path=', '证据目录=')
-        .replaceAll('fanqie publish requires target_config.enable_real_publish=true before real platform execution', '番茄真实发布需要先在配置中打开 enable_real_publish=true')
-        .replaceAll('fanqie publish requires cdp_url or user_data_dir for browser automation', '番茄发布需要配置浏览器接管地址 cdp_url 或 user_data_dir')
-        .replaceAll('fanqie browser execution script is prepared; run the recorded fanqie_command after logging in and verifying selectors', '番茄执行脚本已准备好；登录后台并确认页面选择器后，再运行记录的命令')
-        .replaceAll('fanqie_plan=', '番茄计划=')
-        .replaceAll('fanqie_command=', '番茄命令=');
-    }
-    function newBookSeedText() {
-      return $('newBookIdeaPrompt').value.trim() || $('newBookTitle').value.trim();
-    }
-    function newBookDraft() {
-      const seed = newBookSeedText();
-      const title = $('newBookTitle').value.trim() || seed || '新书';
-      const genre = $('newBookGenre').value.trim() || '玄幻脑洞';
-      const promise = $('newBookPromise').value.trim() || '升级快、冲突强、每章都有明确钩子';
-      const protagonist = title.includes('我') ? '主角以第一人称视角承接奇遇' : '主角从底层困境中获得改变命运的机会';
-      return {
-        promise,
-        premise: `${title}：${protagonist}，获得一种可以持续制造成长和反转的核心能力，在${genre}世界里一路破局，同时被更高层的势力盯上。`,
-        world: `${genre}世界分层清晰，资源、身份和力量等级决定生存空间。核心能力必须有代价和限制，每次升级都带来新的风险。`,
-        protagonist: `主角开局处境被压制，但目标明确：活下去、变强、夺回主动权。性格上有不服输的一面，也会因为力量增长不断付出代价。`,
-        conflict: `长期冲突来自三层压力：身边危机、同阶竞争者、隐藏在世界规则背后的高位势力。每一卷都要让主角赢一部分，同时暴露更大的问题。`
-      };
-    }
-    function fillNewBookDefaults() {
-      const draft = newBookDraft();
-      if (!$('newBookPromise').value.trim()) $('newBookPromise').value = draft.promise;
-      if (!$('newBookPremise').value.trim()) $('newBookPremise').value = draft.premise;
-      if (!$('newBookWorld').value.trim()) $('newBookWorld').value = draft.world;
-      if (!$('newBookProtagonist').value.trim()) $('newBookProtagonist').value = draft.protagonist;
-      if (!$('newBookConflict').value.trim()) $('newBookConflict').value = draft.conflict;
-    }
-    function applyFanqieTemplate() {
-      $('newBookGenre').value = $('newBookGenre').value.trim() || '玄幻脑洞';
-      const draft = newBookDraft();
-      $('newBookPromise').value = draft.promise;
-      $('newBookPremise').value = draft.premise;
-      $('newBookWorld').value = draft.world;
-      $('newBookProtagonist').value = draft.protagonist;
-      $('newBookConflict').value = draft.conflict;
-    }
-    function clearNewBookDraft() {
-      ['newBookIdeaPrompt', 'newBookIdeaFeedback', 'newBookTitle', 'newBookPromise', 'newBookPremise', 'newBookWorld', 'newBookProtagonist', 'newBookConflict'].forEach((id) => {
-        $(id).value = '';
-      });
-      $('newBookGenre').value = '玄幻脑洞';
-      $('newBookPlatform').value = '番茄小说';
-      $('newBookIdeas').innerHTML = '';
-    }
-    function renderNewBookIdeas(ideas) {
-      if (!ideas || !ideas.length) {
-        $('newBookIdeas').innerHTML = '<div class="empty">没有生成可用方向</div>';
-        return;
-      }
-      $('newBookIdeas').innerHTML = `<div class="idea-list">${ideas.map((idea, index) => `
-        <div class="idea">
-          <h3>${escapeHtml(idea.title || `方向 ${index + 1}`)}</h3>
-          <p>${escapeHtml(idea.premise || '')}</p>
-          <p><strong>卖点：</strong>${escapeHtml(idea.reader_promise || '')}</p>
-          <button class="secondary" data-apply-new-book-idea="${index}">采用这个方向</button>
-        </div>
-      `).join('')}</div>`;
-      window.__newBookIdeas = ideas;
-    }
-    function applyNewBookIdea(idea) {
-      if (!idea) return;
-      $('newBookTitle').value = idea.title || $('newBookTitle').value;
-      $('newBookGenre').value = idea.genre || $('newBookGenre').value || '玄幻脑洞';
-      $('newBookPlatform').value = '番茄小说';
-      $('newBookPromise').value = idea.reader_promise || '';
-      $('newBookPremise').value = idea.premise || '';
-      $('newBookWorld').value = idea.world_engine || '';
-      $('newBookProtagonist').value = idea.protagonist_engine || '';
-      $('newBookConflict').value = idea.conflict_engine || '';
-    }
-    function renderLLMStatus(result) {
-      const ok = result.passed;
-      $('newBookLLMStatus').innerHTML = ok
-        ? `<span class="ok">模型连接正常：</span>${escapeHtml(result.model || '')}，耗时 ${escapeHtml(result.elapsed_ms || 0)} 毫秒`
-        : `<span class="bad">模型连接失败：</span>${escapeHtml(friendlyError(result.error || result.error_category || '未知错误'))}`;
-    }
-    async function brainstormNewBookIdeas(revise = false) {
-      const ideaText = $('newBookIdeaPrompt').value.trim();
-      const title = $('newBookTitle').value.trim();
-      if (!ideaText && !title) {
-        showError(new Error('请先写一段“我的想法”，或者至少填一个书名'));
-        return;
-      }
-      if (!window.confirm('AI 构思会调用真实模型并消耗少量额度，确认继续吗？')) return;
-      $('state').textContent = revise ? '正在按补充意见重构思' : '正在构思新书方向';
-      const result = await postAction('brainstorm_new_book', {
-        idea_prompt: ideaText,
-        feedback: revise ? $('newBookIdeaFeedback').value : '',
-        seed_title: title,
-        genre: $('newBookGenre').value,
-        reader_promise: $('newBookPromise').value,
-        current_ideas: window.__newBookIdeas || []
-      });
-      renderNewBookIdeas(result.ideas || []);
-    }
-    function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
-    function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
-    function qualityLabel(value) {
-      if (value === true || value === 'True' || value === 'true') return '通过';
-      if (value === false || value === 'False' || value === 'false') return '未通过';
-      if (value === null || value === undefined || value === '') return '';
-      return String(value);
-    }
-
-    function formatBytes(value) {
-      const size = Number(value || 0);
-      if (size < 1024) return `${size} B`;
-      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-      return `${(size / 1024 / 1024).toFixed(1)} MB`;
-    }
-
-    $('refresh').addEventListener('click', refresh);
-    document.querySelectorAll('[data-view-button]').forEach((button) => {
-      button.addEventListener('click', () => setActiveView(button.dataset.viewButton));
-    });
-    setActiveView(activeView);
-    document.addEventListener('click', (event) => {
-      const chapterButton = event.target.closest('button[data-select-chapter]');
-      if (chapterButton) {
-        $('chapter').value = chapterButton.dataset.selectChapter;
-        setActiveView('chapter');
-        refresh().catch(showError);
-      }
-      const feedbackButton = event.target.closest('button[data-add-feedback-id]');
-      if (feedbackButton) {
-        const current = $('adjustmentFeedbackIds').value.trim();
-        const ids = current ? current.split(',').map((item) => item.trim()).filter(Boolean) : [];
-        if (!ids.includes(feedbackButton.dataset.addFeedbackId)) {
-          ids.push(feedbackButton.dataset.addFeedbackId);
+def _start_background_queue_run(*, max_tasks: int = 1, book_id: int = 0, chapter_number: int = 0) -> dict:
+    if max_tasks < 1 or max_tasks > 3:
+        raise ValueError("max_tasks must be between 1 and 3")
+    selected_task_id = None
+    if book_id or chapter_number:
+        with session_scope() as session:
+            selected_task_id = _pending_generation_task_id(session, book_id=book_id, chapter_number=chapter_number)
+        if not selected_task_id:
+            return {"status": "noop", "message": "当前作品/章节没有待启动的生成任务。"}
+    with _BACKGROUND_LOCK:
+        active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
+        if active:
+            return {"status": "running", "run_id": active["run_id"], "message": "模型生成任务已经在运行，系统会自动刷新状态。"}
+        run_id = str(int(time.time() * 1000))
+        _BACKGROUND_RUNS[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": time.time(),
+            "finished_at": None,
+            "executed_count": 0,
+            "error": "",
         }
-        $('adjustmentFeedbackIds').value = ids.join(',');
-      }
-      const backupButton = event.target.closest('button[data-use-backup-path]');
-      if (backupButton) {
-        $('databaseRestorePath').value = backupButton.dataset.useBackupPath;
-      }
-      const ideaButton = event.target.closest('button[data-apply-new-book-idea]');
-      if (ideaButton) {
-        applyNewBookIdea((window.__newBookIdeas || [])[Number(ideaButton.dataset.applyNewBookIdea)]);
-      }
-    });
-    $('runQueue').addEventListener('click', () => {
-      postAction('run_queue', {max_tasks: 1}).catch(showError);
-    });
-    $('runNext').addEventListener('click', () => {
-      const item = (currentSnapshot?.chapters || []).find((chapter) =>
-        ['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job'].includes(chapter.next_action)
-      );
-      if (!item) {
-        showError(new Error('当前范围内没有可自动执行的安全动作'));
-        return;
-      }
-      postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, dry_run: true, platform: $('wizardPlatform').value}).catch(showError);
-    });
-    $('runWizard').addEventListener('click', () => {
-      if (!currentSnapshot?.book?.id) return;
-      const dryRun = $('wizardDryRun').value === 'true';
-      if (!dryRun && !window.confirm('确认要真实推进当前章吗？这可能会调用真实 LLM。')) return;
-      postAction('run_current_until_blocked', {
-        book_id: currentSnapshot.book.id,
-        chapter_number: Number($('chapter').value),
-        platform: $('wizardPlatform').value,
-        dry_run: dryRun,
-        max_steps: Number($('wizardMaxSteps').value || 5)
-      }).catch(showError);
-    });
-    $('recordContinuity').addEventListener('click', () => {
-      if (!currentSnapshot?.book?.id) return;
-      postAction('record_continuity_dashboard', {
-        book_id: currentSnapshot.book.id,
-        chapter_number: Number($('chapter').value),
-        summary: $('continuitySummary').value
-      }).catch(showError);
-    });
-    $('approveWizard').addEventListener('click', () => {
-      if (!currentSnapshot?.book?.id) return;
-      if (!window.confirm('确认审批当前章最新版本吗？审批后即可创建发布任务。')) return;
-      postAction('approve_current_chapter', {
-        book_id: currentSnapshot.book.id,
-        chapter_number: Number($('chapter').value),
-        reviewer: 'dashboard'
-      }).catch(showError);
-    });
-    document.addEventListener('click', (event) => {
-      const button = event.target.closest('button[data-action]');
-      if (!button) return;
-      if (button.dataset.action === 'execute_publish_job_confirm') {
-        if (!window.confirm('确认要执行最终发布吗？这个动作会把发布任务标记为已发布。')) return;
-      }
-      postAction(button.dataset.action, {task_id: Number(button.dataset.taskId)}).catch(showError);
-    });
-    $('recordFeedback').addEventListener('click', () => {
-      postAction('record_feedback', {
-        book_id: Number($('book').value),
-        chapter_number: Number($('feedbackTarget').value),
-        platform: $('feedbackPlatform').value,
-        metric_name: $('feedbackMetric').value,
-        metric_value: $('feedbackValue').value,
-        raw_text: $('feedbackRaw').value
-      }).catch(showError);
-    });
-    $('createAdjustment').addEventListener('click', () => {
-      postAction('create_feedback_adjustment', {
-        book_id: Number($('book').value),
-        target_chapter_number: Number($('adjustmentTarget').value),
-        feedback_ids: $('adjustmentFeedbackIds').value,
-        adjustment_text: $('adjustmentText').value,
-        apply_to_brief: true
-      }).catch(showError);
-    });
-    $('savePublishTarget').addEventListener('click', () => {
-      postAction('upsert_publishing_target', {
-        platform: $('publishTargetPlatform').value,
-        account_label: $('publishTargetAccount').value,
-        work_identifier: $('publishTargetWork').value,
-        automation_mode: $('publishTargetMode').value,
-        config_json: $('publishTargetConfig').value
-      }).catch(showError);
-    });
-    $('fillNewBookDefaults').addEventListener('click', fillNewBookDefaults);
-    $('applyFanqieTemplate').addEventListener('click', applyFanqieTemplate);
-    $('clearNewBookDraft').addEventListener('click', clearNewBookDraft);
-    $('checkLLMForIdeas').addEventListener('click', async () => {
-      try {
-        const result = await postAction('check_live_llm', {});
-        renderLLMStatus(result);
-      } catch (error) {
-        $('newBookLLMStatus').innerHTML = `<span class="bad">${escapeHtml(error.message)}</span>`;
-        showError(error);
-      }
-    });
-    $('brainstormNewBook').addEventListener('click', async () => {
-      try {
-        await brainstormNewBookIdeas(false);
-      } catch (error) {
-        showError(error);
-      }
-    });
-    $('reviseNewBookIdeas').addEventListener('click', async () => {
-      try {
-        await brainstormNewBookIdeas(true);
-      } catch (error) {
-        showError(error);
-      }
-    });
-    $('createNewBook').addEventListener('click', async () => {
-      try {
-        fillNewBookDefaults();
-        const result = await postAction('create_new_book', {
-          title: $('newBookTitle').value,
-          genre: $('newBookGenre').value,
-          platform: $('newBookPlatform').value,
-          reader_promise: $('newBookPromise').value,
-          premise: $('newBookPremise').value,
-          world_engine: $('newBookWorld').value,
-          protagonist_engine: $('newBookProtagonist').value,
-          conflict_engine: $('newBookConflict').value
-        });
-        const books = await fetchJson('/api/book-options');
-        renderBookOptions(books, result.book?.id || '');
-        $('chapter').value = 1;
-        setActiveView('production');
-        await refresh();
-      } catch (error) {
-        showError(error);
-      }
-    });
-    $('createDatabaseBackup').addEventListener('click', () => {
-      postAction('backup_database', {
-        label: $('databaseBackupLabel').value
-      }).catch(showError);
-    });
-    $('restoreDatabase').addEventListener('click', () => {
-      const backupPath = $('databaseRestorePath').value.trim();
-      if (!backupPath) {
-        showError(new Error('请先填写或选择备份路径'));
-        return;
-      }
-      if (!window.confirm('确认恢复数据库？当前数据库会先自动备份，然后被所选备份覆盖。')) return;
-      postAction('restore_database', {
-        backup_path: backupPath,
-        confirm: true
-      }).catch(showError);
-    });
 
-    function showError(error) {
-      $('state').textContent = '出错';
-      document.querySelector('main').insertAdjacentHTML('afterbegin', `<div class="panel empty">${escapeHtml(error.message)}</div>`);
-    }
+    def worker() -> None:
+        try:
+            with session_scope() as session:
+                if selected_task_id:
+                    result = run_generation_queue_task(session, task_id=selected_task_id)
+                    executed_count = 1 if result.task.status in {"completed", "failed", "pending"} else 0
+                else:
+                    batch = run_generation_queue(session, max_tasks=max_tasks)
+                    executed_count = len(batch.results)
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "completed",
+                        "finished_at": time.time(),
+                        "executed_count": executed_count,
+                    }
+                )
+        except Exception as exc:
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": time.time(),
+                        "error": str(exc),
+                    }
+                )
 
-    loadBooks().catch((error) => {
-      showError(error);
-    });
-  </script>
-</body>
-</html>
-"""
+    thread = threading.Thread(target=worker, name=f"queue-worker-{run_id}", daemon=True)
+    thread.start()
+    return {"status": "running", "run_id": run_id, "message": "模型生成任务已开始，系统会自动刷新状态。"}
+
+
+def _start_background_review_run(
+    *,
+    book_id: int,
+    chapter_number: int,
+    platform: str = "manual",
+    auto_revise_until_pass: bool = False,
+    max_revision_cycles: int = 3,
+) -> dict:
+    if not book_id or not chapter_number:
+        raise ValueError("book_id and chapter_number are required")
+    max_revision_cycles = max(1, min(5, int(max_revision_cycles or 3)))
+    with _BACKGROUND_LOCK:
+        active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
+        if active:
+            return {"status": "running", "run_id": active["run_id"], "message": "后台任务已经在运行，系统会自动刷新状态。"}
+        run_id = str(int(time.time() * 1000))
+        _BACKGROUND_RUNS[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": time.time(),
+            "finished_at": None,
+            "executed_count": 0,
+            "error": "",
+            "kind": "review",
+            "auto_revise_until_pass": auto_revise_until_pass,
+        }
+
+    def worker() -> None:
+        try:
+            executed = []
+            revision_count = 0
+            max_actions = max_revision_cycles * 3 + 4
+            for _ in range(max_actions):
+                try:
+                    with session_scope() as session:
+                        result = run_next_action(
+                            session,
+                            book_id=book_id,
+                            chapter_number=chapter_number,
+                            dry_run=False,
+                            queue_generation=False,
+                            platform=platform,
+                        )
+                except Exception as exc:
+                    with _BACKGROUND_LOCK:
+                        _BACKGROUND_RUNS[run_id].update(
+                            {
+                                "status": "failed",
+                                "finished_at": time.time(),
+                                "executed_count": len(executed),
+                                "executed": executed,
+                                "error": str(exc),
+                            }
+                        )
+                    return
+                executed.append(
+                    {
+                        "action": result.action,
+                        "status": result.status,
+                        "message": result.message,
+                        "object_id": result.object_id,
+                    }
+                )
+                if not auto_revise_until_pass or result.status != "executed":
+                    break
+                if result.action == "review_chapter":
+                    if revision_count >= max_revision_cycles and "passed=False" in result.message:
+                        break
+                    continue
+                if result.action == "create_revision_brief":
+                    if revision_count >= max_revision_cycles:
+                        break
+                    continue
+                if result.action == "revise_chapter":
+                    revision_count += 1
+                    continue
+                if result.action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}:
+                    break
+                break
+            with _BACKGROUND_LOCK:
+                terminal = author_terminal_status(executed)
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "completed",
+                        "finished_at": time.time(),
+                        "executed_count": len(executed),
+                        "result": executed[-1] if executed else {},
+                        "executed": executed,
+                        "terminal_status": terminal["status"],
+                        "terminal_message": terminal["message"],
+                    }
+                )
+        except Exception as exc:
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": time.time(),
+                        "error": str(exc),
+                    }
+                )
+
+    thread = threading.Thread(target=worker, name=f"review-worker-{run_id}", daemon=True)
+    thread.start()
+    message = "质检和主编审稿已在后台开始，系统会自动刷新状态。"
+    if auto_revise_until_pass:
+        message = f"自动质检-修订闭环已开始，最多修订 {max_revision_cycles} 轮，并会质检最后一版。"
+    return {"status": "running", "run_id": run_id, "message": message}
+
+
+def _start_background_sample_run(
+    *,
+    book_id: int,
+    chapter_number: int,
+    sample_count: int = 3,
+    focus: str = "opening",
+    dry_run: bool = False,
+    max_attempts: int = 3,
+) -> dict:
+    if not book_id or not chapter_number:
+        raise ValueError("book_id and chapter_number are required")
+    sample_count = max(1, min(5, int(sample_count or 3)))
+    max_attempts = max(1, min(5, int(max_attempts or 3)))
+    with _BACKGROUND_LOCK:
+        active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
+        if active:
+            return {"status": "running", "run_id": active["run_id"], "message": "后台任务已经在运行，系统会自动刷新状态。"}
+        run_id = str(int(time.time() * 1000))
+        _BACKGROUND_RUNS[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": time.time(),
+            "finished_at": None,
+            "executed_count": 0,
+            "error": "",
+            "kind": "sample",
+            "chapter_number": chapter_number,
+            "timeout_seconds": 420,
+        }
+
+    def worker() -> None:
+        try:
+            with session_scope() as session:
+                task = generate_chapter_samples(
+                    session,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    sample_count=sample_count,
+                    focus=focus,
+                    dry_run=dry_run,
+                    max_attempts=max_attempts,
+                )
+                output_data = _loads_json(task.output_json)
+                status = task.status
+                error = output_data.get("error", "")
+                sample_total = len(output_data.get("samples") or [])
+                gate_passed = bool(output_data.get("gate_passed"))
+                attempts = output_data.get("attempts") or []
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "completed" if status == "completed" else "failed",
+                        "finished_at": time.time(),
+                        "executed_count": 1,
+                        "result": {
+                            "generation_task_id": task.id,
+                            "status": status,
+                            "sample_count": sample_total,
+                            "gate_passed": gate_passed,
+                            "attempts": len(attempts),
+                        },
+                        "error": error,
+                        "terminal_message": (
+                            "章节小样已生成并通过门禁。"
+                            if status == "completed" and gate_passed
+                            else "章节小样已生成，但多样性门禁未通过。"
+                            if status == "completed"
+                            else "章节小样生成失败。"
+                        ),
+                    }
+                )
+        except Exception as exc:
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": time.time(),
+                        "executed_count": 0,
+                        "error": str(exc),
+                        "terminal_message": "章节小样生成失败，请查看后台诊断。",
+                    }
+                )
+
+    thread = threading.Thread(target=worker, name=f"sample-worker-{run_id}", daemon=True)
+    thread.start()
+    return {"status": "running", "run_id": run_id, "message": "章节小样已开始后台生成，完成后会自动显示在作者工作台。"}
+
+
+def _start_background_author_run(
+    *,
+    book_id: int,
+    chapter_number: int,
+    platform: str = "manual",
+    max_revision_cycles: int = 3,
+) -> dict:
+    if not book_id or not chapter_number:
+        raise ValueError("book_id and chapter_number are required")
+    max_revision_cycles = max(1, min(5, int(max_revision_cycles or 3)))
+    with _BACKGROUND_LOCK:
+        active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
+        if active:
+            return {"status": "running", "run_id": active["run_id"], "message": "后台主笔已经在运行，系统会自动刷新状态。"}
+        run_id = str(int(time.time() * 1000))
+        _BACKGROUND_RUNS[run_id] = {
+            "run_id": run_id,
+            "status": "running",
+            "started_at": time.time(),
+            "finished_at": None,
+            "executed_count": 0,
+            "error": "",
+            "kind": "author",
+            "max_revision_cycles": max_revision_cycles,
+            "timeout_seconds": author_background_timeout_seconds(max_revision_cycles),
+        }
+
+    def worker() -> None:
+        executed: list[dict] = []
+        try:
+            run = run_author_mode(
+                book_id=book_id,
+                chapter_number=chapter_number,
+                platform=platform,
+                max_revision_cycles=max_revision_cycles,
+            )
+            executed = run.executed
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "completed",
+                        "finished_at": time.time(),
+                        "executed_count": len(executed),
+                        "result": run.latest_result,
+                        "executed": executed,
+                        "terminal_status": run.terminal_status,
+                        "terminal_message": run.terminal_message,
+                    }
+                )
+        except Exception as exc:
+            with _BACKGROUND_LOCK:
+                _BACKGROUND_RUNS[run_id].update(
+                    {
+                        "status": "failed",
+                        "finished_at": time.time(),
+                        "executed_count": len(executed),
+                        "executed": executed,
+                        "error": str(exc),
+                        "terminal_status": "system_failed",
+                        "terminal_message": "系统执行失败，请查看后台诊断。",
+                    }
+                )
+
+    thread = threading.Thread(target=worker, name=f"author-worker-{run_id}", daemon=True)
+    thread.start()
+    return {"status": "running", "run_id": run_id, "message": "主笔模式已开始：系统会自动跑到可读稿或明确失败。"}
+
+
+def _background_runs_payload() -> list[dict]:
+    now = time.time()
+    with _BACKGROUND_LOCK:
+        for run in _BACKGROUND_RUNS.values():
+            if (
+                run.get("status") == "running"
+                and int(run.get("executed_count") or 0) == 0
+                and now - float(run.get("started_at") or now) > int(run.get("timeout_seconds") or 180)
+            ):
+                kind = str(run.get("kind") or "")
+                timeout_message = "后台任务启动超时，请重试；若反复出现，查看模型连接或数据库锁。"
+                if kind == "sample":
+                    timeout_message = "章节小样生成超时，请重试；若反复出现，查看模型连接。"
+                elif kind == "author":
+                    timeout_message = "后台主笔启动超时，请重试；若反复出现，查看模型连接或数据库锁。"
+                run.update(
+                    {
+                        "status": "failed",
+                        "finished_at": now,
+                        "error": f"后台任务启动后 {int(run.get('timeout_seconds') or 180)} 秒内没有完成任何动作，已自动标记为失败。",
+                        "terminal_status": "system_failed",
+                        "terminal_message": timeout_message,
+                    }
+                )
+        runs = list(_BACKGROUND_RUNS.values())[-10:]
+    payload = []
+    for run in reversed(runs):
+        started_at = float(run.get("started_at") or now)
+        finished_at = run.get("finished_at")
+        payload.append(
+            {
+                "run_id": run.get("run_id", ""),
+                "kind": run.get("kind", "queue"),
+                "status": run.get("status", ""),
+                "running_age_seconds": int((float(finished_at) if finished_at else now) - started_at),
+                "executed_count": run.get("executed_count", 0),
+                "error": run.get("error", ""),
+                "result": run.get("result", {}),
+                "terminal_status": run.get("terminal_status", ""),
+                "terminal_message": run.get("terminal_message", ""),
+                "timeout_seconds": int(run.get("timeout_seconds") or 180),
+            }
+        )
+    return payload
+
+
+def _pending_generation_task_id(session, *, book_id: int = 0, chapter_number: int = 0) -> int | None:
+    stmt = (
+        select(GenerationTask)
+        .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "pending")
+        .order_by(GenerationTask.id)
+    )
+    if book_id:
+        stmt = stmt.where(GenerationTask.book_id == book_id)
+    tasks = list(session.scalars(stmt))
+    for task in tasks:
+        input_data = _loads_json(task.input_json)
+        if chapter_number and int(input_data.get("chapter_number") or 0) != chapter_number:
+            continue
+        return task.id
+    return None
 
 
 def main() -> int:
@@ -1473,6 +599,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         build_project_snapshot(
                             session,
                             book_id=book_id,
+                            chapter_number=_int_query(query, "chapter_number", 1),
                             start=_int_query(query, "start", 1),
                             count=_int_query(query, "count", 20),
                         )
@@ -1489,6 +616,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "oldest_pending_chapter": report.oldest_pending_chapter,
                             "running_count": report.running_count,
                             "stale_running_count": report.stale_running_count,
+                            "background_runs": _background_runs_payload(),
                             "running_tasks": [
                                 {
                                     "task_id": item.task_id,
@@ -1583,8 +711,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if payload.get("action") == "restore_database":
                 self._send_json(_perform_restore_action(payload))
                 return
-            with session_scope() as session:
-                self._send_json(_perform_action(session, payload))
+            self._send_json(_perform_action_with_retry(payload))
         except Exception as exc:
             self._send_text(f"ERROR: {exc}", status=HTTPStatus.BAD_REQUEST)
 
@@ -1637,7 +764,51 @@ def _perform_action(session, payload: dict) -> dict:
     action = str(payload.get("action") or "")
     if action == "queue_health":
         report = build_generation_queue_health(session)
-        return {"status": "ok", "total": report.total, "counts": report.counts}
+        return {"status": "ok", "total": report.total, "counts": report.counts, "background_runs": _background_runs_payload()}
+    if action == "start_queue_background":
+        return _start_background_queue_run(
+            max_tasks=int(payload.get("max_tasks") or 1),
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+        )
+    if action == "start_review_background":
+        return _start_background_review_run(
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+            platform=str(payload.get("platform") or "manual"),
+            auto_revise_until_pass=bool(payload.get("auto_revise_until_pass")),
+            max_revision_cycles=int(payload.get("max_revision_cycles") or 3),
+        )
+    if action == "start_author_background":
+        book_id = int(payload.get("book_id") or 0)
+        chapter_number = int(payload.get("chapter_number") or 0)
+        preflight = _production_preflight_payload(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+        )
+        preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
+        if not preflight["passed"]:
+            if _preflight_only_model_drift(preflight):
+                _create_model_drift_revision_brief(
+                    session,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    blockers=preflight["blockers"],
+                )
+                session.commit()
+            else:
+                raise ValueError("生产前体检未通过：" + "；".join(preflight["blockers"]))
+        return _start_background_author_run(
+            book_id=book_id,
+            chapter_number=chapter_number,
+            platform=str(payload.get("platform") or "manual"),
+            max_revision_cycles=int(payload.get("max_revision_cycles") or 3),
+        )
+    if action == "update_chapter_brief":
+        return _update_chapter_brief_action(session, payload)
+    if action == "repair_current_chapter_brief":
+        return _repair_current_chapter_brief_action(session, payload)
     if action == "run_queue":
         max_tasks = int(payload.get("max_tasks") or 1)
         if max_tasks < 1 or max_tasks > 3:
@@ -1689,6 +860,118 @@ def _perform_action(session, payload: dict) -> dict:
             "error_category": result.error_category,
             "error": result.error,
         }
+    if action == "repair_readiness_gate":
+        return _repair_readiness_gate_action(session, payload)
+    if action == "index_book_knowledge":
+        result = index_book_knowledge(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            dry_run=bool(payload.get("dry_run")),
+            reset=True,
+            limit_chapters=int(payload.get("limit_chapters") or 80),
+        )
+        return {"status": "indexed", "message": f"已更新语义记忆 {result['indexed_count']} 条。", **result}
+    if action == "create_market_research_pack":
+        book = session.get(Book, int(payload.get("book_id") or 0))
+        if not book:
+            raise ValueError("book not found")
+        query = str(payload.get("market_query") or "").strip()
+        platform = str(payload.get("platform") or "").strip() or book.target_platform or "番茄小说"
+        result = create_market_research_pack(
+            session,
+            genre=book.genre or "未分类",
+            query=query or f"{platform} {book.genre or '网文'} 最新爆款 趋势 开篇 卖点 避雷",
+            platform=platform,
+        )
+        return {
+            "status": "created",
+            "message": f"联网搜索任务包已生成：{len(result.get('queries') or [])} 个查询。",
+            **result,
+        }
+    if action == "ingest_market_research_results":
+        book = session.get(Book, int(payload.get("book_id") or 0))
+        if not book:
+            raise ValueError("book not found")
+        raw_result = str(payload.get("result_json") or "").strip()
+        if not raw_result:
+            raise ValueError("请先粘贴 Agent Plan 联网搜索返回的 JSON")
+        result = ingest_market_research_results(
+            session,
+            genre=book.genre or "未分类",
+            result_json=raw_result,
+            source_prefix=str(payload.get("source_prefix") or "agent-search"),
+        )
+        signal_count = len(result.get("market_signal_ids") or [])
+        return {
+            "status": "ingested",
+            "message": f"已导入市场证据：{signal_count} 条信号。",
+            **result,
+        }
+    if action == "run_market_web_search":
+        book = session.get(Book, int(payload.get("book_id") or 0))
+        if not book:
+            raise ValueError("book not found")
+        query = str(payload.get("market_query") or "").strip()
+        platform = str(payload.get("platform") or "").strip() or book.target_platform or "番茄小说"
+        search = run_market_web_search(
+            query=query or f"{platform} {book.genre or '网文'} 最新爆款 趋势 开篇 卖点 避雷",
+            provider=str(payload.get("provider") or "auto"),
+            max_results=int(payload.get("max_results") or 5),
+            search_depth=str(payload.get("search_depth") or "basic"),
+        )
+        result = ingest_market_research_results(
+            session,
+            genre=book.genre or "未分类",
+            result_json=search.result_json,
+            source_prefix=f"{search.provider}-search",
+        )
+        signal_count = len(result.get("market_signal_ids") or [])
+        return {
+            "status": "completed",
+            "message": f"{search.provider} 搜索并导入 {signal_count} 条市场信号，消耗 {search.used_credits} credit。",
+            "search": search.to_dict(),
+            **result,
+        }
+    if action == "agent_plan_cycle":
+        result = run_agent_plan_enhancement_cycle(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0) or None,
+            market_query=str(payload.get("market_query") or ""),
+            platform=str(payload.get("platform") or ""),
+            dry_run=not bool(payload.get("live_embedding")),
+            rebuild_memory=True,
+            create_visuals=True,
+            auto_market_search=True,
+        )
+        indexed_count = result["semantic_memory_after"].get("indexed_count", 0)
+        asset_count = len(result.get("visual_asset_ids") or [])
+        market_status = result.get("market_research", {}).get("step", {}).get("status", "")
+        market_provider = result.get("market_research", {}).get("step", {}).get("provider", "")
+        return {
+            "status": "completed",
+            "message": f"增强循环完成：市场证据 {market_status}/{market_provider}，语义记忆 {indexed_count} 条，视觉方案 {asset_count} 个。",
+            **result,
+        }
+    if action == "create_cover_asset":
+        asset = create_visual_asset(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            asset_type="cover",
+            style=str(payload.get("style") or ""),
+            dry_run=True,
+        )
+        return {"status": "created", "message": "封面视觉方案已生成。", "visual_asset_id": asset.id, "artifact_path": asset.artifact_path}
+    if action == "create_chapter_illustration_asset":
+        asset = create_visual_asset(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            asset_type="chapter_illustration",
+            chapter_number=int(payload.get("chapter_number") or 0) or None,
+            style=str(payload.get("style") or ""),
+            dry_run=True,
+        )
+        return {"status": "created", "message": "章节插图方案已生成。", "visual_asset_id": asset.id, "artifact_path": asset.artifact_path}
     if action == "create_new_book":
         title = str(payload.get("title") or "").strip()
         if not title:
@@ -1722,7 +1005,24 @@ def _perform_action(session, payload: dict) -> dict:
             style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
             status="draft",
         )
-        return {"status": "created", "book": _book_option(book), "foundation_id": foundation.id, "story_bible_id": bible.id}
+        bootstrap = _bootstrap_book_production(
+            session,
+            book_id=book.id,
+            title=title,
+            genre=genre,
+            premise=premise,
+            reader_promise=promise,
+            world_engine=world_engine,
+            protagonist_engine=protagonist_engine,
+            conflict_engine=conflict_engine,
+        )
+        return {
+            "status": "created",
+            "book": _book_option(book),
+            "foundation_id": foundation.id,
+            "story_bible_id": bible.id,
+            "bootstrap": bootstrap,
+        }
     if action == "brainstorm_new_book":
         return {
             "status": "completed",
@@ -1735,9 +1035,153 @@ def _perform_action(session, payload: dict) -> dict:
                 current_ideas=payload.get("current_ideas") if isinstance(payload.get("current_ideas"), list) else [],
             ),
         }
+    if action == "bootstrap_book_production":
+        book_id = int(payload.get("book_id") or 0)
+        result = repair_production_scaffold(
+            session,
+            book_id=book_id,
+            only_missing=True,
+            approve_skeleton=True,
+            chapter_count=5,
+            apply=bool(payload.get("apply")),
+        )
+        if result.get("mode") == "preview":
+            return {
+                "status": "preview",
+                "book_id": book_id,
+                "message": f"生产骨架补全预览：预计变更 {result.get('planned_count', 0)} 项。确认后才会写入数据库。",
+                "bootstrap": result,
+                "planned_count": result.get("planned_count", 0),
+            }
+        created_count = int(result.get("created_count") or 0)
+        upgraded_count = int(result.get("upgraded_count") or 0)
+        existing_count = sum(1 for item in (result.get("items") or {}).values() if isinstance(item, dict) and item.get("status") == "existing")
+        return {
+            "status": "completed",
+            "book_id": book_id,
+            "created_count": created_count,
+            "existing_count": existing_count,
+            "upgraded_count": upgraded_count,
+            "bootstrap": result,
+            "message": f"生产骨架补全完成，新增 {created_count} 项，升级 {upgraded_count} 项，已有 {existing_count} 项。",
+        }
+    if action == "update_story_skeleton":
+        book_id = int(payload.get("book_id") or 0)
+        book = session.get(Book, book_id)
+        if not book:
+            raise ValueError(f"book not found: {book_id}")
+        result = _update_story_skeleton(session, book=book, payload=payload)
+        approved_count = 0
+        approve_key = str(payload.get("approve_after_save_key") or "").strip()
+        if approve_key:
+            _assert_skeleton_can_be_approved(_skeleton_payload_from_update_payload(payload))
+            approved_count = _approve_skeleton_items(
+                session,
+                book_id=book.id,
+                key=approve_key,
+                current_skeleton=_skeleton_payload_from_update_payload(payload),
+            )
+        elif bool(payload.get("approve_after_save")):
+            _assert_skeleton_can_be_approved(_skeleton_payload_from_update_payload(payload))
+            approved_count = _approve_skeleton_items(
+                session,
+                book_id=book.id,
+                key="all",
+                current_skeleton=_skeleton_payload_from_update_payload(payload),
+            )
+        message = (
+            f"生产骨架已保存，并确认 {approved_count} 个当前项。后续章节会使用新的设定。"
+            if approve_key
+            else (
+                f"生产骨架已保存并确认 {approved_count} 项。后续章节会使用新的设定。"
+                if bool(payload.get("approve_after_save"))
+                else "生产骨架已保存为草稿。后续章节会使用新的设定。"
+            )
+        )
+        return {"status": "saved", "message": message, "approved_count": approved_count, **result}
+    if action == "suggest_story_skeleton":
+        book_id = int(payload.get("book_id") or 0)
+        book = session.get(Book, book_id)
+        if not book:
+            raise ValueError(f"book not found: {book_id}")
+        skeleton = _suggest_story_skeleton(
+            book=book,
+            revision_idea=str(payload.get("revision_idea") or ""),
+            current_skeleton=payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {},
+        )
+        return {"status": "completed", "message": "AI 已生成骨架草案，请检查后保存。", "skeleton": skeleton}
+    if action == "repair_story_skeleton_draft":
+        book_id = int(payload.get("book_id") or 0)
+        current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
+        ai_error = ""
+        try:
+            repair_payload = _repair_story_skeleton_with_ai(session, book_id=book_id, current_skeleton=current_skeleton)
+            repair_payload["generation_source"] = "live_model"
+        except Exception as exc:
+            ai_error = f"{type(exc).__name__}: {exc}"
+            repair_payload = (
+                repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+                if book_id
+                else repair_skeleton_until_pass(current_skeleton).to_dict()
+            )
+            repair_payload["generation_source"] = "rule_fallback"
+            repair_payload["ai_error"] = ai_error
+        market_count = int((repair_payload.get("market_context") or {}).get("signal_count") or 0)
+        source_text = "AI 模型" if repair_payload.get("generation_source") == "live_model" else "规则兜底"
+        return {
+            "status": "completed",
+            "message": (
+                f"已用{source_text}生成骨架修复草案，并参考 {market_count} 条市场信号，请检查后保存确认。"
+                if repair_payload.get("passed")
+                else f"已用{source_text}生成骨架修复草案，并参考 {market_count} 条市场信号，但仍有未解风险。"
+            ),
+            **repair_payload,
+        }
+    if action == "apply_story_skeleton_repair":
+        book_id = int(payload.get("book_id") or 0)
+        book = session.get(Book, book_id)
+        if not book:
+            raise ValueError(f"book not found: {book_id}")
+        current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
+        repair_payload = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+        if not repair_payload.get("passed"):
+            return {
+                "status": "needs_human_review",
+                "message": "自动修复草案仍未通过骨架审计；页面已填入草案，请先处理未解 blocker。",
+                **repair_payload,
+            }
+        repaired_skeleton = repair_payload.get("skeleton") or {}
+        result = _update_story_skeleton(session, book=book, payload=repaired_skeleton)
+        approved_count = _approve_skeleton_items(session, book_id=book_id, key="all", current_skeleton=repaired_skeleton)
+        return {
+            "status": "applied",
+            "message": f"已应用骨架修复草案并确认 {approved_count} 项。",
+            "approved_count": approved_count,
+            **repair_payload,
+            **result,
+        }
+    if action == "approve_skeleton_item":
+        book_id = int(payload.get("book_id") or 0)
+        current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
+        _assert_skeleton_can_be_approved(current_skeleton)
+        approved = _approve_skeleton_items(
+            session,
+            book_id=book_id,
+            key=str(payload.get("key") or ""),
+            current_skeleton=current_skeleton,
+        )
+        return {"status": "approved", "message": f"已确认 {approved} 个生产骨架项。", "approved_count": approved}
     if action == "publish_dry_run":
         job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
         return {"status": job.status, "publish_job_id": job.id}
+    if action == "one_click_publish_prepare":
+        result = auto_prepare_publish_job(
+            session,
+            version_id=int(payload.get("task_id") or 0),
+            platform=str(payload.get("platform") or "番茄小说"),
+            confirm_real_platform=False,
+        )
+        return result
     if action == "queue_publish_job":
         job = queue_publish_job(session, job_id=int(payload.get("task_id") or 0))
         return {"status": job.status, "publish_job_id": job.id}
@@ -1771,6 +1215,14 @@ def _perform_action(session, payload: dict) -> dict:
             raw_text=str(payload.get("raw_text") or ""),
         )
         return {"status": "recorded", "feedback_id": feedback.id}
+    if action == "record_author_preference":
+        feedback = record_author_preference(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            category=str(payload.get("category") or "general"),
+            preference_text=str(payload.get("preference_text") or ""),
+        )
+        return {"status": "recorded", "message": "作者口味已记录。", "feedback_id": feedback.id}
     if action == "create_feedback_adjustment":
         adjustment = create_feedback_adjustment(
             session,
@@ -1781,19 +1233,93 @@ def _perform_action(session, payload: dict) -> dict:
         )
         brief_id = None
         if bool(payload.get("apply_to_brief", True)):
-            brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id)
+            brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id, brief_status="revision_ready")
             brief_id = brief.id
         return {"status": "created", "feedback_adjustment_id": adjustment.id, "brief_id": brief_id}
+    if action == "submit_revision_suggestion":
+        feedback, adjustment, brief, version = submit_revision_suggestion(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+            platform=str(payload.get("platform") or "manual"),
+            suggestion_text=str(payload.get("suggestion_text") or ""),
+            revision_mode=str(payload.get("revision_mode") or "rewrite"),
+        )
+        message = "建议已写入修订要求"
+        if version and version.status == "needs_revision":
+            message = "建议已写入修订要求，当前章已退回修订"
+        return {
+            "status": "created",
+            "message": message,
+            "feedback_id": feedback.id,
+            "feedback_adjustment_id": adjustment.id,
+            "brief_id": brief.id,
+            "chapter_version_id": version.id if version else None,
+            "chapter_version_status": version.status if version else "",
+        }
+    if action == "generate_chapter_samples":
+        return _start_background_sample_run(
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+            sample_count=int(payload.get("sample_count") or 3),
+            focus=str(payload.get("focus") or "opening"),
+            dry_run=bool(payload.get("dry_run")),
+            max_attempts=int(payload.get("max_attempts") or 3),
+        )
+    if action == "adopt_chapter_sample":
+        adopted = adopt_chapter_sample(
+            session,
+            task_id=int(payload.get("task_id") or 0),
+            sample_index=int(payload.get("sample_index") or 0),
+            revision_mode=str(payload.get("revision_mode") or "fresh"),
+        )
+        return {
+            "status": "created",
+            "message": "已采用小样方向，并写入当前章修订要求。",
+            "feedback_id": adopted.feedback_id,
+            "feedback_adjustment_id": adopted.feedback_adjustment_id,
+            "brief_id": adopted.brief_id,
+            "chapter_version_id": adopted.chapter_version_id,
+            "chapter_version_status": adopted.chapter_version_status,
+        }
+    if action == "submit_approval_revision":
+        level = str(payload.get("revision_level") or "")
+        mode = str(payload.get("revision_mode") or _approval_revision_mode_from_level(level) or "rewrite")
+        note = str(payload.get("note") or "")
+        suggestion = _approval_revision_text(mode=mode, note=note)
+        feedback, adjustment, brief, version = submit_revision_suggestion(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+            platform="manual_approval",
+            suggestion_text=suggestion,
+            revision_mode=mode,
+        )
+        return {
+            "status": "created",
+            "message": f"{_approval_revision_label(mode)}已写入修订要求，当前章已退回修订。",
+            "feedback_id": feedback.id,
+            "feedback_adjustment_id": adjustment.id,
+            "brief_id": brief.id,
+            "chapter_version_id": version.id if version else None,
+            "chapter_version_status": version.status if version else "",
+        }
     if action == "run_next_action":
         book_id = int(payload.get("book_id") or 0)
         chapter_number = int(payload.get("chapter_number") or 0)
         if not book_id or not chapter_number:
             raise ValueError("book_id and chapter_number are required")
+        if not bool(payload.get("dry_run", True)):
+            preflight = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+            preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
+            if not preflight["passed"] and not _preflight_only_model_drift(preflight):
+                raise ValueError("生产前体检未通过：" + "；".join(preflight["blockers"]))
         result = run_next_action(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
             dry_run=bool(payload.get("dry_run", True)),
+            queue_generation=not bool(payload.get("dry_run", True)),
             platform=str(payload.get("platform") or "manual"),
         )
         if result.action not in AUTO_ACTIONS or result.status != "executed":
@@ -1811,6 +1337,15 @@ def _perform_action(session, payload: dict) -> dict:
         max_steps = int(payload.get("max_steps") or 5)
         if max_steps < 1 or max_steps > 10:
             raise ValueError("max_steps must be between 1 and 10")
+        if not bool(payload.get("dry_run", True)):
+            preflight = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+            preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
+            if not preflight["passed"]:
+                if _preflight_only_model_drift(preflight):
+                    _create_model_drift_revision_brief(session, book_id=book_id, chapter_number=chapter_number, blockers=preflight["blockers"])
+                    session.commit()
+                else:
+                    raise ValueError("生产前体检未通过：" + "；".join(preflight["blockers"]))
         executed = []
         for _ in range(max_steps):
             result = run_next_action(
@@ -1818,6 +1353,7 @@ def _perform_action(session, payload: dict) -> dict:
                 book_id=book_id,
                 chapter_number=chapter_number,
                 dry_run=bool(payload.get("dry_run", True)),
+                queue_generation=not bool(payload.get("dry_run", True)),
                 platform=str(payload.get("platform") or "manual"),
             )
             if result.action not in AUTO_ACTIONS or result.status != "executed":
@@ -1830,21 +1366,49 @@ def _perform_action(session, payload: dict) -> dict:
                     "object_id": result.object_id,
                 }
             )
+            if result.action in {"enqueue_draft_chapter", "enqueue_revise_chapter"}:
+                return {
+                    "status": "queued",
+                    "message": "真实生成任务已创建，系统将启动后台生成。",
+                    "executed": executed,
+                }
         return {"status": "executed", "executed": executed}
     if action == "record_continuity_dashboard":
         book_id = int(payload.get("book_id") or 0)
         chapter_number = int(payload.get("chapter_number") or 0)
-        summary = str(payload.get("summary") or "").strip() or _default_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
+        summary = str(payload.get("summary") or "").strip() or default_chapter_continuity_summary(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+        )
         result = record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
         return {"status": "recorded", "chapter_id": result.chapter_id}
     if action == "approve_current_chapter":
-        version = _latest_version_for_chapter(
+        book_id = int(payload.get("book_id") or 0)
+        chapter_number = int(payload.get("chapter_number") or 0)
+        preflight = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+        preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
+        if preflight.get("blockers"):
+            raise ValueError("当前章仍有体检阻断项，不能审批：" + "；".join(preflight["blockers"]))
+        version = latest_version_for_chapter(
             session,
-            book_id=int(payload.get("book_id") or 0),
-            chapter_number=int(payload.get("chapter_number") or 0),
+            book_id=book_id,
+            chapter_number=chapter_number,
         )
+        chapter = session.get(Chapter, version.chapter_id)
+        continuity_recorded = False
+        if version.status == "reviewed_pass" and chapter and chapter.status != "continuity_recorded":
+            summary = default_chapter_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
+            record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
+            continuity_recorded = True
         approved = approve_chapter(session, version_id=version.id, reviewer=str(payload.get("reviewer") or "dashboard"))
-        return {"status": approved.status, "version_id": approved.id}
+        sample_learning = sync_chapter_sample_learning(session, book_id=book_id, chapter_number=chapter_number)
+        return {
+            "status": approved.status,
+            "version_id": approved.id,
+            "continuity_recorded": continuity_recorded,
+            "sample_learning_recorded_count": sample_learning.recorded_count,
+        }
     raise ValueError(f"unsupported action: {action}")
 
 
@@ -1860,6 +1424,663 @@ def _perform_restore_action(payload: dict) -> dict:
         "pre_restore_backup_path": result.pre_restore_backup_path,
         "restored_size_bytes": result.restored_size_bytes,
     }
+
+
+def _perform_action_with_retry(payload: dict) -> dict:
+    last_error: Exception | None = None
+    for attempt in range(6):
+        try:
+            with session_scope() as session:
+                return _perform_action(session, payload)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            last_error = exc
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError("数据库正在被后台任务写入，请稍后重试。原始错误：database is locked") from last_error
+
+
+def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
+    premise = str(payload.get("premise") or "").strip()
+    if not premise:
+        raise ValueError("一句话核心设定不能为空")
+    reader_promise = str(payload.get("reader_promise") or "").strip()
+    world_engine = str(payload.get("world_engine") or "").strip()
+    protagonist_engine = str(payload.get("protagonist_engine") or "").strip()
+    conflict_engine = str(payload.get("conflict_engine") or "").strip()
+    foundation = _latest_foundation_for_dashboard(session, book_id=book.id)
+    if not foundation:
+        foundation = StoryFoundation(book_id=book.id, premise=premise)
+        session.add(foundation)
+    foundation.premise = premise
+    foundation.reader_promise = reader_promise
+    foundation.world_engine = world_engine
+    foundation.protagonist_engine = protagonist_engine
+    foundation.conflict_engine = conflict_engine
+    foundation.status = "draft"
+
+    bible = upsert_story_bible(
+        session,
+        book_id=book.id,
+        positioning=premise,
+        reader_promise=reader_promise,
+        main_plot=conflict_engine or premise,
+        protagonist_arc=protagonist_engine,
+        power_curve=world_engine,
+        forbidden_rules=str(payload.get("forbidden_rules") or "").strip(),
+        style_guide=str(payload.get("style_guide") or "").strip(),
+        status="draft",
+    )
+    volume = create_volume(
+        session,
+        book_id=book.id,
+        volume_number=1,
+        title=str(payload.get("volume_title") or "第一卷").strip(),
+        summary=str(payload.get("volume_summary") or "").strip(),
+    )
+    arc = create_story_arc(
+        session,
+        book_id=book.id,
+        arc_number=1,
+        title=str(payload.get("arc_title") or "开局破局").strip(),
+        start_chapter=1,
+        end_chapter=5,
+        goal=str(payload.get("arc_goal") or "").strip(),
+        climax=str(payload.get("arc_climax") or "").strip(),
+        turn=str(payload.get("arc_turn") or "").strip(),
+        volume_number=1,
+    )
+    _sync_skeleton_canon(
+        session,
+        book_id=book.id,
+        premise=premise,
+        world_engine=world_engine,
+        protagonist_engine=protagonist_engine,
+        conflict_engine=conflict_engine,
+    )
+    session.flush()
+    return {
+        "foundation_id": foundation.id,
+        "story_bible_id": bible.id,
+        "volume_id": volume.id,
+        "story_arc_id": arc.id,
+    }
+
+
+def _sync_skeleton_canon(
+    session,
+    *,
+    book_id: int,
+    premise: str,
+    world_engine: str,
+    protagonist_engine: str,
+    conflict_engine: str,
+) -> None:
+    character = session.scalar(select(Character).where(Character.book_id == book_id, Character.name == "主角"))
+    if character:
+        character.personality = protagonist_engine or character.personality
+        character.background = premise or character.background
+        character.ability = "按最新生产骨架执行；能力收益、限制和代价必须在正文中可见。"
+
+    world_rule = session.scalar(select(WorldRule).where(WorldRule.book_id == book_id, WorldRule.category == "生产底线"))
+    if world_rule:
+        world_rule.rule_text = world_engine or world_rule.rule_text
+
+    power = session.scalar(select(PowerSystem).where(PowerSystem.book_id == book_id, PowerSystem.name == "核心能力"))
+    if power:
+        power.rules = world_engine or power.rules
+        power.costs = "能力使用必须对应最新生产骨架中的代价，不得沿用已废弃旧设定。"
+        power.limits = "以最新 Story Bible 为准；旧章节或旧质检中的名词只作历史参考，不能强制保留。"
+
+    thread = session.scalar(select(PlotThread).where(PlotThread.book_id == book_id, PlotThread.name == "主线压力"))
+    if thread:
+        thread.description = conflict_engine or thread.description
+
+
+def _suggest_story_skeleton(*, book: Book, revision_idea: str, current_skeleton: dict) -> dict:
+    idea = revision_idea.strip()
+    if not idea:
+        raise ValueError("请先写一点你的修改想法或不满意点")
+    current = json.dumps(current_skeleton, ensure_ascii=False, indent=2)
+    prompt = f"""
+你是番茄小说男频主编兼新书策划。用户不擅长填写专业设定表，你要把他的自然语言修改想法，整理成一份可直接用于生产系统的故事骨架草案。
+
+作品：{book.title}
+类型：{book.genre}
+平台：{book.target_platform}
+
+用户修改想法：
+{idea}
+
+当前骨架 JSON：
+{current}
+
+请只输出 JSON 对象，不要解释。字段必须是：
+premise, reader_promise, world_engine, protagonist_engine, conflict_engine,
+forbidden_rules, style_guide, volume_title, volume_summary,
+arc_title, arc_goal, arc_climax, arc_turn
+
+要求：
+- 不要照抄用户原话，要整理成可执行的生产骨架。
+- premise 用一句话说清主角、能力/核心钩子、主要冲突。
+- reader_promise 要是读者能持续期待的爽点/情绪/钩子。
+- world_engine 写规则和限制，不写百科。
+- protagonist_engine 写主角欲望、缺陷、主动性和成长方向。
+- conflict_engine 写长期压力来源和升级方式。
+- forbidden_rules 写必须避开的套路、违和点、设定破坏。
+- style_guide 写正文风格、节奏、信息呈现方式。
+- 先消解骨架内部矛盾：不要把某个职业、能力或单一桥段写成万能解法；如果世界规则强调真实人物和真实因果，就不能又要求主角骗取/刷取/让本地人配合表演。
+- 主角能力必须有边界、失败条件和代价；卖点要能产生多种场景，不要把后续章节锁死在同一桥段。
+- 第一卷和剧情段要能支撑前 5 章生产，开局压力要具体。
+- 每个字段控制在 120 个汉字以内。
+""".strip()
+    try:
+        provider = ArkOpenAIProvider()
+        response = provider.generate(
+            prompt,
+            max_tokens=2200,
+            temperature=0.65,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(_json_object_text(response.text))
+    except Exception as exc:
+        message = str(exc) or type(exc).__name__
+        if "Connection error" in message or type(exc).__name__ == "APIConnectionError":
+            raise ValueError("模型连接失败：请检查网络、代理或 ARK 配置后再试。") from exc
+        raise ValueError(f"AI 骨架建议失败：{type(exc).__name__}: {message}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("AI 骨架建议没有返回 JSON 对象")
+    return _clean_story_skeleton(data, current_skeleton=current_skeleton)
+
+
+def _repair_story_skeleton_with_ai(session, *, book_id: int, current_skeleton: dict) -> dict:
+    if not book_id:
+        raise ValueError("book_id is required for AI skeleton repair")
+    book = session.get(Book, book_id)
+    if not book:
+        raise ValueError(f"book not found: {book_id}")
+    rule_preview = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+    market_context = rule_preview.get("market_context") or {}
+    before = rule_preview.get("before") or {}
+    issues = before.get("issues") or []
+    current = json.dumps(current_skeleton, ensure_ascii=False, indent=2)
+    issue_text = json.dumps(issues[:12], ensure_ascii=False, indent=2)
+    market_text = json.dumps(market_context, ensure_ascii=False, indent=2)
+    prompt = f"""
+你是男频网文主编兼生产系统架构师。请把当前作品骨架修成一份可直接用于后续章节生产的执行骨架。
+
+作品：{book.title}
+类型：{book.genre}
+平台：{book.target_platform}
+
+当前骨架 JSON：
+{current}
+
+骨架审计问题：
+{issue_text}
+
+可用市场/读者信号：
+{market_text}
+
+请只输出 JSON 对象，不要解释。字段必须是：
+premise, reader_promise, world_engine, protagonist_engine, conflict_engine,
+forbidden_rules, style_guide, volume_title, volume_summary,
+arc_title, arc_goal, arc_climax, arc_turn
+
+修复要求：
+- 必须针对审计问题改，不要输出通用模板。
+- 保留作者原始核心卖点；只修复矛盾、过强外挂、主角被动、长篇续航不足、平台可读性不足。
+- 市场信号只能帮助调整开篇压力、读者承诺、章末钩子和避雷，不得替代本书核心方向。
+- 每个字段都要能指导系统执行，不要写后台术语、审计术语或空泛口号。
+- 主角能力、职业、系统、重生、预知、推演等卖点若存在，必须写出边界、失败条件和代价。
+- 第一卷必须能支撑至少 5 章不同场景发动机。
+- forbidden_rules 要写清绝对不能写什么。
+- 每个字段控制在 160 个汉字以内。
+""".strip()
+    provider = ArkOpenAIProvider()
+    response = provider.generate(
+        prompt,
+        max_tokens=2600,
+        temperature=0.55,
+        response_format={"type": "json_object"},
+    )
+    data = json.loads(_json_object_text(response.text))
+    if not isinstance(data, dict):
+        raise ValueError("AI 修复没有返回 JSON 对象")
+    repaired = _clean_story_skeleton(data, current_skeleton=current_skeleton)
+    repaired = _apply_market_context_to_ai_skeleton(repaired, market_context)
+    after = audit_skeleton_sources({f"ai.{key}": str(value or "") for key, value in repaired.items()})
+    guarded_by_rules = False
+    model_attempt = {
+        "skeleton": repaired,
+        "passed": after.passed,
+        "score": after.score,
+        "after": after.to_dict(),
+    }
+    if not after.passed:
+        repaired = dict(rule_preview.get("skeleton") or rule_preview.get("repaired_skeleton") or {})
+        repaired = _apply_market_context_to_ai_skeleton(repaired, market_context)
+        after = audit_skeleton_sources({f"guarded.{key}": str(value or "") for key, value in repaired.items()})
+        guarded_by_rules = True
+    payload = {
+        **rule_preview,
+        "skeleton": repaired,
+        "passed": after.passed,
+        "score": after.score,
+        "after": after.to_dict(),
+        "applied_strategy": "live_model_with_rule_guard" if guarded_by_rules else "live_model_repair",
+        "llm": {
+            "provider": response.provider,
+            "model": response.model,
+            "request_id": response.request_id,
+            "elapsed_ms": response.elapsed_ms,
+        },
+        "model_attempt": model_attempt if guarded_by_rules else {},
+    }
+    return payload
+
+
+def _apply_market_context_to_ai_skeleton(skeleton: dict, market_context: dict) -> dict:
+    signal_count = int((market_context or {}).get("signal_count") or 0)
+    if signal_count < 1:
+        return skeleton
+    repaired = dict(skeleton)
+    expectations = [str(item).strip() for item in (market_context.get("expectations") or []) if str(item).strip()]
+    avoid_rules = [str(item).strip() for item in (market_context.get("avoid_rules") or []) if str(item).strip()]
+    if expectations:
+        repaired["reader_promise"] = _append_text(
+            repaired.get("reader_promise", ""),
+            "平台读者预期：" + "；".join(expectations[:3]),
+        )
+        repaired["style_guide"] = _append_text(
+            repaired.get("style_guide", ""),
+            "市场执行要求：开篇压力、爽点回报和章末钩子必须在场景行动中可见。",
+        )
+        repaired["arc_goal"] = _append_text(
+            repaired.get("arc_goal", ""),
+            "前五章每章都要完成一个可见读者回报，并留下章末钩子。",
+        )
+    if avoid_rules:
+        repaired["forbidden_rules"] = _append_text(
+            repaired.get("forbidden_rules", ""),
+            "市场避雷：" + "；".join(avoid_rules[:3]),
+        )
+    return repaired
+
+
+def _append_text(value: str, addition: str) -> str:
+    base = str(value or "").strip()
+    extra = str(addition or "").strip()
+    if not extra or extra in base:
+        return base
+    return f"{base} {extra}".strip()
+
+
+def _clean_story_skeleton(data: dict, *, current_skeleton: dict) -> dict:
+    fields = [
+        "premise",
+        "reader_promise",
+        "world_engine",
+        "protagonist_engine",
+        "conflict_engine",
+        "forbidden_rules",
+        "style_guide",
+        "volume_title",
+        "volume_summary",
+        "arc_title",
+        "arc_goal",
+        "arc_climax",
+        "arc_turn",
+    ]
+    cleaned: dict[str, str] = {}
+    for field in fields:
+        value = str(data.get(field) or current_skeleton.get(field) or "").strip()
+        cleaned[field] = value
+    if not cleaned["premise"]:
+        raise ValueError("AI 骨架建议缺少核心设定")
+    if not cleaned["volume_title"]:
+        cleaned["volume_title"] = "第一卷"
+    if not cleaned["arc_title"]:
+        cleaned["arc_title"] = "开局破局"
+    return cleaned
+
+
+SKELETON_APPROVAL_FIELDS = [
+    ("premise", "一句话核心设定"),
+    ("reader_promise", "读者承诺"),
+    ("world_engine", "世界规则 / 能力曲线"),
+    ("protagonist_engine", "主角动力 / 成长弧"),
+    ("conflict_engine", "长期冲突 / 主线"),
+    ("forbidden_rules", "禁忌规则"),
+    ("style_guide", "文风指南"),
+    ("volume_summary", "第一卷摘要"),
+    ("arc_goal", "剧情段目标"),
+    ("arc_climax", "剧情段高潮"),
+    ("arc_turn", "剧情段转折"),
+]
+
+
+def _skeleton_payload_from_update_payload(payload: dict) -> dict[str, str]:
+    return {
+        key: str(payload.get(key) or "").strip()
+        for key, _ in SKELETON_APPROVAL_FIELDS
+    }
+
+
+def _assert_skeleton_can_be_approved(skeleton: dict[str, str]) -> None:
+    report = audit_skeleton_sources({f"form.{key}": str(value or "") for key, value in skeleton.items()})
+    blockers = [issue for issue in report.issues if issue.severity == "blocker"]
+    if blockers:
+        messages = "；".join(f"{issue.code}: {issue.message}" for issue in blockers[:3])
+        raise ValueError(f"骨架逻辑审计未通过，不能确认：{messages}")
+
+
+def _approve_skeleton_items(session, *, book_id: int, key: str, current_skeleton: dict) -> int:
+    if not session.get(Book, book_id):
+        raise ValueError(f"book not found: {book_id}")
+    allowed = {field for field, _ in SKELETON_APPROVAL_FIELDS}
+    keys = sorted(allowed) if key == "all" else [key]
+    approved = 0
+    for item_key in keys:
+        if item_key not in allowed:
+            raise ValueError(f"unknown skeleton item: {item_key}")
+        value = str(current_skeleton.get(item_key) or "").strip()
+        if not value:
+            continue
+        record_platform_feedback(
+            session,
+            book_id=book_id,
+            platform="dashboard",
+            metric_name="skeleton_approval",
+            metric_value=item_key,
+            raw_text=value,
+        )
+        approved += 1
+    session.flush()
+    return approved
+
+
+def _skeleton_approval_payload(session, *, book_id: int, skeleton: dict) -> list[dict]:
+    latest: dict[str, str] = {}
+    rows = session.scalars(
+        select(PlatformFeedback)
+        .where(
+            PlatformFeedback.book_id == book_id,
+            PlatformFeedback.metric_name == "skeleton_approval",
+        )
+        .order_by(PlatformFeedback.id.desc())
+    )
+    for item in rows:
+        latest.setdefault(item.metric_value, item.raw_text)
+    return [
+        {
+            "key": key,
+            "label": label,
+            "value": str(skeleton.get(key) or "").strip(),
+            "approved": bool(str(skeleton.get(key) or "").strip()) and latest.get(key) == str(skeleton.get(key) or "").strip(),
+        }
+        for key, label in SKELETON_APPROVAL_FIELDS
+    ]
+
+
+def _bootstrap_book_production(
+    session,
+    *,
+    book_id: int,
+    title: str,
+    genre: str,
+    premise: str,
+    reader_promise: str,
+    world_engine: str,
+    protagonist_engine: str,
+    conflict_engine: str,
+    only_missing: bool = False,
+) -> dict:
+    seed_prompts(session)
+    source, source_created = _ensure_dashboard_evidence_source(session, book_id=book_id, title=title, only_missing=only_missing)
+    signal, signal_created = _ensure_dashboard_market_signal(session, source=source, genre=genre, only_missing=only_missing)
+    bible, bible_created = _ensure_dashboard_story_bible(
+        session,
+        book_id=book_id,
+        premise=premise,
+        reader_promise=reader_promise,
+        world_engine=world_engine,
+        protagonist_engine=protagonist_engine,
+        conflict_engine=conflict_engine,
+        only_missing=only_missing,
+    )
+    protagonist, protagonist_created = _ensure_dashboard_character(
+        session,
+        book_id=book_id,
+        premise=premise,
+        protagonist_engine=protagonist_engine,
+        only_missing=only_missing,
+    )
+    world_rule, world_rule_created = _ensure_dashboard_world_rule(
+        session,
+        book_id=book_id,
+        world_engine=world_engine,
+        only_missing=only_missing,
+    )
+    power, power_created = _ensure_dashboard_power_system(session, book_id=book_id, only_missing=only_missing)
+    thread, thread_created = _ensure_dashboard_plot_thread(
+        session,
+        book_id=book_id,
+        conflict_engine=conflict_engine,
+        only_missing=only_missing,
+    )
+    volume, volume_created = _ensure_dashboard_volume(session, book_id=book_id, only_missing=only_missing)
+    arc, arc_created = _ensure_dashboard_story_arc(session, book_id=book_id, only_missing=only_missing)
+    briefs = create_chapter_plan(
+        session,
+        book_id=book_id,
+        start=1,
+        count=5,
+        goal_prefix="开局破局",
+        required_beats="具体压力,主角主动选择,能力收益,可见代价,信息增量,章末钩子",
+        constraints=f"遵守读者承诺:{reader_promise}；不要写系统说明或作者解释；设定必须嵌入场景、动作、对话和后果。",
+    )
+    upgraded_briefs = upgrade_chapter_briefs_production_standards(session, book_id=book_id)
+    return {
+        "prompt_templates": {"status": "ensured"},
+        "story_bible_id": _bootstrap_item(bible.id, bible_created),
+        "evidence_source_id": _bootstrap_item(source.id, source_created),
+        "market_signal_id": _bootstrap_item(signal.id, signal_created),
+        "character_id": _bootstrap_item(protagonist.id, protagonist_created),
+        "world_rule_id": _bootstrap_item(world_rule.id, world_rule_created),
+        "power_system_id": _bootstrap_item(power.id, power_created),
+        "plot_thread_id": _bootstrap_item(thread.id, thread_created),
+        "volume_id": _bootstrap_item(volume.id, volume_created),
+        "story_arc_id": _bootstrap_item(arc.id, arc_created),
+        "chapter_briefs": {
+            "created_count": len(briefs),
+            "upgraded_count": upgraded_briefs,
+            "status": "created" if briefs else ("upgraded" if upgraded_briefs else "existing"),
+        },
+    }
+
+
+def _ensure_dashboard_evidence_source(session, *, book_id: int, title: str, only_missing: bool) -> tuple[EvidenceSource, bool]:
+    source_id = f"dashboard-bootstrap-{book_id}"
+    existing = session.scalar(select(EvidenceSource).where(EvidenceSource.source_id == source_id))
+    if existing and only_missing:
+        return existing, False
+    source = add_evidence_source(
+        session,
+        source_id=source_id,
+        title=f"{title} dashboard bootstrap evidence",
+        url="",
+        reliability=3,
+        status="verified",
+    )
+    return source, existing is None
+
+
+def _ensure_dashboard_market_signal(session, *, source: EvidenceSource, genre: str, only_missing: bool) -> tuple[MarketSignal, bool]:
+    existing = session.scalar(
+        select(MarketSignal).where(
+            MarketSignal.source_id == source.id,
+            MarketSignal.genre == genre,
+        )
+    )
+    if existing and only_missing:
+        return existing, False
+    signal = add_market_signal(
+        session,
+        source_key=source.source_id,
+        genre=genre,
+        signal_text=f"{genre}连载首章需要快速进入具体压力，突出主角主动选择、能力代价、信息增量和章末钩子。",
+        confidence=70,
+    )
+    return signal, True
+
+
+def _ensure_dashboard_story_bible(
+    session,
+    *,
+    book_id: int,
+    premise: str,
+    reader_promise: str,
+    world_engine: str,
+    protagonist_engine: str,
+    conflict_engine: str,
+    only_missing: bool,
+):
+    existing = get_story_bible(session, book_id=book_id)
+    if existing and only_missing:
+        return existing, False
+    bible = upsert_story_bible(
+        session,
+        book_id=book_id,
+        positioning=premise,
+        reader_promise=reader_promise,
+        main_plot=conflict_engine or premise,
+        protagonist_arc=protagonist_engine,
+        power_curve=world_engine,
+        forbidden_rules="避免系统提示词、作者说明、元叙事泄露到正文。",
+        style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
+        status="draft",
+    )
+    return bible, existing is None
+
+
+def _ensure_dashboard_character(
+    session,
+    *,
+    book_id: int,
+    premise: str,
+    protagonist_engine: str,
+    only_missing: bool,
+) -> tuple[Character, bool]:
+    existing = session.scalar(select(Character).where(Character.book_id == book_id, Character.name == "主角"))
+    if existing and only_missing:
+        return existing, False
+    character = add_character(
+        session,
+        book_id=book_id,
+        name="主角",
+        role="protagonist",
+        personality=protagonist_engine,
+        ability="核心能力必须带来收益、限制和可见代价。",
+        background=premise,
+    )
+    return character, existing is None
+
+
+def _ensure_dashboard_world_rule(session, *, book_id: int, world_engine: str, only_missing: bool) -> tuple[WorldRule, bool]:
+    existing = session.scalar(select(WorldRule).where(WorldRule.book_id == book_id, WorldRule.category == "生产底线"))
+    if existing and only_missing:
+        return existing, False
+    rule = add_world_rule(
+        session,
+        book_id=book_id,
+        category="生产底线",
+        rule_text=world_engine or "世界规则必须通过场景和后果呈现，不能用设定说明替代剧情。",
+    )
+    return rule, True
+
+
+def _ensure_dashboard_power_system(session, *, book_id: int, only_missing: bool) -> tuple[PowerSystem, bool]:
+    existing = session.scalar(select(PowerSystem).where(PowerSystem.book_id == book_id, PowerSystem.name == "核心能力"))
+    if existing and only_missing:
+        return existing, False
+    power = add_power_system(
+        session,
+        book_id=book_id,
+        name="核心能力",
+        rules="能力只能推动短期选择和局部破局，不能无条件解决所有问题。",
+        costs="每次使用都必须付出资源、身体、关系、信息或处境上的可见代价。",
+        limits="不能跳过冲突、不能直接获得最终答案、不能推翻已登记 Canon。",
+    )
+    return power, existing is None
+
+
+def _ensure_dashboard_plot_thread(session, *, book_id: int, conflict_engine: str, only_missing: bool):
+    existing = session.scalar(select(PlotThread).where(PlotThread.book_id == book_id, PlotThread.name == "主线压力"))
+    if existing and only_missing:
+        return existing, False
+    thread = add_plot_thread(
+        session,
+        book_id=book_id,
+        name="主线压力",
+        description=conflict_engine or "主角在身边危机和更高层压力中不断夺回主动权。",
+    )
+    return thread, True
+
+
+def _ensure_dashboard_volume(session, *, book_id: int, only_missing: bool) -> tuple[Volume, bool]:
+    existing = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
+    if existing and only_missing:
+        return existing, False
+    volume = create_volume(
+        session,
+        book_id=book_id,
+        volume_number=1,
+        title="第一卷",
+        summary="建立主角处境、核心能力代价、第一轮外部压力和持续追读钩子。",
+    )
+    return volume, existing is None
+
+
+def _ensure_dashboard_story_arc(session, *, book_id: int, only_missing: bool) -> tuple[StoryArc, bool]:
+    existing = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
+    if existing and only_missing:
+        return existing, False
+    arc = create_story_arc(
+        session,
+        book_id=book_id,
+        arc_number=1,
+        title="开局破局",
+        start_chapter=1,
+        end_chapter=5,
+        goal="让主角在具体危机中发现能力、付出代价，并主动踏入更大的主线压力。",
+        climax="主角用能力赢下一次局部胜利，但暴露更大危险或更高层关注。",
+        turn="主角意识到眼前事件不是偶然，必须主动追查或反击。",
+        volume_number=1,
+    )
+    return arc, existing is None
+
+
+def _bootstrap_item(item_id: int, created: bool) -> dict:
+    return {"id": item_id, "status": "created" if created else "existing"}
+
+
+def _bootstrap_value_created(value) -> bool:
+    return isinstance(value, dict) and value.get("status") == "created"
+
+
+def _bootstrap_value_existing(value) -> bool:
+    return isinstance(value, dict) and value.get("status") == "existing"
+
+
+def _bootstrap_value_upgraded(value) -> bool:
+    return isinstance(value, dict) and value.get("status") == "upgraded"
+
+
+def _latest_foundation_for_dashboard(session, *, book_id: int):
+    from app.models.entities import StoryFoundation
+
+    return session.scalar(select(StoryFoundation).where(StoryFoundation.book_id == book_id).order_by(StoryFoundation.id.desc()))
 
 
 def _brainstorm_new_book_ideas(
@@ -2033,22 +2254,6 @@ ideas 必须恰好 3 个元素。
             ) from repair_exc
 
 
-def _latest_version_for_chapter(session, *, book_id: int, chapter_number: int) -> ChapterVersion:
-    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
-    if not chapter:
-        raise ValueError("chapter not found")
-    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
-    if not version:
-        raise ValueError("chapter version not found")
-    return version
-
-
-def _default_continuity_summary(session, *, book_id: int, chapter_number: int) -> str:
-    version = _latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
-    excerpt = " ".join(version.content.split())[:160]
-    return f"第{chapter_number}章已通过质检，最新版本《{version.title}》进入连续性记录。{excerpt}"
-
-
 def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
@@ -2070,6 +2275,64 @@ def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
         else None
     )
     tasks = _generation_tasks_for_chapter(session, book_id=book_id, chapter_number=chapter_number, limit=8)
+    production_review = production_run_review_payload(latest_production_run_review(session, chapter_id=chapter.id))
+    production_pattern_memory = build_production_pattern_memory(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        limit=8,
+    )
+    bias_audit = _chapter_bias_payload(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        brief=latest_brief,
+        version=latest_version,
+    )
+    acceptance_audit = _acceptance_payload(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        brief=latest_brief,
+        version=latest_version,
+    )
+    preflight = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+    quality_data = _loads_json(latest_quality.report) if latest_quality else None
+    if latest_quality and quality_data is not None:
+        quality_data = {**quality_data, "score": latest_quality.score, "passed": latest_quality.passed}
+    failure_attribution = attribute_generation_failure(
+        quality=quality_data,
+        bias=bias_audit,
+        intent=acceptance_audit,
+        preflight=preflight,
+    )
+    director_sheet = _director_sheet_payload(
+        session,
+        book_id=book_id,
+        chapter=chapter,
+        brief=latest_brief,
+    )
+    author_workbench = build_author_workbench_report(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+    ).to_dict()
+    chapter_samples = latest_chapter_samples(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        limit=3,
+    )
+    writer_loop = build_writer_loop_plan(
+        chapter_number=chapter_number,
+        goal=latest_brief.goal if latest_brief else "",
+        required_beats=latest_brief.required_beats if latest_brief else "",
+        constraints=latest_brief.constraints if latest_brief else "",
+        quality_report=quality_data,
+        sample_report=(chapter_samples.get("diversity_report") or chapter_samples.get("fallback_diversity_report")),
+        previous_content=latest_version.content if latest_version else "",
+        mode="dashboard",
+    ).to_dict()
     return {
         "chapter": {
             "id": chapter.id,
@@ -2080,26 +2343,509 @@ def _chapter_detail(session, *, book_id: int, chapter_number: int) -> dict:
         },
         "latest_brief": _brief_payload(latest_brief),
         "latest_quality": _quality_payload(latest_quality),
+        "latest_version": _version_payload(latest_version),
+        "production_preflight": preflight,
+        "bias_audit": bias_audit,
+        "acceptance_audit": acceptance_audit,
+        "failure_attribution": failure_attribution,
+        "director_sheet": director_sheet,
+        "author_workbench": author_workbench,
+        "writer_loop": writer_loop,
+        "production_review": production_review,
+        "production_pattern_memory": production_pattern_memory,
+        "chapter_samples": chapter_samples,
+        "chapter_sample_learning": build_chapter_sample_learning(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            limit=8,
+        ),
+        "model_strategy": _model_strategy_payload(),
         "version_diff": _version_diff_payload(versions),
         "versions": [
-            {
-                "id": version.id,
-                "version_number": version.version_number,
-                "title": version.title,
-                "status": version.status,
-                "source": version.source,
-                "content_chars": len(version.content),
-            }
+            _version_payload(version, include_content=False)
             for version in versions
         ],
         "generation_tasks": tasks,
     }
 
 
+def _model_strategy_payload() -> dict:
+    strategy = build_model_strategy()
+    return {
+        "planning_model": settings.llm_planning_model,
+        "draft_model": settings.llm_draft_model,
+        "revision_model": settings.llm_revision_model,
+        "review_model": settings.llm_review_model,
+        "draft_temperature": settings.llm_draft_temperature,
+        "revision_temperature": settings.llm_revision_temperature,
+        "review_temperature": settings.llm_review_temperature,
+        "roles": strategy["roles"],
+        "warnings": strategy["warnings"],
+        "recommendations": strategy["recommendations"],
+        "suggestion": "正文/整章重写优先看 draft/revision 模型；若方向对但文笔不稳，先调正文模型或温度；若能写但审稿不准，调 review 模型。",
+    }
+
+
+def _production_preflight_payload(session, *, book_id: int, chapter_number: int) -> dict:
+    blockers: list[str] = []
+    recommendations: list[str] = []
+    if not book_id or not chapter_number:
+        return {"passed": False, "blockers": ["缺少作品或章节"], "recommendations": ["先选择作品和当前章。"], "alignment": None}
+    readiness = check_production_readiness(session, book_id=book_id, start=chapter_number, count=5, live_llm=False)
+    evidence_gate = {
+        "passed": readiness.passed,
+        "blockers": [
+            {"name": item.name, "detail": item.detail, "action": item.action}
+            for item in readiness.blockers
+        ],
+        "warnings": [
+            {"name": item.name, "detail": item.detail, "action": item.action}
+            for item in readiness.warnings
+        ],
+    }
+    for item in readiness.blockers:
+        blockers.append(f"{item.name}: {item.detail}")
+        if item.action:
+            recommendations.append(item.action)
+    for item in readiness.warnings:
+        if item.action:
+            recommendations.append(item.action)
+    try:
+        alignment = build_story_alignment_audit(session, book_id=book_id, chapter_limit=max(5, chapter_number))
+    except Exception as exc:
+        return {
+            "passed": False,
+            "blockers": [*blockers, f"方向审计失败：{exc}"],
+            "recommendations": [*recommendations, "先查看作品设定和数据库状态。"],
+            "alignment": None,
+            "evidence_gate": evidence_gate,
+        }
+    if alignment.blockers:
+        blockers.extend(alignment.blockers)
+    recommendations.extend(alignment.recommendations)
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        return {
+            "passed": not blockers,
+            "blockers": blockers,
+            "recommendations": recommendations,
+            "alignment": {"status": alignment.status, "score": alignment.score},
+            "evidence_gate": evidence_gate,
+        }
+    brief = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    bias = _chapter_bias_payload(session, book_id=book_id, chapter_number=chapter_number, brief=brief, version=version)
+    if bias.get("blockers"):
+        blockers.extend(bias["blockers"])
+    if not brief:
+        recommendations.append("当前章没有 brief，继续生产会先自动创建。")
+    return {
+        "passed": not blockers,
+        "blockers": blockers,
+        "recommendations": _dedupe(recommendations),
+        "alignment": {"status": alignment.status, "score": alignment.score},
+        "evidence_gate": evidence_gate,
+    }
+
+
+def _repair_readiness_gate_action(session, payload: dict) -> dict:
+    book_id = int(payload.get("book_id") or 0)
+    chapter_number = int(payload.get("chapter_number") or 1)
+    book = session.get(Book, book_id)
+    if not book:
+        raise ValueError(f"book not found: {book_id}")
+    platform = str(payload.get("platform") or "").strip() or book.target_platform or "番茄小说"
+    query = str(payload.get("market_query") or "").strip() or f"{platform} {book.genre or '网文'} 最新爆款 趋势 开篇 卖点 避雷"
+    before = check_production_readiness(session, book_id=book_id, start=chapter_number, count=5, live_llm=False)
+    steps: list[dict] = []
+
+    needs_market = any(check.name == "evidence" and (not check.passed or check.severity == "warning") for check in before.checks)
+    if needs_market:
+        market = ensure_market_research_evidence(
+            session,
+            genre=book.genre or "未分类",
+            query=query,
+            platform=platform,
+            auto_search=True,
+        )
+        steps.append({"name": "market_evidence", **market.get("step", {})})
+
+    needs_memory = any(check.name == "semantic_memory" and check.severity == "warning" for check in before.checks)
+    if needs_memory:
+        memory = index_book_knowledge(session, book_id=book_id, dry_run=True, reset=True)
+        steps.append({"name": "semantic_memory", "status": "rebuilt", "indexed_count": memory.get("indexed_count", 0)})
+
+    skeleton_preview = None
+    needs_skeleton = any(
+        check.name in {"skeleton_governance", "skeleton_approval", "foundation", "story_bible"}
+        and (not check.passed or check.severity == "warning")
+        for check in before.checks
+    )
+    if needs_skeleton:
+        current_skeleton = _current_story_skeleton_values(session, book_id=book_id)
+        skeleton_preview = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+        market_count = int((skeleton_preview.get("market_context") or {}).get("signal_count") or 0)
+        steps.append(
+            {
+                "name": "skeleton_repair_preview",
+                "status": "created",
+                "passed": bool(skeleton_preview.get("passed")),
+                "market_signal_count": market_count,
+                "score_before": (skeleton_preview.get("before") or {}).get("score"),
+                "score_after": (skeleton_preview.get("after") or {}).get("score"),
+            }
+        )
+
+    after = check_production_readiness(session, book_id=book_id, start=chapter_number, count=5, live_llm=False)
+    return {
+        "status": "completed",
+        "message": _readiness_repair_message(steps=steps, after=after),
+        "steps": steps,
+        "before": _readiness_payload(before),
+        "after": _readiness_payload(after),
+        "skeleton_preview": skeleton_preview,
+    }
+
+
+def _readiness_repair_message(*, steps: list[dict], after) -> str:
+    if not steps:
+        return "生产前准备已满足当前门禁，无需自动补齐。"
+    blockers = len(after.blockers)
+    warnings = len(after.warnings)
+    return f"生产前准备补齐完成：执行 {len(steps)} 步，剩余硬阻断 {blockers} 项，建议补齐 {warnings} 项。"
+
+
+def _readiness_payload(report) -> dict:
+    return {
+        "passed": report.passed,
+        "blocker_count": len(report.blockers),
+        "warning_count": len(report.warnings),
+        "checks": [
+            {
+                "name": item.name,
+                "passed": item.passed,
+                "detail": item.detail,
+                "severity": item.severity,
+                "action": item.action,
+            }
+            for item in report.checks
+        ],
+    }
+
+
+def _current_story_skeleton_values(session, *, book_id: int) -> dict[str, str]:
+    foundation = _latest_foundation_for_dashboard(session, book_id=book_id)
+    bible = get_story_bible(session, book_id=book_id)
+    volume = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
+    arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
+    return {
+        "premise": foundation.premise if foundation else (bible.positioning if bible else ""),
+        "reader_promise": foundation.reader_promise if foundation else (bible.reader_promise if bible else ""),
+        "world_engine": foundation.world_engine if foundation else (bible.power_curve if bible else ""),
+        "protagonist_engine": foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else ""),
+        "conflict_engine": foundation.conflict_engine if foundation else (bible.main_plot if bible else ""),
+        "forbidden_rules": bible.forbidden_rules if bible else "",
+        "style_guide": bible.style_guide if bible else "",
+        "volume_summary": volume.summary if volume else "",
+        "arc_goal": arc.goal if arc else "",
+        "arc_climax": arc.climax if arc else "",
+        "arc_turn": arc.turn if arc else "",
+    }
+
+
+def _preflight_only_model_drift(preflight: dict) -> bool:
+    blockers = [str(item) for item in preflight.get("blockers", [])]
+    return bool(blockers) and all(item.startswith("model_default_drift:") for item in blockers)
+
+
+def _auto_repair_preflight_if_needed(session, *, book_id: int, chapter_number: int, preflight: dict) -> dict:
+    blockers = [str(item) for item in preflight.get("blockers", [])]
+    if not blockers or not _preflight_only_repairable_brief_blockers(blockers):
+        return preflight
+    repair_chapters = _repairable_brief_chapters(blockers, fallback=chapter_number)
+    repaired = []
+    for number in repair_chapters:
+        if number < 1:
+            continue
+        _repair_chapter_brief(session, book_id=book_id, chapter_number=number)
+        repaired.append(number)
+    if repaired:
+        session.commit()
+    return _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+
+
+def _preflight_only_repairable_brief_blockers(blockers: list[str]) -> bool:
+    return all(
+        "最新章节 brief 仍含旧质检/旧修订合同残留" in item
+        or "章节 brief 未显式承接核心作者意图" in item
+        for item in blockers
+    )
+
+
+def _repairable_brief_chapters(blockers: list[str], *, fallback: int) -> list[int]:
+    numbers: list[int] = []
+    for blocker in blockers:
+        if ":" not in blocker:
+            continue
+        tail = blocker.rsplit(":", 1)[1]
+        for part in tail.replace("，", ",").split(","):
+            part = part.strip()
+            if part.isdigit():
+                numbers.append(int(part))
+    if not numbers and fallback:
+        numbers.append(fallback)
+    return sorted(set(numbers))
+
+
+def _create_model_drift_revision_brief(session, *, book_id: int, chapter_number: int, blockers: list[str]) -> None:
+    drift = "，".join(item.split(":", 1)[1] if ":" in item else item for item in blockers)
+    note = "\n".join(
+        [
+            "自动偏差修复：当前可读稿触发模型默认套路偏差。",
+            f"需要删除或替换这些表达/写法：{drift}",
+            "修订要求：保留现有可读场景、人物关系、追逃压力和章末危机，只把偏向网游系统文、刷经验、任务流的表达改成真实江湖语境。",
+            "验收方式：下一版不能出现上述偏差词；人物行动必须仍然由江湖因果、门派恩怨、修炼代价和现场选择推动。",
+        ]
+    )
+    submit_revision_suggestion(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        suggestion_text=note,
+        platform="dashboard-auto-bias",
+        revision_mode="local_patch",
+    )
+
+
+def _chapter_bias_payload(
+    session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    brief: ChapterBrief | None,
+    version: ChapterVersion | None,
+) -> dict:
+    canon_context, _ = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
+    report = evaluate_generation_bias(
+        content=version.content if version else "",
+        goal=brief.goal if brief else "",
+        required_beats=brief.required_beats if brief else "",
+        constraints=brief.constraints if brief else "",
+        canon_context=canon_context,
+    )
+    return report.to_dict()
+
+
+def _acceptance_payload(
+    session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    brief: ChapterBrief | None,
+    version: ChapterVersion | None,
+) -> dict | None:
+    if not brief or not version:
+        return None
+    canon_context, _ = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
+    author_preferences = format_author_preference_context(session, book_id=book_id)
+    report = evaluate_author_intent(
+        content=version.content or "",
+        goal=brief.goal or "",
+        required_beats=brief.required_beats or "",
+        constraints=brief.constraints or "",
+        canon_context=canon_context,
+        author_preferences=author_preferences,
+    )
+    data = report.to_dict()
+    data.setdefault("total_points", len(data.get("covered_points", [])) + len(data.get("missing_points", [])))
+    data.setdefault("covered_count", len(data.get("covered_points", [])))
+    return data
+
+
+def _director_sheet_payload(session, *, book_id: int, chapter: Chapter, brief: ChapterBrief | None) -> str:
+    if not brief:
+        return ""
+    book = session.get(Book, book_id)
+    if not book:
+        return ""
+    fresh_rewrite = "修订模式:fresh" in (brief.constraints or "") or "修订模式：fresh" in (brief.constraints or "")
+    packet = build_chapter_production_packet(
+        session,
+        book=book,
+        chapter_number=chapter.chapter_number,
+        goal=brief.goal,
+        required_beats=brief.required_beats,
+        constraints=brief.constraints,
+        mode="fresh" if fresh_rewrite else ("revision" if brief.status == "revision_ready" else "draft"),
+        revision_goal=brief.goal if brief.status == "revision_ready" else "",
+        revision_required_beats=brief.required_beats if brief.status == "revision_ready" else "",
+        revision_constraints=brief.constraints if brief.status == "revision_ready" else "",
+        revision_context_mode="fresh" if fresh_rewrite else ("targeted" if brief.status == "revision_ready" else "draft"),
+        fresh_rewrite=fresh_rewrite,
+        rewrite_mode=brief.status == "revision_ready",
+    )
+    return packet.director_sheet
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _update_chapter_brief_action(session, payload: dict) -> dict:
+    book_id = int(payload.get("book_id") or 0)
+    chapter_number = int(payload.get("chapter_number") or 0)
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        raise ValueError("chapter not found")
+    brief = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
+    if not brief:
+        raise ValueError("chapter brief not found")
+    brief.goal = str(payload.get("goal") or "").strip()
+    brief.required_beats = str(payload.get("required_beats") or "").strip()
+    brief.constraints = str(payload.get("constraints") or "").strip()
+    if brief.status not in {"revision_ready", "ready"}:
+        brief.status = "ready"
+    session.flush()
+    return {"status": "saved", "brief_id": brief.id}
+
+
+def _repair_current_chapter_brief_action(session, payload: dict) -> dict:
+    book_id = int(payload.get("book_id") or 0)
+    chapter_number = int(payload.get("chapter_number") or 0)
+    brief = _repair_chapter_brief(session, book_id=book_id, chapter_number=chapter_number)
+    after = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
+    return {
+        "status": "repaired" if after.get("passed") else "needs_attention",
+        "brief_id": brief.id,
+        "message": "已清理当前章生产说明；可以继续生产。" if after.get("passed") else "已生成干净生产说明，但仍有阻断项需要查看。",
+        "blockers": after.get("blockers", []),
+    }
+
+
+def _repair_chapter_brief(session, *, book_id: int, chapter_number: int) -> ChapterBrief:
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        raise ValueError("chapter not found")
+    latest = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    if latest:
+        latest.status = "superseded"
+    status = "revision_ready" if version and version.status == "needs_revision" else "ready"
+    goal = _clean_brief_goal(chapter_number, latest.goal if latest else "")
+    required = _clean_brief_required_beats(chapter_number, latest.required_beats if latest else "")
+    constraints = ensure_chapter_production_standard(
+        _clean_brief_constraints(latest.constraints if latest else ""),
+        chapter_number=chapter_number,
+    )
+    brief = ChapterBrief(chapter_id=chapter.id, goal=goal, required_beats=required, constraints=constraints, status=status)
+    session.add(brief)
+    session.flush()
+    return brief
+
+
+def _clean_brief_goal(chapter_number: int, previous: str) -> str:
+    base = _strip_stale_brief_text(previous).strip()
+    if not base or len(base) < 20:
+        base = f"第{chapter_number}章：围绕主角陈默在真实武侠世界中的处境推进剧情。"
+    return "\n".join(
+        [
+            base.splitlines()[0],
+            "核心作者意图：把《大江湖》写成真实存在、有血有肉的武侠世界；玩家进入近似穿越，必须遵循江湖规则、门派关系、修炼代价和人情因果。",
+            "主角方向：陈默不是靠打怪升级，也不能靠演员经验万能解题；他应靠现场证据、风险判断、人物误读、武侠套路知识和承担代价来争取机会。",
+        ]
+    )
+
+
+def _clean_brief_required_beats(chapter_number: int, previous: str) -> str:
+    cleaned = _strip_stale_brief_text(previous)
+    lines = [
+        f"第{chapter_number}章必须以具体场景、人物行动和外部压力推进，不写后台说明。",
+        "游戏世界呈现为真实武侠世界：人物有门派、家族、利益、恩怨、恐惧、欲望和日常生活逻辑。",
+        "陈默的行动要体现现场观察、证据推理、武侠桥段知识和风险承担；不要把演员/龙套/表演经验写成万能解法。",
+        "成长来源只能是修炼、拜师、交易、冒险、传承、人情和江湖因果；禁止写成刷经验、打怪升级、机械任务链。",
+        "章末留下由本章行动自然引出的新危险、新关系或新机会。",
+    ]
+    for line in cleaned.splitlines():
+        line = line.strip(" -\t")
+        if line and line not in lines and len(line) <= 80:
+            lines.append(line)
+        if len(lines) >= 8:
+            break
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _clean_brief_constraints(previous: str) -> str:
+    cleaned = _strip_stale_brief_text(previous)
+    lines = [
+        "3000-4500 中文字符，正文优先，不用自检内容凑字数。",
+        "不要输出导演单、质检报告、修订合同、验收清单或系统说明。",
+        "少量游戏界面只能作为玩家感知层点到为止，不能替代真实江湖人物和因果。",
+        "对白和动作必须承接上一段后果，不能另起炉灶。",
+        "不得出现打怪升级、刷经验、刷副本、任务大厅、机械 NPC、系统任务等反方向表达。",
+    ]
+    for line in cleaned.splitlines():
+        line = line.strip(" -\t")
+        if line and not _line_has_stale_marker(line) and line not in lines and len(line) <= 90:
+            lines.append(line)
+        if len(lines) >= 9:
+            break
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def _strip_stale_brief_text(text: str) -> str:
+    markers = ("依据质检报告", "上次质检分数", "采纳二审建议", "修复质检问题", "执行修订合同", "修订合同:", "原始人工意见", "验收清单")
+    keep = []
+    skipping_contract = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if any(marker in line for marker in markers):
+            skipping_contract = True
+            continue
+        if skipping_contract and (line.startswith("- ") or line.startswith("•") or "：" in line or ":" in line):
+            continue
+        skipping_contract = False
+        if line:
+            keep.append(line)
+    return "\n".join(keep)
+
+
+def _line_has_stale_marker(line: str) -> bool:
+    return any(marker in line for marker in ("质检", "修订合同", "原始人工意见", "验收清单", "二审建议"))
+
+
+def _version_payload(version: ChapterVersion | None, *, include_content: bool = True) -> dict | None:
+    if not version:
+        return None
+    payload = {
+        "id": version.id,
+        "version_number": version.version_number,
+        "title": version.title,
+        "status": version.status,
+        "source": version.source,
+        "content_chars": len(version.content),
+    }
+    if include_content:
+        payload["content"] = version.content
+    return payload
+
+
 def _feedback_payload(session, *, book_id: int) -> dict:
     summary = summarize_platform_feedback(session, book_id=book_id)
     feedback_items = list_platform_feedback(session, book_id=book_id, limit=20)
     adjustments = list_feedback_adjustments(session, book_id=book_id, limit=20)
+    chapter_ids = {item.chapter_id for item in feedback_items if item.chapter_id}
+    chapter_numbers = {}
+    if chapter_ids:
+        chapters = session.scalars(select(Chapter).where(Chapter.id.in_(chapter_ids)))
+        chapter_numbers = {chapter.id: chapter.chapter_number for chapter in chapters}
     return {
         "summary": {
             "total": summary.total,
@@ -2110,6 +2856,7 @@ def _feedback_payload(session, *, book_id: int) -> dict:
             {
                 "id": item.id,
                 "chapter_id": item.chapter_id,
+                "chapter_number": chapter_numbers.get(item.chapter_id),
                 "platform": item.platform,
                 "metric_name": item.metric_name,
                 "metric_value": item.metric_value,
@@ -2138,8 +2885,25 @@ def _knowledge_payload(session, *, book_id: int, chapter_number: int) -> dict:
     canon_context, canon_refs = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
     evidence_context, signal_ids = format_market_evidence_context(session, genre=book.genre)
     bible = get_story_bible(session, book_id=book_id)
+    embedding_rows = []
+    embedding_count = 0
+    visual_assets = []
+    try:
+        embedding_rows = list(
+            session.scalars(
+                select(KnowledgeEmbedding)
+                .where(KnowledgeEmbedding.book_id == book_id)
+                .order_by(KnowledgeEmbedding.id.desc())
+                .limit(5)
+            )
+        )
+        embedding_count = session.query(KnowledgeEmbedding).filter(KnowledgeEmbedding.book_id == book_id).count()
+        visual_assets = list_visual_assets(session, book_id=book_id, limit=8)
+    except OperationalError:
+        session.rollback()
     return {
         "story_bible": {"id": bible.id, "status": bible.status} if bible else None,
+        "skeleton": _story_skeleton_payload(session, book_id=book_id),
         "story_refs": story_refs,
         "canon_refs": canon_refs,
         "story_context": story_context,
@@ -2156,7 +2920,94 @@ def _knowledge_payload(session, *, book_id: int, chapter_number: int) -> dict:
             }
             for item in audit_market_evidence(session, genre=book.genre)
         ],
+        "semantic_memory": {
+            "count": embedding_count,
+            "recent": [
+                {
+                    "id": item.id,
+                    "source_type": item.source_type,
+                    "source_label": item.source_label,
+                    "model": item.model,
+                    "dimensions": item.dimensions,
+                }
+                for item in embedding_rows
+            ],
+        },
+        "visual_assets": [
+            {
+                "id": item.id,
+                "asset_type": item.asset_type,
+                "chapter_id": item.chapter_id,
+                "status": item.status,
+                "model": item.model,
+                "artifact_path": item.artifact_path,
+            }
+            for item in visual_assets
+        ],
+        "web_search": web_search_status(),
     }
+
+
+def _story_skeleton_payload(session, *, book_id: int) -> dict:
+    foundation = _latest_foundation_for_dashboard(session, book_id=book_id)
+    bible = get_story_bible(session, book_id=book_id)
+    volume = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
+    arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
+    skeleton_values = {
+        "premise": foundation.premise if foundation else (bible.positioning if bible else ""),
+        "reader_promise": foundation.reader_promise if foundation else (bible.reader_promise if bible else ""),
+        "world_engine": foundation.world_engine if foundation else (bible.power_curve if bible else ""),
+        "protagonist_engine": foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else ""),
+        "conflict_engine": foundation.conflict_engine if foundation else (bible.main_plot if bible else ""),
+        "forbidden_rules": bible.forbidden_rules if bible else "",
+        "style_guide": bible.style_guide if bible else "",
+        "volume_summary": volume.summary if volume else "",
+        "arc_goal": arc.goal if arc else "",
+        "arc_climax": arc.climax if arc else "",
+        "arc_turn": arc.turn if arc else "",
+    }
+    payload = {
+        "foundation": {
+            "id": foundation.id,
+            "premise": foundation.premise,
+            "reader_promise": foundation.reader_promise,
+            "world_engine": foundation.world_engine,
+            "protagonist_engine": foundation.protagonist_engine,
+            "conflict_engine": foundation.conflict_engine,
+            "status": foundation.status,
+        } if foundation else None,
+        "story_bible": {
+            "id": bible.id,
+            "positioning": bible.positioning,
+            "reader_promise": bible.reader_promise,
+            "main_plot": bible.main_plot,
+            "protagonist_arc": bible.protagonist_arc,
+            "relationship_arc": bible.relationship_arc,
+            "power_curve": bible.power_curve,
+            "forbidden_rules": bible.forbidden_rules,
+            "style_guide": bible.style_guide,
+            "status": bible.status,
+        } if bible else None,
+        "volume": {
+            "id": volume.id,
+            "title": volume.title,
+            "summary": volume.summary,
+            "status": volume.status,
+        } if volume else None,
+        "story_arc": {
+            "id": arc.id,
+            "title": arc.title,
+            "start_chapter": arc.start_chapter,
+            "end_chapter": arc.end_chapter,
+            "goal": arc.goal,
+            "climax": arc.climax,
+            "turn": arc.turn,
+            "status": arc.status,
+        } if arc else None,
+    }
+    payload["approvals"] = _skeleton_approval_payload(session, book_id=book_id, skeleton=skeleton_values)
+    payload["governance"] = audit_story_skeleton_with_agent_evidence(session, book_id=book_id).to_dict()
+    return payload
 
 
 def _llm_usage_payload(session, *, book_id: int) -> dict:
@@ -2220,9 +3071,11 @@ def _failed_tasks_payload(session, *, book_id: int) -> dict:
     advice: dict[str, str] = {}
     rows = []
     for task in tasks:
+        if _obsolete_failed_generation_task(session, task):
+            continue
         input_data = _loads_json(task.input_json)
         output_data = _loads_json(task.output_json)
-        error_category = str(output_data.get("error_category") or "")
+        error_category = str(output_data.get("error_category") or _infer_error_category(output_data))
         counts[error_category] = counts.get(error_category, 0) + 1
         advice[error_category] = llm_failure_suggestion(error_category)
         rows.append(
@@ -2259,8 +3112,48 @@ def _failed_tasks_payload(session, *, book_id: int) -> dict:
     }
 
 
+def _obsolete_failed_generation_task(session, task: GenerationTask) -> bool:
+    if task.task_type in QUEUE_TYPES:
+        return False
+    input_data = _loads_json(task.input_json)
+    chapter_number = input_data.get("chapter_number")
+    source_version_id = input_data.get("source_version_id")
+    revision_brief_id = input_data.get("revision_brief_id")
+    quality_report_id = input_data.get("quality_report_id")
+    stmt = (
+        select(GenerationTask)
+        .where(
+            GenerationTask.book_id == task.book_id,
+            GenerationTask.task_type == task.task_type,
+            GenerationTask.status == "completed",
+            GenerationTask.created_at > task.created_at,
+        )
+        .order_by(GenerationTask.id.desc())
+    )
+    for candidate in session.scalars(stmt):
+        candidate_input = _loads_json(candidate.input_json)
+        if chapter_number and candidate_input.get("chapter_number") != chapter_number:
+            continue
+        if source_version_id and candidate_input.get("source_version_id") != source_version_id:
+            continue
+        if revision_brief_id and candidate_input.get("revision_brief_id") != revision_brief_id:
+            continue
+        if quality_report_id and candidate_input.get("quality_report_id") != quality_report_id:
+            continue
+        return True
+    return False
+
+
+def _infer_error_category(output_data: dict) -> str:
+    error = str(output_data.get("error") or "")
+    if "LLM output is not valid JSON" in error or "StructuredOutputError" in error:
+        return "structured_output"
+    return ""
+
+
 def _publishing_payload(session, *, book_id: int) -> dict:
     targets = list(session.scalars(select(PublishingTarget).order_by(PublishingTarget.id)))
+    ready_versions = _ready_publish_versions(session, book_id=book_id)
     jobs = list(
         session.scalars(
             select(PublishJob)
@@ -2295,6 +3188,7 @@ def _publishing_payload(session, *, book_id: int) -> dict:
             }
             for target in targets
         ],
+        "ready_versions": ready_versions,
         "jobs": [_publish_job_payload(session, job) for job in jobs],
         "executions": [
             {
@@ -2309,6 +3203,38 @@ def _publishing_payload(session, *, book_id: int) -> dict:
             for execution in executions
         ],
     }
+
+
+def _ready_publish_versions(session, *, book_id: int) -> list[dict]:
+    rows: list[dict] = []
+    chapters = list(session.scalars(select(Chapter).where(Chapter.book_id == book_id).order_by(Chapter.chapter_number)))
+    for chapter in chapters:
+        version = session.scalar(
+            select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc())
+        )
+        if not version or version.status != "approved":
+            continue
+        active_job = session.scalar(
+            select(PublishJob)
+            .where(
+                PublishJob.chapter_version_id == version.id,
+                PublishJob.status.in_(["pending", "dry_run_ready", "queued", "published", "failed"]),
+            )
+            .order_by(PublishJob.id.desc())
+        )
+        if active_job:
+            continue
+        preflight = build_publish_preflight(session, version_id=version.id)
+        rows.append(
+            {
+                "version_id": version.id,
+                "chapter_number": chapter.chapter_number,
+                "title": version.title,
+                "status": version.status,
+                "preflight": preflight,
+            }
+        )
+    return rows
 
 
 def _database_payload(session) -> dict:
@@ -2360,6 +3286,7 @@ def _publish_job_payload(session, job: PublishJob) -> dict:
         "status": job.status,
         "automation_payload": _loads_json(job.automation_payload),
         "result_report": job.result_report,
+        "preflight": build_publish_preflight(session, version_id=job.chapter_version_id) if version else None,
         "preview": {
             "title": version.title if version else "",
             "content_chars": len(content),
@@ -2439,6 +3366,61 @@ def _parse_feedback_ids(value) -> list[int]:
     if isinstance(value, list):
         return [int(item) for item in value]
     return [int(item.strip()) for item in str(value or "").split(",") if item.strip()]
+
+
+def _approval_revision_mode_from_level(level: str) -> str:
+    legacy = {
+        "polish": "polish",
+        "local_patch": "local_patch",
+        "targeted": "targeted",
+        "rewrite": "rewrite",
+        "rebuild": "rewrite",
+    }
+    return legacy.get(level, "")
+
+
+def _approval_revision_label(mode: str) -> str:
+    labels = {
+        "polish": "小修",
+        "local_patch": "局部补丁",
+        "targeted": "定点修订",
+        "rewrite": "结构重写",
+        "fresh": "按最新骨架重启",
+    }
+    return labels.get(mode, "结构重写")
+
+
+def _approval_revision_text(*, mode: str, note: str = "") -> str:
+    extras = note.strip()
+    if mode == "fresh":
+        base = (
+            "审批决策：按最新生产骨架重启本章。旧稿已废弃，不要在旧稿上局部润色，也不要参考旧稿段落顺序、旧场景推进或旧句式。"
+            "必须以最新生产骨架、Story Bible、已同步 Canon 和本次人工意见为准，重新设计开篇牵引、主角行动链、信息释放顺序、主要场景推进和章末钩子。"
+            "只保留数据库 Canon 中仍有效的必要事实；旧质检中的具体旧桥段、旧名词和旧能力表现不得反向污染新稿。"
+        )
+    elif mode == "rewrite":
+        base = (
+            "审批决策：结构重写。按最新生产骨架重做整章，不要在旧稿上局部润色。"
+            "旧稿只用于避免 Canon 断裂；必须重新设计开篇牵引、主角行动链、信息释放顺序、主要场景推进和章末钩子。"
+            "允许替换旧场景、删除旧桥段、改变段落顺序和表达方式；只保留必要核心设定、关键名词和已登记 Canon。"
+        )
+    elif mode == "targeted":
+        base = (
+            "审批决策：定点修订。当前版本有可用部分，不要彻底重写整章。"
+            "必须保留已经有效的场景、人物行动链、爽点和章末钩子，只替换或扩写人工指出的问题段落。"
+            "旧稿可作为主要结构参考，但最新生产骨架、Canon 和本次人工意见仍然优先。"
+        )
+    elif mode == "local_patch":
+        base = (
+            "审批决策：局部补丁。当前版本主体可用，只修改人工明确指出的句子、词语或短段落。"
+            "不得重排场景、不得改变章末事实、不得把可用段落扩写成整章重写。"
+            "如果问题是模型套路词或世界观偏差，只把偏差表达改成符合当前世界规则的说法。"
+        )
+    else:
+        base = "审批决策：小修。保留当前剧情结构，只润色语言表达、删掉生硬句、增强现场感和人物反应自然度。"
+    if extras:
+        return f"{base} 补充意见：{extras}"
+    return base
 
 
 def _loads_json(value: str) -> dict:

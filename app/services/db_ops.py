@@ -80,7 +80,9 @@ def restore_database_from_backup(*, backup_path: str, confirm: bool = False) -> 
         raise ValueError(f"backup path is not a file: {source_path}")
     pre_restore_path = _copy_sqlite_backup(db_path, label="before-restore")
     db_session.engine.dispose()
+    _remove_sqlite_sidecars(db_path)
     shutil.copy2(source_path, db_path)
+    _remove_sqlite_sidecars(db_path)
     return DatabaseRestoreResult(
         database_path=str(db_path),
         source_backup_path=str(source_path),
@@ -201,6 +203,13 @@ def _copy_sqlite_backup(db_path: Path, *, label: str = "") -> Path:
     backup_path = backup_dir / f"{db_path.stem}-{stamp}{suffix}{db_path.suffix or '.db'}"
     shutil.copy2(db_path, backup_path)
     return backup_path
+
+
+def _remove_sqlite_sidecars(db_path: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(db_path) + suffix)
+        if sidecar.exists():
+            sidecar.unlink()
 
 
 def _resolve_backup_path(value: str) -> Path:
