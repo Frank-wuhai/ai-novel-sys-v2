@@ -514,6 +514,7 @@ def _append_adoption_record(
             "sample_index": sample_index,
             "sample_title": sample.get("title", ""),
             "direction": sample.get("direction", ""),
+            "writing_fingerprint": _sample_writing_fingerprint(sample),
             "chapter_number": chapter_number,
             "feedback_id": feedback_id,
             "feedback_adjustment_id": adjustment_id,
@@ -652,6 +653,7 @@ def _adoption_record_from_raw(
         "chapter_number": _safe_int(raw.get("chapter_number"), task_chapter_number),
         "sample_title": raw.get("sample_title") or sample.get("title", ""),
         "direction": raw.get("direction") or sample.get("direction", ""),
+        "writing_fingerprint": raw.get("writing_fingerprint") or _sample_writing_fingerprint(sample),
         "adoption_note": sample.get("adoption_note", ""),
         "why_it_works": sample.get("why_it_works", ""),
         "feedback_id": raw.get("feedback_id"),
@@ -679,6 +681,7 @@ def _enrich_adoption_outcome(
         "chapter_number": adoption["chapter_number"],
         "sample_title": adoption.get("sample_title", ""),
         "direction": adoption.get("direction", ""),
+        "writing_fingerprint": adoption.get("writing_fingerprint", ""),
         "adoption_note": adoption.get("adoption_note", ""),
         "why_it_works": adoption.get("why_it_works", ""),
         "adopted_at": adoption.get("adopted_at", ""),
@@ -959,6 +962,7 @@ def _sample_adoption_text(*, task_id: int, sample: dict) -> str:
     plan = "；".join(_list(sample.get("scene_plan"))[:4])
     risks = "；".join(_list(sample.get("risks"))[:3])
     engine_contract = _sample_engine_contract(sample)
+    fingerprint = _sample_writing_fingerprint(sample)
     return "\n".join(
         [
             f"采用章节小样 #{task_id}-{sample.get('index')} 作为本章新版方向。",
@@ -969,6 +973,8 @@ def _sample_adoption_text(*, task_id: int, sample: dict) -> str:
             *engine_contract,
             "小样气质参考：",
             _compact(str(sample.get("opening") or ""), 420),
+            "写作指纹继承：",
+            fingerprint,
             f"后续场景推进：{plan}",
             f"结构差异：{sample.get('difference_from_existing', '')}",
             f"贴身视角策略：{sample.get('pov_strategy', '')}",
@@ -976,8 +982,61 @@ def _sample_adoption_text(*, task_id: int, sample: dict) -> str:
             f"采用说明：{sample.get('adoption_note', '')}",
             f"注意规避：{risks}",
             "验收方式：下一版保留小样的压力逻辑和读感即可，不要求逐字复刻小样原文；优先修补当前稿缺口，避免无必要整章重写。",
+            "验收方式：正文必须继承写作指纹中的视角距离、场景展开、对白功能和句段节奏；不得只继承设定名词。",
         ]
     )
+
+
+def _sample_writing_fingerprint(sample: dict) -> str:
+    opening = str(sample.get("opening") or "")
+    axis = str(sample.get("exploration_axis") or "").strip()
+    hypothesis = str(sample.get("experiment_hypothesis") or "").strip()
+    pov = str(sample.get("pov_strategy") or "").strip()
+    precision = str(sample.get("precision_strategy") or "").strip()
+    anti_ai = str(sample.get("anti_ai_flavor_strategy") or "").strip()
+    sentence_style = _sentence_style_label(opening)
+    sensory = _sensory_label(opening)
+    dialogue = _dialogue_label(opening)
+    lines = [
+        f"- 叙事发动机：{axis or hypothesis or '以角色当下目标和现场阻碍推进'}。",
+        f"- 视角距离：{pov or '贴住主角当下感知、误判和身体反应'}。",
+        f"- 场景展开：{sensory}；先给可见/可触证据，再让人物判断和行动。",
+        f"- 句段节奏：{sentence_style}；不要把场景压成冷硬短句或抽象判断。",
+        f"- 对白功能：{dialogue}；对白必须带身份、试探、利益或情绪。",
+        f"- 表达护栏：{precision or anti_ai or '物件、动词、视线条件和推理链必须准确'}。",
+    ]
+    return "\n".join(lines)
+
+
+def _sentence_style_label(text: str) -> str:
+    parts = [part.strip() for part in re.split(r"[。！？!?]", text or "") if part.strip()]
+    if not parts:
+        return "中等句长，动作和反应交替"
+    avg = sum(len(part) for part in parts) / len(parts)
+    if avg < 14:
+        return "短句偏多，必须补足动作后果和环境承接"
+    if avg > 32:
+        return "长句偏多，必须拆出动作、观察和反应层次"
+    return "中等句长，适合动作、观察、反应交替推进"
+
+
+def _sensory_label(text: str) -> str:
+    markers = {
+        "视觉": ("看", "望", "瞧", "光", "影", "色", "黑", "白"),
+        "听觉": ("听", "响", "声", "喊", "问", "笑", "咳"),
+        "触觉": ("冷", "热", "痛", "麻", "烫", "湿", "汗", "握"),
+        "气味": ("味", "腥", "香", "臭", "烟", "药"),
+    }
+    hits = [name for name, values in markers.items() if any(marker in text for marker in values)]
+    if not hits:
+        return "感官偏弱，正文要补空间、物件、声音和身体反应"
+    return "、".join(hits[:3]) + "较明显"
+
+
+def _dialogue_label(text: str) -> str:
+    if "“" in text or "\"" in text:
+        return "已有对白入口，正文要让对白承担试探、遮掩或利益交换"
+    return "对白偏少，正文至少补一处能改变局面的对话"
 
 
 def _sample_engine_contract(sample: dict) -> list[str]:

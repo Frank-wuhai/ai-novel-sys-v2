@@ -8,6 +8,7 @@ from app.db.session import session_scope
 from app.models.entities import ChapterBrief, ChapterVersion
 from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.planning import plan_chapters, run_next_action
+from app.services.revision_supervisor import apply_revision_budget_recovery
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,7 @@ def run_author_mode(
     executed: list[dict] = []
     revision_count = 0
     recovery_revision_used = False
+    budget_recovery_used = False
     max_actions = max_revision_cycles * 3 + 8
     for _ in range(max_actions):
         with session_scope() as session:
@@ -59,11 +61,7 @@ def run_author_mode(
                 )
                 break
             if item.next_action == "record_chapter_continuity":
-                summary = default_chapter_continuity_summary(
-                    session,
-                    book_id=book_id,
-                    chapter_number=chapter_number,
-                )
+                summary = default_chapter_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
                 result = record_chapter_continuity(
                     session,
                     book_id=book_id,
@@ -84,12 +82,28 @@ def run_author_mode(
                     if _is_recovery_revision_pending(session, item) and not recovery_revision_used:
                         recovery_revision_used = True
                         revision_count += 1
+                    elif not budget_recovery_used:
+                        recovery = apply_revision_budget_recovery(session, book_id=book_id, chapter_number=chapter_number)
+                        executed.append(
+                            {
+                                "action": "revision_budget_recovery",
+                                "status": "executed" if recovery.status == "recovered" else "blocked",
+                                "message": recovery.message,
+                                "object_id": recovery.recovery_brief_id or recovery.recovery_version_id,
+                            }
+                        )
+                        if recovery.status == "recovered":
+                            budget_recovery_used = True
+                            recovery_revision_used = True
+                            revision_count += 1
+                            continue
+                        break
                     else:
                         executed.append(
                             {
                                 "action": "revise_chapter",
                                 "status": "blocked",
-                                "message": "自动修订预算已用完，系统已暂停以避免继续消耗；请查看当前最佳稿或重新开始本章。",
+                                "message": "自动修订预算已用完，系统已回到当前最佳稿并换策略处理；若仍未通过，系统会保留最佳稿并暂停消耗。",
                                 "object_id": item.latest_version_id,
                             }
                         )
@@ -115,11 +129,7 @@ def run_author_mode(
             if result.status != "executed":
                 break
     terminal = author_terminal_status(executed)
-    return AuthorModeRun(
-        executed=executed,
-        terminal_status=terminal["status"],
-        terminal_message=terminal["message"],
-    )
+    return AuthorModeRun(executed=executed, terminal_status=terminal["status"], terminal_message=terminal["message"])
 
 
 def _is_recovery_revision_pending(session, item) -> bool:
@@ -150,6 +160,8 @@ def author_terminal_status(executed: list[dict]) -> dict:
         return {"status": "system_failed", "message": message or "模型或系统执行失败。"}
     if action == "revise_chapter" and status == "blocked":
         return {"status": "auto_paused", "message": message or "自动修订预算已用完，系统已暂停以避免继续消耗。"}
+    if action == "revision_budget_recovery" and status == "executed":
+        return {"status": "auto_paused", "message": message or "系统已自动回到最佳稿并换策略修订。"}
     if status == "blocked":
         return {"status": "ready_for_human_reading", "message": message or "正文阶段已完成，等待人工判断。"}
     return {"status": "auto_paused", "message": message or "主笔模式已暂停，系统已保留当前最佳状态。"}

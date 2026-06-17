@@ -148,6 +148,7 @@ def maybe_apply_editorial_stratification(
     report_data = _loads_json(quality.report)
     stratification = stratify_quality_report(report_data)
     report_data["editorial_stratification"] = stratification.to_dict()
+    report_data["editorial_guidance"] = build_editorial_guidance(stratification)
     quality.report = json.dumps(report_data, ensure_ascii=False)
     if not stratification.should_auto_revise:
         session.flush()
@@ -201,6 +202,57 @@ def maybe_apply_editorial_stratification(
     sanitize_existing_chapter_brief(session, book_id=book_id, brief=new_brief)
     session.flush()
     return stratification
+
+
+def build_editorial_guidance(stratification: EditorialStratification) -> dict:
+    """Return a user-facing editing decision without exposing internal gates."""
+    if stratification.tier == TIER_CONTAMINATED:
+        return {
+            "level": "上下文污染稿",
+            "decision": "先清理设定和章节计划，不继续修正文。",
+            "next_step": "系统自动同步作品设定、长期设定和章节 brief 后再重新生产。",
+            "revision_depth": "context_repair",
+            "preserve_policy": "不保留污染片段。",
+        }
+    if stratification.tier == TIER_REBUILD:
+        return {
+            "level": "废稿/重构稿",
+            "decision": "不沿当前稿继续局部修补，改为回到最新骨架重建章节。",
+            "next_step": "系统保留可用意图，重新组织行动链、场景顺序和章末钩子。",
+            "revision_depth": "structural_rebuild",
+            "preserve_policy": "只保留明确有效的设定、人物目标和读者承诺。",
+        }
+    if stratification.tier == TIER_PROBLEM_DRAFT:
+        return {
+            "level": "问题稿",
+            "decision": "先修阻断项，不做审美升华。",
+            "next_step": "系统定点修复承接、逻辑、对白、场景或章末钩子中最低分的部分。",
+            "revision_depth": "targeted_fix",
+            "preserve_policy": "保留主事件和能用场景，替换失败单元。",
+        }
+    if stratification.tier == TIER_SOLID_DRAFT:
+        return {
+            "level": "合格底稿",
+            "decision": "不推翻重写，进入升华修订。",
+            "next_step": "系统逐场增强画面、人物反应、对白声线、奖励代价和追读压力。",
+            "revision_depth": "targeted_elevation",
+            "preserve_policy": "锁定源版本主事件、场景顺序、行动链和章末事实。",
+        }
+    if stratification.tier == TIER_NEAR_FINAL:
+        return {
+            "level": "准定稿",
+            "decision": "只做轻润色或等待作者审批。",
+            "next_step": "系统不主动大修，避免把可读稿改坏。",
+            "revision_depth": "polish",
+            "preserve_policy": "保留全部结构，只允许句段级优化。",
+        }
+    return {
+        "level": "发布级",
+        "decision": "进入人工最终确认。",
+        "next_step": "满意则通过，不满意再给具体修改意见。",
+        "revision_depth": "approve",
+        "preserve_policy": "不自动修订。",
+    }
 
 
 def maybe_rollback_failed_elevation(

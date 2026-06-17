@@ -80,6 +80,14 @@ def main() -> int:
                 failures.append(failure_name)
         if "editorial_stratification" not in (quality.report or ""):
             failures.append("quality_report_missing_stratification")
+        quality_data = json.loads(quality.report or "{}")
+        guidance = quality_data.get("editorial_guidance") if isinstance(quality_data.get("editorial_guidance"), dict) else {}
+        if guidance.get("level") != "合格底稿":
+            failures.append("quality_report_missing_author_guidance_level")
+        if guidance.get("revision_depth") != "targeted_elevation":
+            failures.append("quality_report_missing_revision_depth")
+        if "不推翻重写" not in guidance.get("decision", ""):
+            failures.append("quality_guidance_does_not_protect_solid_draft")
 
         failed_version = ChapterVersion(
             chapter_id=chapter.id,

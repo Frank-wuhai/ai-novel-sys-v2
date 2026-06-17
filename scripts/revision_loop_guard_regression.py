@@ -17,6 +17,7 @@ from app.models.entities import (
 from app.services.planning import _maybe_apply_revision_loop_guard, plan_chapters, run_next_action
 from app.services.author_runner import author_terminal_status
 from app.services.feedback import submit_revision_suggestion
+from app.services.revision_supervisor import apply_revision_budget_recovery
 from regression_db import isolated_database
 
 
@@ -323,6 +324,70 @@ def main() -> int:
         )
         if stale_recovery.action != "revision_trend_recovery" or stale_recovery.status != "executed":
             failures.append("stale_recovery_marker_blocked_new_recovery")
+
+        budget_chapter = Chapter(book_id=book.id, chapter_number=4, title="第4章", status="draft")
+        session.add(budget_chapter)
+        session.flush()
+        created["chapters"].append(budget_chapter)
+        active_budget_brief = ChapterBrief(
+            chapter_id=budget_chapter.id,
+            goal="第4章：预算耗尽前的旧修订",
+            required_beats="继续修，但不要让作者给方向。",
+            constraints="禁止冷硬装酷式精炼。",
+            status="revision_ready",
+        )
+        session.add(active_budget_brief)
+        session.flush()
+        created["chapter_briefs"].append(active_budget_brief)
+        budget_versions = []
+        for index, score in enumerate([52, 64, 58], start=1):
+            budget_version = ChapterVersion(
+                chapter_id=budget_chapter.id,
+                version_number=index,
+                title=f"budget-v{index}",
+                content=("第4章正文" + str(index)) * 1200,
+                status="needs_revision",
+                source="revision:budget",
+            )
+            session.add(budget_version)
+            session.flush()
+            budget_versions.append(budget_version)
+            created["chapter_versions"].append(budget_version)
+            budget_quality = QualityReport(
+                chapter_version_id=budget_version.id,
+                score=score,
+                passed=False,
+                report=json.dumps(
+                    {
+                        "status": "FAIL",
+                        "score": score,
+                        "issues": ["dialogue_underdeveloped: 42", "scene_expansion_underdeveloped: 50"],
+                        "dimensions": {
+                            "brief_coverage": score,
+                            "reader_momentum": score,
+                            "dialogue_fullness": 42,
+                            "scene_expansion": 50,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            session.add(budget_quality)
+            session.flush()
+            created["quality_reports"].append(budget_quality)
+        budget_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=4)
+        if budget_recovery.status != "recovered":
+            failures.append("budget_recovery_not_applied")
+        if budget_recovery.source_version_id != budget_versions[1].id:
+            failures.append("budget_recovery_did_not_choose_best_failed_draft")
+        budget_brief = session.get(ChapterBrief, budget_recovery.recovery_brief_id) if budget_recovery.recovery_brief_id else None
+        budget_text = "\n".join([budget_brief.goal or "", budget_brief.required_beats or "", budget_brief.constraints or ""]) if budget_brief else ""
+        if "system_revision_budget_recovery" not in budget_text:
+            failures.append("budget_recovery_marker_missing")
+        if "禁止要求作者给方向" not in budget_text:
+            failures.append("budget_recovery_still_requests_author_direction")
+        if "保留最佳稿的主事件" not in budget_text:
+            failures.append("budget_recovery_missing_preserve_boundary")
 
         for key in (
             "feedback_adjustments",

@@ -4,11 +4,11 @@ import argparse
 import json
 from datetime import datetime
 
-from app.models.entities import Book, Chapter, GenerationTask
+from app.models.entities import Book, Chapter, ChapterBrief, GenerationTask
 from app.services.chapter_samples import TASK_TYPE_CHAPTER_SAMPLE
 from app.services.chapter_samples import _sample_diversity_report
 from app.db.session import session_scope
-from app.services.chapter_samples import latest_chapter_samples
+from app.services.chapter_samples import adopt_chapter_sample, latest_chapter_samples
 from regression_db import isolated_database
 
 
@@ -28,6 +28,16 @@ def main() -> int:
             chapter_number=chapter_number,
             limit=3,
         )
+        adopted = adopt_chapter_sample(
+            session,
+            task_id=int(latest.get("task_id") or 0),
+            sample_index=1,
+            revision_mode="targeted",
+        )
+        adopted_brief = session.get(ChapterBrief, adopted.brief_id)
+        adopted_text = "\n".join(
+            [adopted_brief.goal or "", adopted_brief.required_beats or "", adopted_brief.constraints or ""]
+        ) if adopted_brief else ""
         no_usable_report = _sample_diversity_report(_thin_distinct_samples())
     report = latest.get("diversity_report") or latest.get("fallback_diversity_report") or {}
     score = int(report.get("score") or 0)
@@ -35,9 +45,15 @@ def main() -> int:
     no_usable_guard_ok = no_usable_report.get("status") == "attention" and "no_usable_sample" in (
         no_usable_report.get("issues") or []
     )
+    adoption_fingerprint_ok = (
+        "写作指纹继承" in adopted_text
+        and "视角距离" in adopted_text
+        and "句段节奏" in adopted_text
+        and "场景展开" in adopted_text
+    )
     status = (
         "pass"
-        if not latest_failed and score >= args.min_score and not report.get("issues") and no_usable_guard_ok
+        if not latest_failed and score >= args.min_score and not report.get("issues") and no_usable_guard_ok and adoption_fingerprint_ok
         else "attention"
     )
     print(
@@ -54,6 +70,7 @@ def main() -> int:
                 "threshold": args.min_score,
                 "diversity_report": report,
                 "no_usable_guard": no_usable_report,
+                "adoption_fingerprint_ok": adoption_fingerprint_ok,
                 "attention_explanation": _attention_explanation(latest=latest, report=report, threshold=args.min_score),
                 "trial_impact": "blocks_trial" if latest_failed else ("safe_to_trial_with_review" if status == "attention" else "safe_to_trial"),
             },

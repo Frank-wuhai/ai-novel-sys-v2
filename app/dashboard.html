@@ -2435,7 +2435,7 @@
     function authorRunLabel(run) {
       const labels = {
         ready_for_human_reading: '可读稿待审批',
-        needs_author_direction: '需要明确选择',
+        needs_author_direction: '系统整理中',
         auto_paused: '自动暂停',
         system_failed: '系统失败'
       };
@@ -2446,7 +2446,7 @@
       if (run.status === 'failed') return run.terminal_message || run.error || '系统执行失败，请查看失败详情。';
       if (run.terminal_status === 'ready_for_human_reading') return run.terminal_message || '可读稿已完成，等待你阅读后通过或修改。';
       if (run.terminal_status === 'auto_paused') return run.terminal_message || '系统已自动暂停并保留当前最佳状态。';
-      if (run.terminal_status === 'needs_author_direction') return run.terminal_message || '系统需要你在“继续修、重写、采用当前稿”里做一个明确选择。';
+      if (run.terminal_status === 'needs_author_direction') return run.terminal_message || '系统正在整理当前打断项，会优先自动选择可执行的修复路径。';
       if (run.terminal_status === 'system_failed') return run.terminal_message || '系统执行失败，请查看失败详情。';
       return '';
     }
