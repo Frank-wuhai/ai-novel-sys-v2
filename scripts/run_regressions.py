@@ -64,6 +64,7 @@ def main() -> int:
             ("brief_write_sanitizer", ["scripts/brief_write_sanitizer_regression.py"]),
             ("system_trash", ["scripts/system_trash_regression.py"]),
             ("revision_intent", ["scripts/revision_intent_regression.py"]),
+            ("revision_comparison", ["scripts/revision_comparison_regression.py"]),
             ("editorial_gate_brief_coverage", ["scripts/editorial_gate_brief_coverage_regression.py"]),
             ("editorial_gate_budget", ["scripts/editorial_gate_budget_regression.py"]),
             ("editorial_stratification", ["scripts/editorial_stratification_regression.py"]),

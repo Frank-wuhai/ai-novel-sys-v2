@@ -21,6 +21,7 @@ from app.services.production_llm import (
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.services.quality import evaluate_chapter
 from app.services.production_gate import assert_production_gate
+from app.services.revision_comparison import compare_and_restore_if_regressed
 from app.services.review_decision import ReviewRuleResult, apply_review_decision, soft_override_blockers
 from app.workflows.state_machine import move
 
@@ -101,6 +102,7 @@ def review_chapter(
         failed_version=version,
         quality=quality,
     )
+    compare_and_restore_if_regressed(session, current_version=version, current_quality=quality)
     if auto_revision_brief and not quality.passed:
         from app.services.production import create_revision_brief
 
