@@ -1,25 +1,16 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from app.db import session as db_session
-from app.db.base import Base
-from app.db.session import configure_database, session_scope
+from app.db.session import session_scope
 from app.models.entities import Book, Chapter, ChapterBrief
 from app.services.chapter_unit_plans import align_chapter_unit_plan, ensure_chapter_unit_plan, format_chapter_unit_plan
 from app.services.chapter_units import evaluate_chapter_units
-
-
-ROOT = Path(__file__).resolve().parents[1]
-TEST_DB = ROOT / "data/chapter-unit-plan-regression.db"
+from regression_db import isolated_database
 
 
 def main() -> int:
-    if TEST_DB.exists():
-        TEST_DB.unlink()
-    configure_database("sqlite:///data/chapter-unit-plan-regression.db")
-    Base.metadata.create_all(db_session.engine)
+    isolated_database("chapter-unit-plan-regression")
     with session_scope() as session:
         book = Book(title="Unit Plan Regression", genre="玄幻", target_platform="manual")
         session.add(book)

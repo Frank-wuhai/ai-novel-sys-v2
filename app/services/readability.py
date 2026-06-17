@@ -24,7 +24,7 @@ def evaluate_readability(text: str) -> ReadabilityReport:
     ending = content[-700:]
     dimensions = {
         "opening_grip": _opening_grip(opening),
-        "protagonist_agency": _marker_score(content, ("陈默", "选择", "决定", "试探", "冒险", "出手", "开口", "观察", "判断")),
+        "protagonist_agency": _marker_score(content, ("主角", "他", "她", "选择", "决定", "试探", "冒险", "出手", "开口", "观察", "判断")),
         "scene_continuity": _scene_continuity(content),
         "dialogue_liveliness": _dialogue_score(content),
         "concrete_sensory": _marker_score(content, ("脚步", "火把", "血", "痛", "风", "声", "眼神", "气息", "青砖", "刀", "掌")),

@@ -69,7 +69,7 @@ def main() -> int:
     before = json.loads(
         run(["author-command-center", "--book-id", str(book_id), "--chapter-number", "1", "--start", "1", "--count", "1"])
     )
-    assert_center(before, status="blocked", intent="open_skeleton")
+    assert_center(before, status="blocked", intent="auto_resolve_blocker")
 
     preview = json.loads(run(["repair-production-scaffold", "--book-id", str(book_id)]))
     if preview.get("mode") != "preview":
@@ -79,7 +79,7 @@ def main() -> int:
     still_blocked = json.loads(
         run(["author-command-center", "--book-id", str(book_id), "--chapter-number", "1", "--start", "1", "--count", "1"])
     )
-    assert_center(still_blocked, status="blocked", intent="open_skeleton")
+    assert_center(still_blocked, status="blocked", intent="auto_resolve_blocker")
 
     run(["repair-production-scaffold", "--book-id", str(book_id), "--apply"])
     run(

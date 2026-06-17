@@ -19,12 +19,14 @@ from app.services.production_llm import (
     repair_humanized_unit_flow,
 )
 from app.services.production_packet import build_chapter_production_packet
+from app.services.production_gate import assert_production_gate
 from app.services.production_run_review import record_production_run_review
 from app.services.production_state import get_or_create_chapter, latest_brief, latest_foundation, next_version_number
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 
 
 def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_run: bool = True) -> ChapterVersion:
+    assert_production_gate(session, book_id=book_id, action="draft_chapter")
     book = session.get(Book, book_id)
     if not book:
         raise ValueError(f"book not found: {book_id}")

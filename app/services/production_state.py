@@ -109,7 +109,7 @@ def brief_is_local_revision(text: str) -> bool:
     mode = brief_revision_mode(text)
     if mode in LOCAL_REVISION_MODES:
         return True
-    return (text or "").lstrip().startswith("局部修订") and "重写" not in (text or "")
+    return (text or "").lstrip().startswith("局部修订")
 
 
 def brief_has_story_intent(text: str) -> bool:

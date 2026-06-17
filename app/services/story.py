@@ -32,11 +32,23 @@ def upsert_story_bible(
     bible.protagonist_arc = protagonist_arc or bible.protagonist_arc
     bible.relationship_arc = relationship_arc or bible.relationship_arc
     bible.power_curve = power_curve or bible.power_curve
-    bible.forbidden_rules = forbidden_rules or bible.forbidden_rules
+    from app.services.story_dna import strip_story_dna_blocks
+
+    bible.forbidden_rules = _strip_story_dna_lines(strip_story_dna_blocks(forbidden_rules or bible.forbidden_rules))
     bible.style_guide = style_guide or bible.style_guide
     bible.status = status
     session.flush()
     return bible
+
+
+def _strip_story_dna_lines(text: str) -> str:
+    kept = []
+    for raw in str(text or "").splitlines():
+        compact = "".join(str(raw or "").split()).lower()
+        if compact.startswith(("作品dna", "作品ｄｎａ", "作品DNA".lower().replace(" ", ""))):
+            continue
+        kept.append(raw)
+    return "\n".join(kept).strip()
 
 
 def get_story_bible(session: Session, *, book_id: int) -> StoryBible | None:
@@ -149,6 +161,8 @@ def format_story_control_context(
     book_id: int,
     chapter_number: int | None = None,
 ) -> tuple[str, dict[str, list[int]]]:
+    from app.services.aesthetic_profile import strip_aesthetic_profile_blocks
+
     refs: dict[str, list[int]] = {"story_bible_ids": [], "story_arc_ids": []}
     sections: list[str] = []
     bible = get_story_bible(session, book_id=book_id)
@@ -162,8 +176,8 @@ def format_story_control_context(
                 ("主角弧光", bible.protagonist_arc),
                 ("关系线", bible.relationship_arc),
                 ("能力曲线", bible.power_curve),
-                ("禁区规则", bible.forbidden_rules),
-                ("文风指南", bible.style_guide),
+                ("禁区规则", strip_aesthetic_profile_blocks(bible.forbidden_rules)),
+                ("文风指南", strip_aesthetic_profile_blocks(bible.style_guide)),
             ]
         )
         if lines:

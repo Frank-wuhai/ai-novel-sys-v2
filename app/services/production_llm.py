@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from sqlalchemy.orm import Session
 
@@ -128,6 +129,52 @@ JSON 格式必须严格为：
             raise StructuredOutputError(f"{first_exc}; repair attempt failed: {repair_exc}") from repair_exc
 
 
+def parse_or_repair_json_object(
+    provider,
+    *,
+    response_text: str,
+    original_prompt: str,
+    expected_schema: str,
+    max_tokens: int,
+    temperature: float | None,
+    model: str | None,
+    task_label: str,
+) -> dict:
+    try:
+        return _parse_json_object(response_text)
+    except Exception as first_exc:
+        repair_prompt = f"""
+你刚才的{task_label}输出不是合法 JSON，系统无法读取。
+
+请基于原始任务重新输出一个完整、合法的 JSON 对象。不要解释，不要 Markdown。
+
+JSON 格式必须严格为：
+{expected_schema}
+
+要求：
+- 字符串内部换行和双引号必须正确转义。
+- 不要在 JSON 外追加任何文字。
+- 不要输出多个 JSON。
+
+上一轮错误：
+{first_exc}
+
+上一轮原始输出前 2500 字：
+{response_text[:2500]}
+
+原始任务：
+{original_prompt}
+""".strip()
+        repaired = provider.generate(
+            repair_prompt,
+            max_tokens=max(max_tokens, 1800),
+            temperature=temperature,
+            model=model,
+            response_format={"type": "json_object"} if provider.name != "dry_run" else None,
+        )
+        return _parse_json_object(repaired.text)
+
+
 def expand_short_draft_output(
     provider,
     *,
@@ -177,7 +224,16 @@ def expand_short_draft_output(
                 model=model,
                 response_format={"type": "json_object"} if provider.name != "dry_run" else None,
             )
-            unit_data = json.loads(unit_response.text)
+            unit_data = parse_or_repair_json_object(
+                provider,
+                response_text=unit_response.text,
+                original_prompt=unit_prompt,
+                expected_schema='{"content_unit":"可直接追加的新正文","unit_note":"本单元完成的小变化","done":false}',
+                max_tokens=min(max(max_tokens // 2, 2500), 5000),
+                temperature=temperature,
+                model=model,
+                task_label=f"{task_label}扩写小单元",
+            )
             unit_text = str(unit_data.get("content_unit") or "").strip()
             if not unit_text:
                 raise ValueError("content_unit is empty")
@@ -407,7 +463,16 @@ def repair_failed_chapter_units(
                 model=model,
                 response_format={"type": "json_object"} if provider.name != "dry_run" else None,
             )
-            data = json.loads(response.text)
+            data = parse_or_repair_json_object(
+                provider,
+                response_text=response.text,
+                original_prompt=unit_prompt,
+                expected_schema='{"content_unit":"返修后可直接替换原单元的正文","unit_note":"说明修复了什么"}',
+                max_tokens=min(max(max_tokens // 3, 1800), 3500),
+                temperature=temperature,
+                model=model,
+                task_label=f"{task_label}局部返修小单元",
+            )
             unit_text = str(data.get("content_unit") or "").strip()
             if not unit_text:
                 raise ValueError("content_unit is empty")
@@ -489,6 +554,24 @@ def actual_usage_tokens(usage: dict | None) -> tuple[int, int, int]:
     response = int(usage.get("completion_tokens") or usage.get("response_tokens") or 0)
     total = int(usage.get("total_tokens") or prompt + response)
     return prompt, response, total
+
+
+def _parse_json_object(value: str) -> dict:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        data = json.loads(text[start : end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("JSON output must be an object")
+    return data
 
 
 def _unit_repair_strategy(row: dict) -> str:

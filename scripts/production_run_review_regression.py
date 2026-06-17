@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-from app.db import session as db_session
-from app.db.base import Base
-from app.db.session import configure_database, session_scope
+from app.db.session import session_scope
 from app.models.entities import Book, Chapter, ProductionRunReview
 from app.services.production_run_review import build_production_pattern_memory, build_production_run_review_payload
-
-
-ROOT = Path(__file__).resolve().parents[1]
-TEST_DB = ROOT / "data/production-run-review-regression.db"
+from regression_db import isolated_database
 
 
 def main() -> int:
@@ -80,10 +74,7 @@ def main() -> int:
 
 
 def _memory_payload() -> dict:
-    if TEST_DB.exists():
-        TEST_DB.unlink()
-    configure_database("sqlite:///data/production-run-review-regression.db")
-    Base.metadata.create_all(db_session.engine)
+    isolated_database("production-run-review-regression")
     with session_scope() as session:
         book = Book(title="Run Review Regression", genre="玄幻", target_platform="manual")
         session.add(book)

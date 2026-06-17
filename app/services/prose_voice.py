@@ -129,8 +129,8 @@ def _character_voice_score(text: str, dialogue: list[str]) -> int:
         return 35
     functional = sum(1 for line in dialogue if any(marker in line for marker in FUNCTIONAL_DIALOGUE_MARKERS))
     reaction_after_dialogue = sum(1 for marker in ("怔", "笑", "沉默", "皱", "咬", "盯", "喘", "低声", "声音", "眼神") if marker in text)
-    named_voice = sum(1 for name in ("陈默", "梅霜", "沈青梧", "矮壮汉") if name in text)
-    score = 55 + min(named_voice, 4) * 6 + min(reaction_after_dialogue, 8) * 4
+    named_voice = min(4, len(set(re.findall(r"[\u4e00-\u9fff]{2,4}(?=(?:说|问|笑|皱眉|低声|抬头|看|盯|摇头|沉默))", text or ""))))
+    score = 55 + named_voice * 4 + min(reaction_after_dialogue, 8) * 4
     score -= min(22, functional * 3)
     return _clamp(score)
 
@@ -169,7 +169,7 @@ def _recommendations(checks: dict[str, int], *, hits: list[str], terse_examples:
         examples = "、".join(terse_examples[:5])
         rows.append(f"部分对白过短或只承担功能：{examples}。修订时让角色多说半句立场、情绪、顾虑或试探。")
     if checks.get("character_voice", 100) < 60:
-        rows.append("为主要人物建立不同声线：陈默可以嘴硬带梗，梅霜应带伤势、戒备和家族压力，追兵应有江湖粗粝感。")
+        rows.append("为主要人物建立不同声线：主角、关键配角和对立方都应有各自的立场、情绪、顾虑和说话习惯。")
     if checks.get("sentence_texture", 100) < 60:
         rows.append("调整长短句节奏，避免连续短断句或连续解释长句，让叙述更像自然中文正文。")
     if hits and not rows:

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
 from app.db.session import session_scope
+from app.models.entities import ChapterBrief, ChapterVersion
 from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.planning import plan_chapters, run_next_action
 
@@ -30,6 +33,7 @@ def run_author_mode(
     max_revision_cycles = max(1, min(5, int(max_revision_cycles or 3)))
     executed: list[dict] = []
     revision_count = 0
+    recovery_revision_used = False
     max_actions = max_revision_cycles * 3 + 8
     for _ in range(max_actions):
         with session_scope() as session:
@@ -77,16 +81,21 @@ def run_author_mode(
                 continue
             if item.next_action == "revise_chapter":
                 if revision_count >= max_revision_cycles:
-                    executed.append(
-                        {
-                            "action": "revise_chapter",
-                            "status": "blocked",
-                            "message": "已达到自动修订轮数上限，需要人工判断方向。",
-                            "object_id": item.latest_version_id,
-                        }
-                    )
-                    break
-                revision_count += 1
+                    if _is_recovery_revision_pending(session, item) and not recovery_revision_used:
+                        recovery_revision_used = True
+                        revision_count += 1
+                    else:
+                        executed.append(
+                            {
+                                "action": "revise_chapter",
+                                "status": "blocked",
+                                "message": "自动修订预算已用完，系统已暂停以避免继续消耗；请查看当前最佳稿或重新开始本章。",
+                                "object_id": item.latest_version_id,
+                            }
+                        )
+                        break
+                else:
+                    revision_count += 1
             result = run_next_action(
                 session,
                 book_id=book_id,
@@ -113,6 +122,21 @@ def run_author_mode(
     )
 
 
+def _is_recovery_revision_pending(session, item) -> bool:
+    if not item.latest_version_id or not item.chapter_id:
+        return False
+    version = session.get(ChapterVersion, item.latest_version_id)
+    if version and str(version.source or "").startswith("revision_recovery:"):
+        return True
+    brief = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == item.chapter_id, ChapterBrief.status == "revision_ready")
+        .order_by(ChapterBrief.id.desc())
+    )
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""]) if brief else ""
+    return "system_revision_trend_recovery" in text
+
+
 def author_terminal_status(executed: list[dict]) -> dict:
     if not executed:
         return {"status": "system_failed", "message": "主笔模式没有执行任何步骤。"}
@@ -125,10 +149,10 @@ def author_terminal_status(executed: list[dict]) -> dict:
     if status == "failed":
         return {"status": "system_failed", "message": message or "模型或系统执行失败。"}
     if action == "revise_chapter" and status == "blocked":
-        return {"status": "needs_author_direction", "message": "自动修订已达到上限，需要你给一句明确方向。"}
+        return {"status": "auto_paused", "message": message or "自动修订预算已用完，系统已暂停以避免继续消耗。"}
     if status == "blocked":
         return {"status": "ready_for_human_reading", "message": message or "正文阶段已完成，等待人工判断。"}
-    return {"status": "needs_author_direction", "message": message or "主笔模式已停止，需要人工判断下一步。"}
+    return {"status": "auto_paused", "message": message or "主笔模式已暂停，系统已保留当前最佳状态。"}
 
 
 def author_background_timeout_seconds(max_revision_cycles: int) -> int:

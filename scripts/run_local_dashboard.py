@@ -32,8 +32,6 @@ from app.models.entities import (
     MarketSignal,
     PlotThread,
     PlatformFeedback,
-    PublishExecution,
-    PublishJob,
     PublishingTarget,
     QualityReport,
     PowerSystem,
@@ -53,6 +51,7 @@ from app.services.agent_plan_intelligence import (
     list_visual_assets,
     run_agent_plan_enhancement_cycle,
 )
+from app.services.aesthetic_profile import apply_revision_idea_to_repair_payload, apply_revision_idea_to_skeleton, build_aesthetic_profile_block, merge_style_with_aesthetic_profile, profile_from_story_text, story_bible_display_fields, strip_aesthetic_profile_blocks
 from app.services.web_search import run_market_web_search, web_search_status
 from app.services.canon import add_character, add_plot_thread, add_power_system, add_world_rule, format_canon_context
 from app.services.dashboard import build_project_snapshot
@@ -80,6 +79,7 @@ from app.services.llm_costs import summarize_llm_cost
 from app.services.live_llm import run_live_llm_smoke
 from app.services.bias import evaluate_generation_bias
 from app.services.author_workbench import build_author_workbench_report
+from app.services.book_development import clean_generated_text, develop_new_book_from_inspiration
 from app.services.chapter_samples import (
     adopt_chapter_sample,
     build_chapter_sample_learning,
@@ -87,21 +87,39 @@ from app.services.chapter_samples import (
     latest_chapter_samples,
     sync_chapter_sample_learning,
 )
-from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.dashboard_production_actions import repair_chapter_brief, restart_production_from_chapter
 from app.services.author_runner import author_background_timeout_seconds, author_terminal_status, run_author_mode
 from app.services.failure_attribution import attribute_generation_failure
 from app.services.intent_acceptance import evaluate_author_intent
 from app.services.model_strategy import build_model_strategy
 from app.services.production_packet import build_chapter_production_packet
 from app.services.production_run_review import build_production_pattern_memory, latest_production_run_review, production_run_review_payload
+from app.services.production_router import prepare_production
 from app.services.production_scaffold import repair_production_scaffold
 from app.services.publish_preflight import build_publish_preflight
 from app.services.readiness import check_production_readiness
+from app.services.revision_intent import extract_revision_decision
+from app.services.story_dna import (
+    build_story_dna_from_development,
+    build_story_dna_from_skeleton,
+    story_dna_display_fields,
+    story_dna_for_book,
+    strip_story_dna_blocks,
+)
 from app.services.skeleton_governance import (
     audit_skeleton_sources,
     audit_story_skeleton_with_agent_evidence,
     repair_skeleton_until_pass,
     repair_story_skeleton_with_market_evidence,
+)
+from app.services.skeleton_normalizer import normalize_story_skeleton_payload
+from app.services.skeleton_context_reset import reset_context_after_skeleton_approval
+from app.services.skeleton_sync import (
+    current_skeleton_values as canonical_current_skeleton_values,
+    list_skeleton_versions,
+    propagate_core_term_changes,
+    record_skeleton_version,
+    synchronize_skeleton_derivatives,
 )
 from app.services.writer_loop import build_writer_loop_plan
 from app.llm.providers import ArkOpenAIProvider
@@ -110,6 +128,7 @@ from app.services.llm_queue import (
     build_generation_queue_health,
     cancel_generation_queue_task,
     pause_generation_queue_task,
+    recover_stale_generation_tasks,
     resume_generation_queue_task,
     retry_generation_queue_task,
     run_generation_queue,
@@ -132,6 +151,21 @@ from app.services.continuity import default_chapter_continuity_summary, latest_v
 from app.services.story import create_story_arc, create_volume, format_story_control_context, get_story_bible, upsert_story_bible
 from app.services.story_alignment import build_story_alignment_audit
 from app.dashboard_assets import DASHBOARD_HTML as HTML
+from app.dashboard_payloads import (
+    _approval_revision_label,
+    _approval_revision_mode_from_level,
+    _approval_revision_text,
+    _brief_payload,
+    _database_payload,
+    _failed_tasks_payload,
+    _generation_tasks_for_chapter,
+    _llm_usage_payload,
+    _loads_json,
+    _parse_feedback_ids,
+    _publishing_payload,
+    _quality_payload,
+    _version_diff_payload,
+)
 
 
 _BACKGROUND_LOCK = threading.Lock()
@@ -765,6 +799,22 @@ def _perform_action(session, payload: dict) -> dict:
     if action == "queue_health":
         report = build_generation_queue_health(session)
         return {"status": "ok", "total": report.total, "counts": report.counts, "background_runs": _background_runs_payload()}
+    if action == "update_book_settings":
+        book = session.get(Book, int(payload.get("book_id") or 0))
+        if not book:
+            raise ValueError("book not found")
+        platform = str(payload.get("platform") or "").strip()
+        if platform:
+            book.target_platform = platform
+        genre = str(payload.get("genre") or "").strip()
+        if genre:
+            book.genre = genre
+        session.flush()
+        return {
+            "status": "saved",
+            "message": "作品目标已保存；后续调研、设定修复和章节生产会默认使用这组目标。",
+            "book": _book_option(book),
+        }
     if action == "start_queue_background":
         return _start_background_queue_run(
             max_tasks=int(payload.get("max_tasks") or 1),
@@ -809,6 +859,15 @@ def _perform_action(session, payload: dict) -> dict:
         return _update_chapter_brief_action(session, payload)
     if action == "repair_current_chapter_brief":
         return _repair_current_chapter_brief_action(session, payload)
+    if action == "restart_production_from_chapter":
+        return _restart_production_from_chapter_action(session, payload)
+    if action == "prepare_production":
+        return prepare_production(
+            session,
+            book_id=int(payload.get("book_id") or 0),
+            chapter_number=int(payload.get("chapter_number") or 0),
+            platform=str(payload.get("platform") or "manual"),
+        ).to_dict()
     if action == "run_queue":
         max_tasks = int(payload.get("max_tasks") or 1)
         if max_tasks < 1 or max_tasks > 3:
@@ -862,11 +921,13 @@ def _perform_action(session, payload: dict) -> dict:
         }
     if action == "repair_readiness_gate":
         return _repair_readiness_gate_action(session, payload)
+    if action == "auto_resolve_author_blocker":
+        return _auto_resolve_author_blocker_action(session, payload)
     if action == "index_book_knowledge":
         result = index_book_knowledge(
             session,
             book_id=int(payload.get("book_id") or 0),
-            dry_run=bool(payload.get("dry_run")),
+            dry_run=not bool(payload.get("live_embedding")),
             reset=True,
             limit_chapters=int(payload.get("limit_chapters") or 80),
         )
@@ -983,6 +1044,34 @@ def _perform_action(session, payload: dict) -> dict:
         world_engine = str(payload.get("world_engine") or "").strip() or f"{genre}世界分层清晰，资源、身份和力量等级决定生存空间；核心能力必须有代价和限制。"
         protagonist_engine = str(payload.get("protagonist_engine") or "").strip() or "主角开局被压制，但目标明确：活下去、变强、夺回主动权。"
         conflict_engine = str(payload.get("conflict_engine") or "").strip() or "长期冲突来自身边危机、同阶竞争者，以及隐藏在世界规则背后的高位势力。"
+        aesthetic_profile = build_aesthetic_profile_block(
+            prose_style=str(payload.get("prose_style") or "").strip(),
+            atmosphere=str(payload.get("atmosphere") or "").strip(),
+            story_route=str(payload.get("story_route") or "").strip(),
+            must_have=str(payload.get("style_must_have") or "").strip(),
+            must_not=str(payload.get("style_must_not") or "").strip(),
+        )
+        story_dna = str(payload.get("story_dna") or "").strip() or build_story_dna_from_development(
+            {
+                "title": title,
+                "genre": genre,
+                "reader_promise": promise,
+                "premise": premise,
+                "prose_style": str(payload.get("prose_style") or "").strip(),
+                "atmosphere": str(payload.get("atmosphere") or "").strip(),
+                "story_route": str(payload.get("story_route") or "").strip(),
+                "style_must_not": str(payload.get("style_must_not") or "").strip(),
+                "protagonist_engine": protagonist_engine,
+                "world_engine": world_engine,
+                "conflict_engine": conflict_engine,
+                "volume_summary": str(payload.get("volume_summary") or "").strip(),
+                "arc_goal": str(payload.get("arc_goal") or "").strip(),
+                "arc_climax": str(payload.get("arc_climax") or "").strip(),
+                "arc_turn": str(payload.get("arc_turn") or "").strip(),
+                "creative_candidates": payload.get("creative_candidates") if isinstance(payload.get("creative_candidates"), list) else [],
+                "chosen_creative_engine": str(payload.get("chosen_creative_engine") or "").strip(),
+            }
+        )
         book = create_book(session, title=title, genre=genre, platform=platform)
         foundation = create_foundation(
             session,
@@ -1002,7 +1091,7 @@ def _perform_action(session, payload: dict) -> dict:
             protagonist_arc=protagonist_engine,
             power_curve=world_engine,
             forbidden_rules="避免系统提示词、作者说明、元叙事泄露到正文。",
-            style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
+            style_guide="\n\n".join(["番茄小说节奏：开篇快，冲突明确，章末留钩子。", aesthetic_profile, story_dna]),
             status="draft",
         )
         bootstrap = _bootstrap_book_production(
@@ -1016,6 +1105,8 @@ def _perform_action(session, payload: dict) -> dict:
             protagonist_engine=protagonist_engine,
             conflict_engine=conflict_engine,
         )
+        create_volume(session, book_id=book.id, volume_number=1, title="第一卷", summary=str(payload.get("volume_summary") or "").strip())
+        create_story_arc(session, book_id=book.id, arc_number=1, title="开局破局", start_chapter=1, end_chapter=5, goal=str(payload.get("arc_goal") or "").strip(), climax=str(payload.get("arc_climax") or "").strip(), turn=str(payload.get("arc_turn") or "").strip(), volume_number=1)
         return {
             "status": "created",
             "book": _book_option(book),
@@ -1035,6 +1126,8 @@ def _perform_action(session, payload: dict) -> dict:
                 current_ideas=payload.get("current_ideas") if isinstance(payload.get("current_ideas"), list) else [],
             ),
         }
+    if action == "develop_new_book":
+        return {"status": "completed", "draft": develop_new_book_from_inspiration(idea_prompt=str(payload.get("idea_prompt") or ""), feedback=str(payload.get("feedback") or ""), title=str(payload.get("title") or ""), genre=str(payload.get("genre") or "玄幻脑洞"), platform=str(payload.get("platform") or "番茄小说"))}
     if action == "bootstrap_book_production":
         book_id = int(payload.get("book_id") or 0)
         result = repair_production_scaffold(
@@ -1073,32 +1166,57 @@ def _perform_action(session, payload: dict) -> dict:
         result = _update_story_skeleton(session, book=book, payload=payload)
         approved_count = 0
         approve_key = str(payload.get("approve_after_save_key") or "").strip()
+        context_reset = None
         if approve_key:
             _assert_skeleton_can_be_approved(_skeleton_payload_from_update_payload(payload))
-            approved_count = _approve_skeleton_items(
+            sync_result = synchronize_skeleton_derivatives(
                 session,
                 book_id=book.id,
-                key=approve_key,
-                current_skeleton=_skeleton_payload_from_update_payload(payload),
+                approve_keys=[approve_key],
+                chapter_count=5,
+                reason=f"approve_field:{approve_key}",
             )
+            approved_count = sync_result.approved_count
         elif bool(payload.get("approve_after_save")):
             _assert_skeleton_can_be_approved(_skeleton_payload_from_update_payload(payload))
-            approved_count = _approve_skeleton_items(
+            context_reset = reset_context_after_skeleton_approval(
                 session,
                 book_id=book.id,
-                key="all",
-                current_skeleton=_skeleton_payload_from_update_payload(payload),
+                skeleton=_skeleton_payload_from_update_payload(payload),
+                start_chapter=1,
+                plan_count=5,
+            )
+            sync_result = synchronize_skeleton_derivatives(
+                session,
+                book_id=book.id,
+                approve_keys="all",
+                chapter_count=5,
+                reason="save_and_enable",
+            )
+            approved_count = sync_result.approved_count
+        else:
+            record_skeleton_version(
+                session,
+                book_id=book.id,
+                reason="save_draft",
+                values=_skeleton_payload_from_update_payload(payload),
             )
         message = (
             f"生产骨架已保存，并确认 {approved_count} 个当前项。后续章节会使用新的设定。"
             if approve_key
             else (
-                f"生产骨架已保存并确认 {approved_count} 项。后续章节会使用新的设定。"
+                f"生产骨架已保存并确认 {approved_count} 项；已清理旧生产上下文并从第 1 章重建生产说明。"
                 if bool(payload.get("approve_after_save"))
                 else "生产骨架已保存为草稿。后续章节会使用新的设定。"
             )
         )
-        return {"status": "saved", "message": message, "approved_count": approved_count, **result}
+        return {
+            "status": "saved",
+            "message": message,
+            "approved_count": approved_count,
+            "context_reset": context_reset.to_dict() if context_reset else {},
+            **result,
+        }
     if action == "suggest_story_skeleton":
         book_id = int(payload.get("book_id") or 0)
         book = session.get(Book, book_id)
@@ -1110,12 +1228,26 @@ def _perform_action(session, payload: dict) -> dict:
             current_skeleton=payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {},
         )
         return {"status": "completed", "message": "AI 已生成骨架草案，请检查后保存。", "skeleton": skeleton}
+    if action == "audit_story_skeleton_draft":
+        current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
+        report = audit_skeleton_sources({f"draft.{key}": str(value or "") for key, value in current_skeleton.items()})
+        return {
+            "status": "completed",
+            "message": "已完成当前表单生产体检；未写入数据库。",
+            "governance": report.to_dict(),
+        }
     if action == "repair_story_skeleton_draft":
         book_id = int(payload.get("book_id") or 0)
         current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
+        revision_idea = str(payload.get("revision_idea") or "").strip()
         ai_error = ""
         try:
-            repair_payload = _repair_story_skeleton_with_ai(session, book_id=book_id, current_skeleton=current_skeleton)
+            repair_payload = _repair_story_skeleton_with_ai(
+                session,
+                book_id=book_id,
+                current_skeleton=current_skeleton,
+                revision_idea=revision_idea,
+            )
             repair_payload["generation_source"] = "live_model"
         except Exception as exc:
             ai_error = f"{type(exc).__name__}: {exc}"
@@ -1126,6 +1258,9 @@ def _perform_action(session, payload: dict) -> dict:
             )
             repair_payload["generation_source"] = "rule_fallback"
             repair_payload["ai_error"] = ai_error
+        repair_payload = apply_revision_idea_to_repair_payload(repair_payload, revision_idea=revision_idea)
+        repair_payload = _preserve_skeleton_identity_fields_in_payload(repair_payload, current_skeleton)
+        repair_payload = _sanitize_skeleton_repair_payload(repair_payload)
         market_count = int((repair_payload.get("market_context") or {}).get("signal_count") or 0)
         source_text = "AI 模型" if repair_payload.get("generation_source") == "live_model" else "规则兜底"
         return {
@@ -1143,7 +1278,27 @@ def _perform_action(session, payload: dict) -> dict:
         if not book:
             raise ValueError(f"book not found: {book_id}")
         current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
-        repair_payload = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+        revision_idea = str(payload.get("revision_idea") or "").strip()
+        preview_skeleton = payload.get("repaired_skeleton") if isinstance(payload.get("repaired_skeleton"), dict) else {}
+        if preview_skeleton:
+            repaired_skeleton = _sanitize_story_skeleton_payload({key: str(preview_skeleton.get(key) or "").strip() for key, _ in SKELETON_APPROVAL_FIELDS})
+            after = audit_skeleton_sources({f"preview.{key}": value for key, value in repaired_skeleton.items()})
+            repair_payload = {
+                "status": "completed" if after.passed else "needs_human_review",
+                "passed": after.passed,
+                "skeleton": repaired_skeleton,
+                "repaired_skeleton": repaired_skeleton,
+                "after": after.to_dict(),
+                "applied_strategy": "apply_current_preview",
+                "next_actions": [
+                    "当前预览仍有未解 blocker，请先在页面中人工调整后再确认。"
+                ] if not after.passed else [],
+            }
+        else:
+            repair_payload = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+            repair_payload = apply_revision_idea_to_repair_payload(repair_payload, revision_idea=revision_idea)
+            repair_payload = _preserve_skeleton_identity_fields_in_payload(repair_payload, current_skeleton)
+            repair_payload = _sanitize_skeleton_repair_payload(repair_payload)
         if not repair_payload.get("passed"):
             return {
                 "status": "needs_human_review",
@@ -1152,24 +1307,47 @@ def _perform_action(session, payload: dict) -> dict:
             }
         repaired_skeleton = repair_payload.get("skeleton") or {}
         result = _update_story_skeleton(session, book=book, payload=repaired_skeleton)
-        approved_count = _approve_skeleton_items(session, book_id=book_id, key="all", current_skeleton=repaired_skeleton)
+        context_reset = reset_context_after_skeleton_approval(
+            session,
+            book_id=book_id,
+            skeleton=repaired_skeleton,
+            start_chapter=1,
+            plan_count=5,
+        )
+        sync_result = synchronize_skeleton_derivatives(
+            session,
+            book_id=book_id,
+            approve_keys="all",
+            chapter_count=5,
+            reason="apply_repair",
+        )
+        approved_count = sync_result.approved_count
         return {
-            "status": "applied",
-            "message": f"已应用骨架修复草案并确认 {approved_count} 项。",
-            "approved_count": approved_count,
             **repair_payload,
             **result,
+            "status": "applied",
+            "message": f"已应用骨架修复草案并确认 {approved_count} 项；旧生产上下文已清理，已从第 1 章重建清洁生产说明。",
+            "approved_count": approved_count,
+            "context_reset": context_reset.to_dict(),
         }
     if action == "approve_skeleton_item":
         book_id = int(payload.get("book_id") or 0)
+        book = session.get(Book, book_id)
+        if not book:
+            raise ValueError(f"book not found: {book_id}")
         current_skeleton = payload.get("current_skeleton") if isinstance(payload.get("current_skeleton"), dict) else {}
         _assert_skeleton_can_be_approved(current_skeleton)
-        approved = _approve_skeleton_items(
+        _update_story_skeleton(session, book=book, payload=current_skeleton)
+        key = str(payload.get("key") or "")
+        approve_keys = "all" if key == "all" else [key]
+        sync_result = synchronize_skeleton_derivatives(
             session,
             book_id=book_id,
-            key=str(payload.get("key") or ""),
-            current_skeleton=current_skeleton,
+            approve_keys=approve_keys,
+            chapter_count=5,
+            reason=f"manual_approve:{key}",
         )
+        approved = sync_result.approved_count
         return {"status": "approved", "message": f"已确认 {approved} 个生产骨架项。", "approved_count": approved}
     if action == "publish_dry_run":
         job = publish_job_dry_run(session, job_id=int(payload.get("task_id") or 0))
@@ -1235,7 +1413,12 @@ def _perform_action(session, payload: dict) -> dict:
         if bool(payload.get("apply_to_brief", True)):
             brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id, brief_status="revision_ready")
             brief_id = brief.id
-        return {"status": "created", "feedback_adjustment_id": adjustment.id, "brief_id": brief_id}
+        return {
+            "status": "created",
+            "feedback_adjustment_id": adjustment.id,
+            "brief_id": brief_id,
+            "revision_decision": extract_revision_decision(adjustment.adjustment_text),
+        }
     if action == "submit_revision_suggestion":
         feedback, adjustment, brief, version = submit_revision_suggestion(
             session,
@@ -1243,7 +1426,7 @@ def _perform_action(session, payload: dict) -> dict:
             chapter_number=int(payload.get("chapter_number") or 0),
             platform=str(payload.get("platform") or "manual"),
             suggestion_text=str(payload.get("suggestion_text") or ""),
-            revision_mode=str(payload.get("revision_mode") or "rewrite"),
+            revision_mode=str(payload.get("revision_mode") or "auto"),
         )
         message = "建议已写入修订要求"
         if version and version.status == "needs_revision":
@@ -1256,6 +1439,7 @@ def _perform_action(session, payload: dict) -> dict:
             "brief_id": brief.id,
             "chapter_version_id": version.id if version else None,
             "chapter_version_status": version.status if version else "",
+            "revision_decision": extract_revision_decision(adjustment.adjustment_text),
         }
     if action == "generate_chapter_samples":
         return _start_background_sample_run(
@@ -1271,7 +1455,7 @@ def _perform_action(session, payload: dict) -> dict:
             session,
             task_id=int(payload.get("task_id") or 0),
             sample_index=int(payload.get("sample_index") or 0),
-            revision_mode=str(payload.get("revision_mode") or "fresh"),
+            revision_mode=str(payload.get("revision_mode") or "targeted"),
         )
         return {
             "status": "created",
@@ -1284,7 +1468,7 @@ def _perform_action(session, payload: dict) -> dict:
         }
     if action == "submit_approval_revision":
         level = str(payload.get("revision_level") or "")
-        mode = str(payload.get("revision_mode") or _approval_revision_mode_from_level(level) or "rewrite")
+        mode = str(payload.get("revision_mode") or _approval_revision_mode_from_level(level) or "targeted")
         note = str(payload.get("note") or "")
         suggestion = _approval_revision_text(mode=mode, note=note)
         feedback, adjustment, brief, version = submit_revision_suggestion(
@@ -1303,6 +1487,7 @@ def _perform_action(session, payload: dict) -> dict:
             "brief_id": brief.id,
             "chapter_version_id": version.id if version else None,
             "chapter_version_status": version.status if version else "",
+            "revision_decision": extract_revision_decision(adjustment.adjustment_text),
         }
     if action == "run_next_action":
         book_id = int(payload.get("book_id") or 0)
@@ -1321,7 +1506,16 @@ def _perform_action(session, payload: dict) -> dict:
             dry_run=bool(payload.get("dry_run", True)),
             queue_generation=not bool(payload.get("dry_run", True)),
             platform=str(payload.get("platform") or "manual"),
+            preview_only=bool(payload.get("preview_only")),
         )
+        if result.status == "preview":
+            return {
+                "status": "preview",
+                "action": result.action,
+                "chapter_number": result.chapter_number,
+                "message": result.message,
+                "object_id": result.object_id,
+            }
         if result.action not in AUTO_ACTIONS or result.status != "executed":
             raise ValueError(f"action is not safe or executable: {result.action} {result.status}")
         return {
@@ -1355,7 +1549,15 @@ def _perform_action(session, payload: dict) -> dict:
                 dry_run=bool(payload.get("dry_run", True)),
                 queue_generation=not bool(payload.get("dry_run", True)),
                 platform=str(payload.get("platform") or "manual"),
+                preview_only=bool(payload.get("preview_only")),
             )
+            if result.status == "preview":
+                return {
+                    "status": "preview",
+                    "blocked_action": result.action,
+                    "message": result.message,
+                    "executed": executed,
+                }
             if result.action not in AUTO_ACTIONS or result.status != "executed":
                 return {"status": "blocked", "blocked_action": result.action, "message": result.message, "executed": executed}
             executed.append(
@@ -1441,6 +1643,9 @@ def _perform_action_with_retry(payload: dict) -> dict:
 
 
 def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
+    previous_values = canonical_current_skeleton_values(session, book_id=book.id)
+    payload = _sanitize_story_skeleton_payload(payload)
+    payload = propagate_core_term_changes(previous_values, payload)
     premise = str(payload.get("premise") or "").strip()
     if not premise:
         raise ValueError("一句话核心设定不能为空")
@@ -1459,6 +1664,39 @@ def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
     foundation.conflict_engine = conflict_engine
     foundation.status = "draft"
 
+    existing_bible = get_story_bible(session, book_id=book.id)
+    forbidden_rules = strip_story_dna_blocks(str(payload.get("forbidden_rules") or "").strip())
+    style_guide = strip_story_dna_blocks(str(payload.get("style_guide") or "").strip())
+    existing_dna_display = story_dna_display_fields(style_guide=existing_bible.style_guide if existing_bible else "", forbidden_rules=existing_bible.forbidden_rules if existing_bible else "")
+    existing_profile_display = story_bible_display_fields(
+        style_guide=existing_dna_display["style_guide"],
+        forbidden_rules=existing_dna_display["forbidden_rules"],
+    )
+    forbidden_rules = existing_dna_display["forbidden_rules"] if forbidden_rules == (existing_bible.forbidden_rules if existing_bible else "") else forbidden_rules
+    style_guide = existing_dna_display["style_guide"] if style_guide == (existing_bible.style_guide if existing_bible else "") else style_guide
+    existing_display = story_bible_display_fields(style_guide=style_guide if style_guide else (existing_bible.style_guide if existing_bible else ""), forbidden_rules=forbidden_rules if forbidden_rules else (existing_bible.forbidden_rules if existing_bible else ""))
+    aesthetic_profile = (
+        str(payload.get("aesthetic_profile") or "").strip()
+        or profile_from_story_text(style_guide=style_guide, forbidden_rules=forbidden_rules)
+        or existing_profile_display["aesthetic_profile"]
+        or existing_display["aesthetic_profile"]
+    )
+    story_dna = strip_aesthetic_profile_blocks(str(payload.get("story_dna") or "").strip()) or existing_dna_display["story_dna"] or build_story_dna_from_skeleton(
+        {
+            "premise": premise,
+            "reader_promise": reader_promise,
+            "world_engine": world_engine,
+            "protagonist_engine": protagonist_engine,
+            "conflict_engine": conflict_engine,
+            "forbidden_rules": forbidden_rules,
+            "style_guide": style_guide,
+            "volume_summary": str(payload.get("volume_summary") or "").strip(),
+            "arc_goal": str(payload.get("arc_goal") or "").strip(),
+            "arc_climax": str(payload.get("arc_climax") or "").strip(),
+            "arc_turn": str(payload.get("arc_turn") or "").strip(),
+        },
+        genre=book.genre,
+    )
     bible = upsert_story_bible(
         session,
         book_id=book.id,
@@ -1467,8 +1705,12 @@ def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
         main_plot=conflict_engine or premise,
         protagonist_arc=protagonist_engine,
         power_curve=world_engine,
-        forbidden_rules=str(payload.get("forbidden_rules") or "").strip(),
-        style_guide=str(payload.get("style_guide") or "").strip(),
+        forbidden_rules=strip_aesthetic_profile_blocks(strip_story_dna_blocks(forbidden_rules)),
+        style_guide="\n\n".join(
+            item
+            for item in [merge_style_with_aesthetic_profile(strip_story_dna_blocks(style_guide), aesthetic_profile), story_dna]
+            if item
+        ),
         status="draft",
     )
     volume = create_volume(
@@ -1505,6 +1747,45 @@ def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
         "volume_id": volume.id,
         "story_arc_id": arc.id,
     }
+
+
+def _sanitize_story_skeleton_payload(payload: dict) -> dict:
+    return normalize_story_skeleton_payload(payload)
+
+
+def _sanitize_skeleton_repair_payload(payload: dict) -> dict:
+    skeleton = payload.get("skeleton") or payload.get("repaired_skeleton") or {}
+    if not isinstance(skeleton, dict):
+        return payload
+    cleaned = _sanitize_story_skeleton_payload(skeleton)
+    after = audit_skeleton_sources({f"repair.{key}": str(value or "") for key, value in cleaned.items()})
+    updated = dict(payload)
+    updated["skeleton"] = cleaned
+    updated["repaired_skeleton"] = cleaned
+    updated["passed"] = after.passed
+    updated["score"] = after.score
+    updated["after"] = after.to_dict()
+    return updated
+
+
+def _preserve_skeleton_identity_fields(repaired: dict, current_skeleton: dict) -> dict:
+    updated = dict(repaired or {})
+    current = current_skeleton or {}
+    for key in ("aesthetic_profile", "story_dna"):
+        if not str(updated.get(key) or "").strip() and str(current.get(key) or "").strip():
+            updated[key] = str(current.get(key) or "").strip()
+    return updated
+
+
+def _preserve_skeleton_identity_fields_in_payload(payload: dict, current_skeleton: dict) -> dict:
+    skeleton = payload.get("skeleton") or payload.get("repaired_skeleton") or {}
+    if not isinstance(skeleton, dict):
+        return payload
+    repaired = _preserve_skeleton_identity_fields(skeleton, current_skeleton)
+    updated = dict(payload)
+    updated["skeleton"] = repaired
+    updated["repaired_skeleton"] = repaired
+    return updated
 
 
 def _sync_skeleton_canon(
@@ -1557,8 +1838,8 @@ def _suggest_story_skeleton(*, book: Book, revision_idea: str, current_skeleton:
 
 请只输出 JSON 对象，不要解释。字段必须是：
 premise, reader_promise, world_engine, protagonist_engine, conflict_engine,
-forbidden_rules, style_guide, volume_title, volume_summary,
-arc_title, arc_goal, arc_climax, arc_turn
+forbidden_rules, style_guide, aesthetic_profile, story_dna,
+volume_title, volume_summary, arc_title, arc_goal, arc_climax, arc_turn
 
 要求：
 - 不要照抄用户原话，要整理成可执行的生产骨架。
@@ -1569,6 +1850,8 @@ arc_title, arc_goal, arc_climax, arc_turn
 - conflict_engine 写长期压力来源和升级方式。
 - forbidden_rules 写必须避开的套路、违和点、设定破坏。
 - style_guide 写正文风格、节奏、信息呈现方式。
+- aesthetic_profile 单独写本书的审美画像、题材主味、氛围边界；不要塞进 style_guide。
+- story_dna 单独写本书每章都要兑现的核心发动机；不要塞进 style_guide。
 - 先消解骨架内部矛盾：不要把某个职业、能力或单一桥段写成万能解法；如果世界规则强调真实人物和真实因果，就不能又要求主角骗取/刷取/让本地人配合表演。
 - 主角能力必须有边界、失败条件和代价；卖点要能产生多种场景，不要把后续章节锁死在同一桥段。
 - 第一卷和剧情段要能支撑前 5 章生产，开局压力要具体。
@@ -1579,7 +1862,8 @@ arc_title, arc_goal, arc_climax, arc_turn
         response = provider.generate(
             prompt,
             max_tokens=2200,
-            temperature=0.65,
+            temperature=settings.llm_planning_temperature,
+            model=settings.llm_planning_model,
             response_format={"type": "json_object"},
         )
         data = json.loads(_json_object_text(response.text))
@@ -1590,10 +1874,13 @@ arc_title, arc_goal, arc_climax, arc_turn
         raise ValueError(f"AI 骨架建议失败：{type(exc).__name__}: {message}") from exc
     if not isinstance(data, dict):
         raise ValueError("AI 骨架建议没有返回 JSON 对象")
-    return _clean_story_skeleton(data, current_skeleton=current_skeleton)
+    return apply_revision_idea_to_skeleton(
+        _clean_story_skeleton(data, current_skeleton=current_skeleton),
+        revision_idea=idea,
+    )
 
 
-def _repair_story_skeleton_with_ai(session, *, book_id: int, current_skeleton: dict) -> dict:
+def _repair_story_skeleton_with_ai(session, *, book_id: int, current_skeleton: dict, revision_idea: str = "") -> dict:
     if not book_id:
         raise ValueError("book_id is required for AI skeleton repair")
     book = session.get(Book, book_id)
@@ -1616,6 +1903,9 @@ def _repair_story_skeleton_with_ai(session, *, book_id: int, current_skeleton: d
 当前骨架 JSON：
 {current}
 
+作者修改意见：
+{revision_idea.strip() or "无"}
+
 骨架审计问题：
 {issue_text}
 
@@ -1624,8 +1914,8 @@ def _repair_story_skeleton_with_ai(session, *, book_id: int, current_skeleton: d
 
 请只输出 JSON 对象，不要解释。字段必须是：
 premise, reader_promise, world_engine, protagonist_engine, conflict_engine,
-forbidden_rules, style_guide, volume_title, volume_summary,
-arc_title, arc_goal, arc_climax, arc_turn
+forbidden_rules, style_guide, aesthetic_profile, story_dna,
+volume_title, volume_summary, arc_title, arc_goal, arc_climax, arc_turn
 
 修复要求：
 - 必须针对审计问题改，不要输出通用模板。
@@ -1635,19 +1925,26 @@ arc_title, arc_goal, arc_climax, arc_turn
 - 主角能力、职业、系统、重生、预知、推演等卖点若存在，必须写出边界、失败条件和代价。
 - 第一卷必须能支撑至少 5 章不同场景发动机。
 - forbidden_rules 要写清绝对不能写什么。
+- aesthetic_profile 必须保留或修正本书审美画像、题材主味和氛围边界；如果当前已有，不要删空。
+- story_dna 必须保留或修正本书长期章节发动机；如果当前已有，不要删空。
 - 每个字段控制在 160 个汉字以内。
 """.strip()
     provider = ArkOpenAIProvider()
     response = provider.generate(
         prompt,
         max_tokens=2600,
-        temperature=0.55,
+        temperature=settings.llm_planning_temperature,
+        model=settings.llm_planning_model,
         response_format={"type": "json_object"},
     )
     data = json.loads(_json_object_text(response.text))
     if not isinstance(data, dict):
         raise ValueError("AI 修复没有返回 JSON 对象")
-    repaired = _clean_story_skeleton(data, current_skeleton=current_skeleton)
+    repaired = apply_revision_idea_to_skeleton(
+        _clean_story_skeleton(data, current_skeleton=current_skeleton),
+        revision_idea=revision_idea,
+    )
+    repaired = _preserve_skeleton_identity_fields(repaired, current_skeleton)
     repaired = _apply_market_context_to_ai_skeleton(repaired, market_context)
     after = audit_skeleton_sources({f"ai.{key}": str(value or "") for key, value in repaired.items()})
     guarded_by_rules = False
@@ -1660,6 +1957,8 @@ arc_title, arc_goal, arc_climax, arc_turn
     if not after.passed:
         repaired = dict(rule_preview.get("skeleton") or rule_preview.get("repaired_skeleton") or {})
         repaired = _apply_market_context_to_ai_skeleton(repaired, market_context)
+        repaired = apply_revision_idea_to_skeleton(repaired, revision_idea=revision_idea)
+        repaired = _preserve_skeleton_identity_fields(repaired, current_skeleton)
         after = audit_skeleton_sources({f"guarded.{key}": str(value or "") for key, value in repaired.items()})
         guarded_by_rules = True
     payload = {
@@ -1725,6 +2024,8 @@ def _clean_story_skeleton(data: dict, *, current_skeleton: dict) -> dict:
         "conflict_engine",
         "forbidden_rules",
         "style_guide",
+        "aesthetic_profile",
+        "story_dna",
         "volume_title",
         "volume_summary",
         "arc_title",
@@ -1734,7 +2035,7 @@ def _clean_story_skeleton(data: dict, *, current_skeleton: dict) -> dict:
     ]
     cleaned: dict[str, str] = {}
     for field in fields:
-        value = str(data.get(field) or current_skeleton.get(field) or "").strip()
+        value = clean_generated_text(data.get(field) or current_skeleton.get(field) or "")
         cleaned[field] = value
     if not cleaned["premise"]:
         raise ValueError("AI 骨架建议缺少核心设定")
@@ -1746,25 +2047,15 @@ def _clean_story_skeleton(data: dict, *, current_skeleton: dict) -> dict:
 
 
 SKELETON_APPROVAL_FIELDS = [
-    ("premise", "一句话核心设定"),
-    ("reader_promise", "读者承诺"),
-    ("world_engine", "世界规则 / 能力曲线"),
-    ("protagonist_engine", "主角动力 / 成长弧"),
-    ("conflict_engine", "长期冲突 / 主线"),
-    ("forbidden_rules", "禁忌规则"),
-    ("style_guide", "文风指南"),
-    ("volume_summary", "第一卷摘要"),
-    ("arc_goal", "剧情段目标"),
-    ("arc_climax", "剧情段高潮"),
-    ("arc_turn", "剧情段转折"),
+    ("premise", "一句话核心设定"), ("reader_promise", "读者承诺"), ("world_engine", "世界规则 / 能力曲线"),
+    ("protagonist_engine", "主角动力 / 成长弧"), ("conflict_engine", "长期冲突 / 主线"), ("forbidden_rules", "禁忌规则"),
+    ("style_guide", "文风指南"), ("aesthetic_profile", "审美画像 / 题材主味"), ("story_dna", "作品 DNA / 章节发动机库"), ("volume_summary", "第一卷摘要"),
+    ("arc_goal", "剧情段目标"), ("arc_climax", "剧情段高潮"), ("arc_turn", "剧情段转折"),
 ]
 
 
 def _skeleton_payload_from_update_payload(payload: dict) -> dict[str, str]:
-    return {
-        key: str(payload.get(key) or "").strip()
-        for key, _ in SKELETON_APPROVAL_FIELDS
-    }
+    return {key: str(payload.get(key) or "").strip() for key, _ in SKELETON_APPROVAL_FIELDS}
 
 
 def _assert_skeleton_can_be_approved(skeleton: dict[str, str]) -> None:
@@ -1949,6 +2240,8 @@ def _ensure_dashboard_story_bible(
     existing = get_story_bible(session, book_id=book_id)
     if existing and only_missing:
         return existing, False
+    dna_display = story_dna_display_fields(style_guide=existing.style_guide if existing else "", forbidden_rules=existing.forbidden_rules if existing else "")
+    display = story_bible_display_fields(style_guide=dna_display["style_guide"], forbidden_rules=dna_display["forbidden_rules"])
     bible = upsert_story_bible(
         session,
         book_id=book_id,
@@ -1958,7 +2251,7 @@ def _ensure_dashboard_story_bible(
         protagonist_arc=protagonist_engine,
         power_curve=world_engine,
         forbidden_rules="避免系统提示词、作者说明、元叙事泄露到正文。",
-        style_guide="番茄小说节奏：开篇快，冲突明确，章末留钩子。",
+        style_guide=merge_style_with_aesthetic_profile("番茄小说节奏：开篇快，冲突明确，章末留钩子。", display["aesthetic_profile"]),
         status="draft",
     )
     return bible, existing is None
@@ -2119,7 +2412,8 @@ def _brainstorm_new_book_ideas(
         response = provider.generate(
             prompt,
             max_tokens=3200,
-            temperature=0.8,
+            temperature=max(0.65, settings.llm_planning_temperature),
+            model=settings.llm_planning_model,
             response_format={"type": "json_object"},
         )
     except Exception as exc:
@@ -2189,7 +2483,8 @@ title, genre, reader_promise, premise, world_engine, protagonist_engine, conflic
             response = provider.generate(
                 prompt,
                 max_tokens=900,
-                temperature=0.85,
+                temperature=max(0.65, settings.llm_planning_temperature),
+                model=settings.llm_planning_model,
                 response_format={"type": "json_object"},
             )
             data = json.loads(_json_object_text(response.text))
@@ -2245,6 +2540,7 @@ ideas 必须恰好 3 个元素。
                 repair_prompt,
                 max_tokens=2600,
                 temperature=0,
+                model=settings.llm_planning_model,
                 response_format={"type": "json_object"},
             )
             return json.loads(_json_object_text(repaired.text))
@@ -2476,6 +2772,25 @@ def _repair_readiness_gate_action(session, payload: dict) -> dict:
         memory = index_book_knowledge(session, book_id=book_id, dry_run=True, reset=True)
         steps.append({"name": "semantic_memory", "status": "rebuilt", "indexed_count": memory.get("indexed_count", 0)})
 
+    needs_canon = any(check.name == "canon" and not check.passed for check in before.checks)
+    if needs_canon:
+        scaffold = repair_production_scaffold(
+            session,
+            book_id=book_id,
+            only_missing=True,
+            approve_skeleton=False,
+            chapter_count=5,
+            apply=True,
+        )
+        steps.append(
+            {
+                "name": "canon_scaffold",
+                "status": "repaired",
+                "created_count": scaffold.get("created_count", 0),
+                "upgraded_count": scaffold.get("upgraded_count", 0),
+            }
+        )
+
     skeleton_preview = None
     needs_skeleton = any(
         check.name in {"skeleton_governance", "skeleton_approval", "foundation", "story_bible"}
@@ -2484,18 +2799,27 @@ def _repair_readiness_gate_action(session, payload: dict) -> dict:
     )
     if needs_skeleton:
         current_skeleton = _current_story_skeleton_values(session, book_id=book_id)
-        skeleton_preview = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
-        market_count = int((skeleton_preview.get("market_context") or {}).get("signal_count") or 0)
-        steps.append(
-            {
-                "name": "skeleton_repair_preview",
-                "status": "created",
-                "passed": bool(skeleton_preview.get("passed")),
-                "market_signal_count": market_count,
-                "score_before": (skeleton_preview.get("before") or {}).get("score"),
-                "score_after": (skeleton_preview.get("after") or {}).get("score"),
-            }
+        approval_only = any(check.name == "skeleton_approval" and not check.passed for check in before.checks) and not any(
+            check.name in {"foundation", "story_bible", "skeleton_governance"} and not check.passed
+            for check in before.checks
         )
+        if approval_only:
+            _assert_skeleton_can_be_approved(current_skeleton)
+            approved_count = _approve_skeleton_items(session, book_id=book_id, key="all", current_skeleton=current_skeleton)
+            steps.append({"name": "skeleton_approval", "status": "synced", "approved_count": approved_count})
+        else:
+            skeleton_preview = repair_story_skeleton_with_market_evidence(session, book_id=book_id, skeleton=current_skeleton)
+            market_count = int((skeleton_preview.get("market_context") or {}).get("signal_count") or 0)
+            steps.append(
+                {
+                    "name": "skeleton_repair_preview",
+                    "status": "created",
+                    "passed": bool(skeleton_preview.get("passed")),
+                    "market_signal_count": market_count,
+                    "score_before": (skeleton_preview.get("before") or {}).get("score"),
+                    "score_after": (skeleton_preview.get("after") or {}).get("score"),
+                }
+            )
 
     after = check_production_readiness(session, book_id=book_id, start=chapter_number, count=5, live_llm=False)
     return {
@@ -2506,6 +2830,90 @@ def _repair_readiness_gate_action(session, payload: dict) -> dict:
         "after": _readiness_payload(after),
         "skeleton_preview": skeleton_preview,
     }
+
+
+def _auto_resolve_author_blocker_action(session, payload: dict) -> dict:
+    book_id = int(payload.get("book_id") or 0)
+    chapter_number = int(payload.get("chapter_number") or 1)
+    platform = str(payload.get("platform") or "").strip() or "番茄小说"
+    if not session.get(Book, book_id):
+        raise ValueError(f"book not found: {book_id}")
+
+    steps: list[dict] = []
+    recovered = recover_stale_generation_tasks(session, timeout_seconds=3600, limit=20)
+    if recovered:
+        steps.append(
+            {
+                "name": "recover_stale_tasks",
+                "status": "completed",
+                "count": len(recovered),
+                "message": f"已恢复 {len(recovered)} 个卡住的后台任务。",
+            }
+        )
+
+    retried = 0
+    failed_payload = _failed_tasks_payload(session, book_id=book_id)
+    for item in failed_payload.get("items", []):
+        if not item.get("is_queue_task"):
+            continue
+        try:
+            retry_generation_queue_task(session, task_id=int(item.get("id") or 0))
+            retried += 1
+        except ValueError:
+            continue
+    if retried:
+        steps.append(
+            {
+                "name": "retry_failed_queue_tasks",
+                "status": "completed",
+                "count": retried,
+                "message": f"已把 {retried} 个失败生成任务放回待处理队列。",
+            }
+        )
+
+    readiness_result = _repair_readiness_gate_action(
+        session,
+        {
+            "book_id": book_id,
+            "chapter_number": chapter_number,
+            "platform": platform,
+        },
+    )
+    readiness_steps = readiness_result.get("steps") or []
+    if readiness_steps:
+        steps.append(
+            {
+                "name": "repair_readiness",
+                "status": readiness_result.get("status", "completed"),
+                "count": len(readiness_steps),
+                "message": readiness_result.get("message", "已整理生产准备。"),
+            }
+        )
+
+    route = prepare_production(session, book_id=book_id, chapter_number=chapter_number, platform=platform).to_dict()
+    message = _auto_resolve_message(steps=steps, route=route, readiness_result=readiness_result)
+    return {
+        "status": "resolved" if route.get("can_continue") or route.get("primary_intent") in {"continue", "wait", "approve"} else "needs_author",
+        "message": message,
+        "steps": steps,
+        "router": route,
+        "skeleton_preview": readiness_result.get("skeleton_preview"),
+    }
+
+
+def _auto_resolve_message(*, steps: list[dict], route: dict, readiness_result: dict) -> str:
+    skeleton_preview = readiness_result.get("skeleton_preview")
+    if skeleton_preview:
+        return "系统已生成设定修复草案；需要你确认是否启用新版设定。"
+    if route.get("can_continue"):
+        return "系统已处理当前打断项，可以继续写作。"
+    if route.get("primary_intent") == "wait":
+        return "系统已处理当前打断项，后台正在运行，等待自动刷新。"
+    if route.get("primary_intent") == "approve":
+        return "系统已处理当前打断项，当前章需要阅读确认。"
+    if steps:
+        return "系统已处理可自动解决的打断项；仍有一项需要确认。"
+    return "当前没有可自动处理的打断项；请查看系统给出的唯一下一步。"
 
 
 def _readiness_repair_message(*, steps: list[dict], after) -> str:
@@ -2535,23 +2943,7 @@ def _readiness_payload(report) -> dict:
 
 
 def _current_story_skeleton_values(session, *, book_id: int) -> dict[str, str]:
-    foundation = _latest_foundation_for_dashboard(session, book_id=book_id)
-    bible = get_story_bible(session, book_id=book_id)
-    volume = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
-    arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
-    return {
-        "premise": foundation.premise if foundation else (bible.positioning if bible else ""),
-        "reader_promise": foundation.reader_promise if foundation else (bible.reader_promise if bible else ""),
-        "world_engine": foundation.world_engine if foundation else (bible.power_curve if bible else ""),
-        "protagonist_engine": foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else ""),
-        "conflict_engine": foundation.conflict_engine if foundation else (bible.main_plot if bible else ""),
-        "forbidden_rules": bible.forbidden_rules if bible else "",
-        "style_guide": bible.style_guide if bible else "",
-        "volume_summary": volume.summary if volume else "",
-        "arc_goal": arc.goal if arc else "",
-        "arc_climax": arc.climax if arc else "",
-        "arc_turn": arc.turn if arc else "",
-    }
+    return canonical_current_skeleton_values(session, book_id=book_id)
 
 
 def _preflight_only_model_drift(preflight: dict) -> bool:
@@ -2568,7 +2960,7 @@ def _auto_repair_preflight_if_needed(session, *, book_id: int, chapter_number: i
     for number in repair_chapters:
         if number < 1:
             continue
-        _repair_chapter_brief(session, book_id=book_id, chapter_number=number)
+        repair_chapter_brief(session, book_id=book_id, chapter_number=number)
         repaired.append(number)
     if repaired:
         session.commit()
@@ -2579,6 +2971,7 @@ def _preflight_only_repairable_brief_blockers(blockers: list[str]) -> bool:
     return all(
         "最新章节 brief 仍含旧质检/旧修订合同残留" in item
         or "章节 brief 未显式承接核心作者意图" in item
+        or "brief 未承接当前骨架锚点" in item
         for item in blockers
     )
 
@@ -2669,7 +3062,9 @@ def _director_sheet_payload(session, *, book_id: int, chapter: Chapter, brief: C
     book = session.get(Book, book_id)
     if not book:
         return ""
-    fresh_rewrite = "修订模式:fresh" in (brief.constraints or "") or "修订模式：fresh" in (brief.constraints or "")
+    revision_mode = _brief_revision_mode(brief)
+    fresh_rewrite = revision_mode == "fresh"
+    rewrite_mode = revision_mode in {"rewrite", "fresh"}
     packet = build_chapter_production_packet(
         session,
         book=book,
@@ -2681,11 +3076,29 @@ def _director_sheet_payload(session, *, book_id: int, chapter: Chapter, brief: C
         revision_goal=brief.goal if brief.status == "revision_ready" else "",
         revision_required_beats=brief.required_beats if brief.status == "revision_ready" else "",
         revision_constraints=brief.constraints if brief.status == "revision_ready" else "",
-        revision_context_mode="fresh" if fresh_rewrite else ("targeted" if brief.status == "revision_ready" else "draft"),
+        revision_context_mode=revision_mode if brief.status == "revision_ready" else "draft",
         fresh_rewrite=fresh_rewrite,
-        rewrite_mode=brief.status == "revision_ready",
+        rewrite_mode=rewrite_mode,
     )
     return packet.director_sheet
+
+
+def _brief_revision_mode(brief: ChapterBrief) -> str:
+    if brief.status != "revision_ready":
+        return "draft"
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""]).replace("：", ":")
+    marker = "修订模式:"
+    if marker not in text:
+        return "targeted"
+    tail = text.split(marker, 1)[1].strip()
+    value = []
+    for ch in tail:
+        if ch.isascii() and (ch.isalpha() or ch == "_"):
+            value.append(ch)
+            continue
+        break
+    mode = "".join(value)
+    return mode if mode in {"polish", "local_patch", "targeted", "rewrite", "fresh"} else "targeted"
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -2720,7 +3133,7 @@ def _update_chapter_brief_action(session, payload: dict) -> dict:
 def _repair_current_chapter_brief_action(session, payload: dict) -> dict:
     book_id = int(payload.get("book_id") or 0)
     chapter_number = int(payload.get("chapter_number") or 0)
-    brief = _repair_chapter_brief(session, book_id=book_id, chapter_number=chapter_number)
+    brief = repair_chapter_brief(session, book_id=book_id, chapter_number=chapter_number)
     after = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
     return {
         "status": "repaired" if after.get("passed") else "needs_attention",
@@ -2730,95 +3143,10 @@ def _repair_current_chapter_brief_action(session, payload: dict) -> dict:
     }
 
 
-def _repair_chapter_brief(session, *, book_id: int, chapter_number: int) -> ChapterBrief:
-    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
-    if not chapter:
-        raise ValueError("chapter not found")
-    latest = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
-    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
-    if latest:
-        latest.status = "superseded"
-    status = "revision_ready" if version and version.status == "needs_revision" else "ready"
-    goal = _clean_brief_goal(chapter_number, latest.goal if latest else "")
-    required = _clean_brief_required_beats(chapter_number, latest.required_beats if latest else "")
-    constraints = ensure_chapter_production_standard(
-        _clean_brief_constraints(latest.constraints if latest else ""),
-        chapter_number=chapter_number,
-    )
-    brief = ChapterBrief(chapter_id=chapter.id, goal=goal, required_beats=required, constraints=constraints, status=status)
-    session.add(brief)
-    session.flush()
-    return brief
-
-
-def _clean_brief_goal(chapter_number: int, previous: str) -> str:
-    base = _strip_stale_brief_text(previous).strip()
-    if not base or len(base) < 20:
-        base = f"第{chapter_number}章：围绕主角陈默在真实武侠世界中的处境推进剧情。"
-    return "\n".join(
-        [
-            base.splitlines()[0],
-            "核心作者意图：把《大江湖》写成真实存在、有血有肉的武侠世界；玩家进入近似穿越，必须遵循江湖规则、门派关系、修炼代价和人情因果。",
-            "主角方向：陈默不是靠打怪升级，也不能靠演员经验万能解题；他应靠现场证据、风险判断、人物误读、武侠套路知识和承担代价来争取机会。",
-        ]
-    )
-
-
-def _clean_brief_required_beats(chapter_number: int, previous: str) -> str:
-    cleaned = _strip_stale_brief_text(previous)
-    lines = [
-        f"第{chapter_number}章必须以具体场景、人物行动和外部压力推进，不写后台说明。",
-        "游戏世界呈现为真实武侠世界：人物有门派、家族、利益、恩怨、恐惧、欲望和日常生活逻辑。",
-        "陈默的行动要体现现场观察、证据推理、武侠桥段知识和风险承担；不要把演员/龙套/表演经验写成万能解法。",
-        "成长来源只能是修炼、拜师、交易、冒险、传承、人情和江湖因果；禁止写成刷经验、打怪升级、机械任务链。",
-        "章末留下由本章行动自然引出的新危险、新关系或新机会。",
-    ]
-    for line in cleaned.splitlines():
-        line = line.strip(" -\t")
-        if line and line not in lines and len(line) <= 80:
-            lines.append(line)
-        if len(lines) >= 8:
-            break
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _clean_brief_constraints(previous: str) -> str:
-    cleaned = _strip_stale_brief_text(previous)
-    lines = [
-        "3000-4500 中文字符，正文优先，不用自检内容凑字数。",
-        "不要输出导演单、质检报告、修订合同、验收清单或系统说明。",
-        "少量游戏界面只能作为玩家感知层点到为止，不能替代真实江湖人物和因果。",
-        "对白和动作必须承接上一段后果，不能另起炉灶。",
-        "不得出现打怪升级、刷经验、刷副本、任务大厅、机械 NPC、系统任务等反方向表达。",
-    ]
-    for line in cleaned.splitlines():
-        line = line.strip(" -\t")
-        if line and not _line_has_stale_marker(line) and line not in lines and len(line) <= 90:
-            lines.append(line)
-        if len(lines) >= 9:
-            break
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _strip_stale_brief_text(text: str) -> str:
-    markers = ("依据质检报告", "上次质检分数", "采纳二审建议", "修复质检问题", "执行修订合同", "修订合同:", "原始人工意见", "验收清单")
-    keep = []
-    skipping_contract = False
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if any(marker in line for marker in markers):
-            skipping_contract = True
-            continue
-        if skipping_contract and (line.startswith("- ") or line.startswith("•") or "：" in line or ":" in line):
-            continue
-        skipping_contract = False
-        if line:
-            keep.append(line)
-    return "\n".join(keep)
-
-
-def _line_has_stale_marker(line: str) -> bool:
-    return any(marker in line for marker in ("质检", "修订合同", "原始人工意见", "验收清单", "二审建议"))
+def _restart_production_from_chapter_action(session, payload: dict) -> dict:
+    book_id = int(payload.get("book_id") or 0)
+    start_chapter = max(1, int(payload.get("start_chapter") or 1))
+    return restart_production_from_chapter(session, book_id=book_id, start_chapter=start_chapter)
 
 
 def _version_payload(version: ChapterVersion | None, *, include_content: bool = True) -> dict | None:
@@ -2831,6 +3159,7 @@ def _version_payload(version: ChapterVersion | None, *, include_content: bool = 
         "status": version.status,
         "source": version.source,
         "content_chars": len(version.content),
+        "created_at": version.created_at.isoformat() if version.created_at else None,
     }
     if include_content:
         payload["content"] = version.content
@@ -2953,14 +3282,19 @@ def _story_skeleton_payload(session, *, book_id: int) -> dict:
     bible = get_story_bible(session, book_id=book_id)
     volume = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
     arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
+    dna_display = story_dna_display_fields(style_guide=bible.style_guide if bible else "", forbidden_rules=bible.forbidden_rules if bible else "")
+    bible_display = story_bible_display_fields(style_guide=dna_display["style_guide"], forbidden_rules=dna_display["forbidden_rules"])
+    story_dna = dna_display["story_dna"] or story_dna_for_book(session, book_id=book_id)
     skeleton_values = {
         "premise": foundation.premise if foundation else (bible.positioning if bible else ""),
         "reader_promise": foundation.reader_promise if foundation else (bible.reader_promise if bible else ""),
         "world_engine": foundation.world_engine if foundation else (bible.power_curve if bible else ""),
         "protagonist_engine": foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else ""),
         "conflict_engine": foundation.conflict_engine if foundation else (bible.main_plot if bible else ""),
-        "forbidden_rules": bible.forbidden_rules if bible else "",
-        "style_guide": bible.style_guide if bible else "",
+        "forbidden_rules": bible_display["forbidden_rules"],
+        "style_guide": bible_display["style_guide"],
+        "aesthetic_profile": bible_display["aesthetic_profile"],
+        "story_dna": story_dna,
         "volume_summary": volume.summary if volume else "",
         "arc_goal": arc.goal if arc else "",
         "arc_climax": arc.climax if arc else "",
@@ -2984,8 +3318,10 @@ def _story_skeleton_payload(session, *, book_id: int) -> dict:
             "protagonist_arc": bible.protagonist_arc,
             "relationship_arc": bible.relationship_arc,
             "power_curve": bible.power_curve,
-            "forbidden_rules": bible.forbidden_rules,
-            "style_guide": bible.style_guide,
+            "forbidden_rules": bible_display["forbidden_rules"],
+            "style_guide": bible_display["style_guide"],
+            "aesthetic_profile": bible_display["aesthetic_profile"],
+            "story_dna": story_dna,
             "status": bible.status,
         } if bible else None,
         "volume": {
@@ -3006,430 +3342,9 @@ def _story_skeleton_payload(session, *, book_id: int) -> dict:
         } if arc else None,
     }
     payload["approvals"] = _skeleton_approval_payload(session, book_id=book_id, skeleton=skeleton_values)
+    payload["versions"] = list_skeleton_versions(session, book_id=book_id)
     payload["governance"] = audit_story_skeleton_with_agent_evidence(session, book_id=book_id).to_dict()
     return payload
-
-
-def _llm_usage_payload(session, *, book_id: int) -> dict:
-    usage = summarize_llm_usage(session, book_id=book_id)
-    cost = summarize_llm_cost(session, book_id=book_id)
-    recent = list_llm_request_logs(session, book_id=book_id, limit=8)
-    return {
-        "usage": {
-            "book_id": usage.book_id,
-            "request_count": usage.request_count,
-            "completed_count": usage.completed_count,
-            "failed_count": usage.failed_count,
-            "estimated_total_tokens": usage.estimated_total_tokens,
-            "actual_total_tokens": usage.actual_total_tokens,
-            "billable_prompt_tokens": usage.billable_prompt_tokens,
-            "billable_response_tokens": usage.billable_response_tokens,
-            "billable_total_tokens": usage.billable_total_tokens,
-            "elapsed_ms": usage.elapsed_ms,
-        },
-        "cost": {
-            "book_id": cost.book_id,
-            "model": cost.model,
-            "request_count": cost.request_count,
-            "billable_prompt_tokens": cost.billable_prompt_tokens,
-            "billable_response_tokens": cost.billable_response_tokens,
-            "billable_total_tokens": cost.billable_total_tokens,
-            "input_price_per_1m_tokens": cost.input_price_per_1m_tokens,
-            "output_price_per_1m_tokens": cost.output_price_per_1m_tokens,
-            "estimated_cost": cost.estimated_cost,
-            "currency": cost.currency,
-        },
-        "recent_requests": [
-            {
-                "id": item.id,
-                "generation_task_id": item.generation_task_id,
-                "task_type": item.task_type,
-                "status": item.status,
-                "provider": item.provider,
-                "model": item.model,
-                "prompt_template": item.prompt_template,
-                "estimated_total_tokens": item.estimated_total_tokens,
-                "actual_total_tokens": item.actual_total_tokens,
-                "elapsed_ms": item.elapsed_ms,
-                "error_category": item.error_category,
-            }
-            for item in recent
-        ],
-    }
-
-
-def _failed_tasks_payload(session, *, book_id: int) -> dict:
-    tasks = list(
-        session.scalars(
-            select(GenerationTask)
-            .where(GenerationTask.book_id == book_id, GenerationTask.status == "failed")
-            .order_by(GenerationTask.id.desc())
-            .limit(20)
-        )
-    )
-    counts: dict[str, int] = {}
-    advice: dict[str, str] = {}
-    rows = []
-    for task in tasks:
-        if _obsolete_failed_generation_task(session, task):
-            continue
-        input_data = _loads_json(task.input_json)
-        output_data = _loads_json(task.output_json)
-        error_category = str(output_data.get("error_category") or _infer_error_category(output_data))
-        counts[error_category] = counts.get(error_category, 0) + 1
-        advice[error_category] = llm_failure_suggestion(error_category)
-        rows.append(
-            {
-                "id": task.id,
-                "task_type": task.task_type,
-                "status": task.status,
-                "chapter_number": input_data.get("chapter_number"),
-                "attempt": output_data.get("attempt") or input_data.get("attempt"),
-                "max_attempts": output_data.get("max_attempts") or input_data.get("max_attempts"),
-                "error_category": error_category,
-                "error": str(output_data.get("error") or "")[:300],
-                "is_queue_task": task.task_type in QUEUE_TYPES,
-            }
-        )
-    return {
-        "total": len(rows),
-        "by_error_category": dict(sorted(counts.items())),
-        "advice_by_error_category": {key: advice[key] for key in sorted(advice)},
-        "llm_failures": [
-            {
-                "error_category": item.error_category,
-                "count": item.count,
-                "latest_request_id": item.latest_request_id,
-                "latest_task_type": item.latest_task_type,
-                "latest_provider": item.latest_provider,
-                "latest_model": item.latest_model,
-                "latest_elapsed_ms": item.latest_elapsed_ms,
-                "suggestion": item.suggestion,
-            }
-            for item in summarize_llm_failures(session, book_id=book_id, limit=20)
-        ],
-        "items": rows,
-    }
-
-
-def _obsolete_failed_generation_task(session, task: GenerationTask) -> bool:
-    if task.task_type in QUEUE_TYPES:
-        return False
-    input_data = _loads_json(task.input_json)
-    chapter_number = input_data.get("chapter_number")
-    source_version_id = input_data.get("source_version_id")
-    revision_brief_id = input_data.get("revision_brief_id")
-    quality_report_id = input_data.get("quality_report_id")
-    stmt = (
-        select(GenerationTask)
-        .where(
-            GenerationTask.book_id == task.book_id,
-            GenerationTask.task_type == task.task_type,
-            GenerationTask.status == "completed",
-            GenerationTask.created_at > task.created_at,
-        )
-        .order_by(GenerationTask.id.desc())
-    )
-    for candidate in session.scalars(stmt):
-        candidate_input = _loads_json(candidate.input_json)
-        if chapter_number and candidate_input.get("chapter_number") != chapter_number:
-            continue
-        if source_version_id and candidate_input.get("source_version_id") != source_version_id:
-            continue
-        if revision_brief_id and candidate_input.get("revision_brief_id") != revision_brief_id:
-            continue
-        if quality_report_id and candidate_input.get("quality_report_id") != quality_report_id:
-            continue
-        return True
-    return False
-
-
-def _infer_error_category(output_data: dict) -> str:
-    error = str(output_data.get("error") or "")
-    if "LLM output is not valid JSON" in error or "StructuredOutputError" in error:
-        return "structured_output"
-    return ""
-
-
-def _publishing_payload(session, *, book_id: int) -> dict:
-    targets = list(session.scalars(select(PublishingTarget).order_by(PublishingTarget.id)))
-    ready_versions = _ready_publish_versions(session, book_id=book_id)
-    jobs = list(
-        session.scalars(
-            select(PublishJob)
-            .join(ChapterVersion, ChapterVersion.id == PublishJob.chapter_version_id)
-            .join(Chapter, Chapter.id == ChapterVersion.chapter_id)
-            .where(Chapter.book_id == book_id)
-            .order_by(PublishJob.id.desc())
-            .limit(20)
-        )
-    )
-    executions = list(
-        session.scalars(
-            select(PublishExecution)
-            .join(PublishJob, PublishJob.id == PublishExecution.publish_job_id)
-            .join(ChapterVersion, ChapterVersion.id == PublishJob.chapter_version_id)
-            .join(Chapter, Chapter.id == ChapterVersion.chapter_id)
-            .where(Chapter.book_id == book_id)
-            .order_by(PublishExecution.id.desc())
-            .limit(20)
-        )
-    )
-    return {
-        "targets": [
-            {
-                "id": target.id,
-                "platform": target.platform,
-                "account_label": target.account_label,
-                "work_identifier": target.work_identifier,
-                "automation_mode": target.automation_mode,
-                "status": target.status,
-                "config": _loads_json(target.config_json),
-            }
-            for target in targets
-        ],
-        "ready_versions": ready_versions,
-        "jobs": [_publish_job_payload(session, job) for job in jobs],
-        "executions": [
-            {
-                "id": execution.id,
-                "publish_job_id": execution.publish_job_id,
-                "platform": execution.platform,
-                "status": execution.status,
-                "automation_mode": execution.automation_mode,
-                "report": execution.report,
-                "artifact_path": execution.artifact_path,
-            }
-            for execution in executions
-        ],
-    }
-
-
-def _ready_publish_versions(session, *, book_id: int) -> list[dict]:
-    rows: list[dict] = []
-    chapters = list(session.scalars(select(Chapter).where(Chapter.book_id == book_id).order_by(Chapter.chapter_number)))
-    for chapter in chapters:
-        version = session.scalar(
-            select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc())
-        )
-        if not version or version.status != "approved":
-            continue
-        active_job = session.scalar(
-            select(PublishJob)
-            .where(
-                PublishJob.chapter_version_id == version.id,
-                PublishJob.status.in_(["pending", "dry_run_ready", "queued", "published", "failed"]),
-            )
-            .order_by(PublishJob.id.desc())
-        )
-        if active_job:
-            continue
-        preflight = build_publish_preflight(session, version_id=version.id)
-        rows.append(
-            {
-                "version_id": version.id,
-                "chapter_number": chapter.chapter_number,
-                "title": version.title,
-                "status": version.status,
-                "preflight": preflight,
-            }
-        )
-    return rows
-
-
-def _database_payload(session) -> dict:
-    health = check_database_health(session)
-    schema = check_schema_version(session)
-    backups = list_database_backups(session, limit=20)
-    return {
-        "health": {
-            "database_url": health.database_url,
-            "sqlite_path": health.sqlite_path,
-            "table_count": health.table_count,
-            "tables": health.tables,
-            "migration_count": health.migration_count,
-            "latest_migration": health.latest_migration,
-            "backup_count": health.backup_count,
-        },
-        "schema_version": {
-            "database_url": schema.database_url,
-            "current_versions": schema.current_versions,
-            "expected_head": schema.expected_head,
-            "status": schema.status,
-            "migration_count": schema.migration_count,
-            "latest_migration": schema.latest_migration,
-            "message": schema.message,
-        },
-        "backups": [
-            {
-                "id": backup.id,
-                "database_url": backup.database_url,
-                "backup_path": backup.backup_path,
-                "status": backup.status,
-                "size_bytes": backup.size_bytes,
-                "report": backup.report,
-            }
-            for backup in backups
-        ],
-    }
-
-
-def _publish_job_payload(session, job: PublishJob) -> dict:
-    version = session.get(ChapterVersion, job.chapter_version_id)
-    chapter = session.get(Chapter, version.chapter_id) if version else None
-    content = version.content if version else ""
-    return {
-        "id": job.id,
-        "version_id": job.chapter_version_id,
-        "chapter_number": chapter.chapter_number if chapter else None,
-        "platform": job.platform,
-        "status": job.status,
-        "automation_payload": _loads_json(job.automation_payload),
-        "result_report": job.result_report,
-        "preflight": build_publish_preflight(session, version_id=job.chapter_version_id) if version else None,
-        "preview": {
-            "title": version.title if version else "",
-            "content_chars": len(content),
-            "content_excerpt": content[:1200],
-        },
-    }
-
-
-def _generation_tasks_for_chapter(session, *, book_id: int, chapter_number: int, limit: int) -> list[dict]:
-    rows: list[dict] = []
-    tasks = session.scalars(select(GenerationTask).where(GenerationTask.book_id == book_id).order_by(GenerationTask.id.desc()))
-    for task in tasks:
-        input_data = _loads_json(task.input_json)
-        if input_data.get("chapter_number") != chapter_number:
-            continue
-        output_data = _loads_json(task.output_json)
-        rows.append(
-            {
-                "id": task.id,
-                "type": task.task_type,
-                "status": task.status,
-                "attempt": input_data.get("attempt") or output_data.get("attempt"),
-                "error_category": output_data.get("error_category", ""),
-            }
-        )
-        if len(rows) >= limit:
-            break
-    return rows
-
-
-def _brief_payload(brief: ChapterBrief | None) -> dict | None:
-    if not brief:
-        return None
-    return {
-        "id": brief.id,
-        "goal": brief.goal,
-        "required_beats": brief.required_beats,
-        "constraints": brief.constraints,
-        "status": brief.status,
-    }
-
-
-def _quality_payload(quality: QualityReport | None) -> dict | None:
-    if not quality:
-        return None
-    data = _loads_json(quality.report)
-    return {
-        "id": quality.id,
-        "score": quality.score,
-        "passed": quality.passed,
-        "report": quality.report,
-        "data": data,
-    }
-
-
-def _version_diff_payload(versions: list[ChapterVersion]) -> dict | None:
-    if len(versions) < 2:
-        return None
-    right = versions[0]
-    left = versions[1]
-    diff = difflib.unified_diff(
-        left.content.splitlines(),
-        right.content.splitlines(),
-        fromfile=f"version#{left.id}",
-        tofile=f"version#{right.id}",
-        lineterm="",
-    )
-    text = "\n".join(diff)
-    return {
-        "left_version_id": left.id,
-        "right_version_id": right.id,
-        "text": text,
-    }
-
-
-def _parse_feedback_ids(value) -> list[int]:
-    if isinstance(value, list):
-        return [int(item) for item in value]
-    return [int(item.strip()) for item in str(value or "").split(",") if item.strip()]
-
-
-def _approval_revision_mode_from_level(level: str) -> str:
-    legacy = {
-        "polish": "polish",
-        "local_patch": "local_patch",
-        "targeted": "targeted",
-        "rewrite": "rewrite",
-        "rebuild": "rewrite",
-    }
-    return legacy.get(level, "")
-
-
-def _approval_revision_label(mode: str) -> str:
-    labels = {
-        "polish": "小修",
-        "local_patch": "局部补丁",
-        "targeted": "定点修订",
-        "rewrite": "结构重写",
-        "fresh": "按最新骨架重启",
-    }
-    return labels.get(mode, "结构重写")
-
-
-def _approval_revision_text(*, mode: str, note: str = "") -> str:
-    extras = note.strip()
-    if mode == "fresh":
-        base = (
-            "审批决策：按最新生产骨架重启本章。旧稿已废弃，不要在旧稿上局部润色，也不要参考旧稿段落顺序、旧场景推进或旧句式。"
-            "必须以最新生产骨架、Story Bible、已同步 Canon 和本次人工意见为准，重新设计开篇牵引、主角行动链、信息释放顺序、主要场景推进和章末钩子。"
-            "只保留数据库 Canon 中仍有效的必要事实；旧质检中的具体旧桥段、旧名词和旧能力表现不得反向污染新稿。"
-        )
-    elif mode == "rewrite":
-        base = (
-            "审批决策：结构重写。按最新生产骨架重做整章，不要在旧稿上局部润色。"
-            "旧稿只用于避免 Canon 断裂；必须重新设计开篇牵引、主角行动链、信息释放顺序、主要场景推进和章末钩子。"
-            "允许替换旧场景、删除旧桥段、改变段落顺序和表达方式；只保留必要核心设定、关键名词和已登记 Canon。"
-        )
-    elif mode == "targeted":
-        base = (
-            "审批决策：定点修订。当前版本有可用部分，不要彻底重写整章。"
-            "必须保留已经有效的场景、人物行动链、爽点和章末钩子，只替换或扩写人工指出的问题段落。"
-            "旧稿可作为主要结构参考，但最新生产骨架、Canon 和本次人工意见仍然优先。"
-        )
-    elif mode == "local_patch":
-        base = (
-            "审批决策：局部补丁。当前版本主体可用，只修改人工明确指出的句子、词语或短段落。"
-            "不得重排场景、不得改变章末事实、不得把可用段落扩写成整章重写。"
-            "如果问题是模型套路词或世界观偏差，只把偏差表达改成符合当前世界规则的说法。"
-        )
-    else:
-        base = "审批决策：小修。保留当前剧情结构，只润色语言表达、删掉生硬句、增强现场感和人物反应自然度。"
-    if extras:
-        return f"{base} 补充意见：{extras}"
-    return base
-
-
-def _loads_json(value: str) -> dict:
-    try:
-        data = json.loads(value or "{}")
-    except json.JSONDecodeError:
-        return {"raw": value}
-    return data if isinstance(data, dict) else {"value": data}
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

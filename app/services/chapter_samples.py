@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,9 +22,10 @@ from app.models.entities import (
     StoryFoundation,
 )
 from app.services.book_profile import build_book_profile
-from app.services.feedback import REVISION_MODE_FRESH, submit_revision_suggestion
+from app.services.feedback import REVISION_MODE_FRESH, REVISION_MODE_TARGETED, submit_revision_suggestion
 from app.services.llm_audit import record_llm_request
 from app.services.llm_errors import classify_exception
+from app.services.naming_governance import build_naming_governance_block
 from app.services.production_packet import build_chapter_production_packet
 from app.services.writer_loop import sample_failure_director
 
@@ -33,6 +34,7 @@ PROMPT_TEMPLATE = "chapter_sample_lab@v5"
 SAMPLE_DIVERSITY_THRESHOLD = 65
 USABLE_SAMPLE_THRESHOLD = 78
 DEFAULT_SAMPLE_MAX_ATTEMPTS = 3
+SAMPLE_RUNNING_TIMEOUT_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -310,6 +312,17 @@ def latest_chapter_samples(
         if int(input_data.get("chapter_number") or 0) != chapter_number:
             continue
         output_data = _loads_json(task.output_json)
+        if _sample_task_is_stale_running(task):
+            output_data = {
+                **output_data,
+                "error_category": output_data.get("error_category") or "stale_running",
+                "error": output_data.get("error")
+                or f"章节小样任务超过 {SAMPLE_RUNNING_TIMEOUT_SECONDS} 秒仍显示运行中，已自动标记为失败。",
+                "retryable": True,
+            }
+            task.status = "failed"
+            task.output_json = _dumps_json(output_data)
+            session.flush()
         if task.status == "completed":
             samples = _normalize_samples(output_data.get("samples"), limit=limit)
             diversity_report = _sample_diversity_report(samples)
@@ -360,12 +373,19 @@ def latest_chapter_samples(
     return latest_failed or latest_completed or {"task_id": None, "status": "empty", "samples": []}
 
 
+def _sample_task_is_stale_running(task: GenerationTask) -> bool:
+    if task.status != "running":
+        return False
+    created_at = task.created_at or datetime.utcnow()
+    return created_at <= datetime.utcnow() - timedelta(seconds=SAMPLE_RUNNING_TIMEOUT_SECONDS)
+
+
 def adopt_chapter_sample(
     session: Session,
     *,
     task_id: int,
     sample_index: int,
-    revision_mode: str = REVISION_MODE_FRESH,
+    revision_mode: str = REVISION_MODE_TARGETED,
 ) -> AdoptedChapterSample:
     task = session.get(GenerationTask, task_id)
     if not task:
@@ -387,7 +407,7 @@ def adopt_chapter_sample(
         suggestion += (
             "\n\n小样采用风险：本组小样多样性评分"
             f"{score}/{SAMPLE_DIVERSITY_THRESHOLD}，问题：{issues}。"
-            "允许采用本小样作为作者方向选择，但整章重写时必须主动规避上述重复问题。"
+            "允许采用本小样作为作者方向选择，但后续修订时必须主动规避上述重复问题。"
         )
     feedback, adjustment, brief, version = submit_revision_suggestion(
         session,
@@ -875,6 +895,8 @@ Canon 与世界规则：
 
 {profile.sample_prompt_block()}
 
+{build_naming_governance_block(session, book_id=book.id, chapter_number=chapter_number)}
+
 章节导演单：
 {packet.director_sheet}
 
@@ -897,6 +919,7 @@ Canon 与世界规则：
 - opening 不得像摄像头客观扫景；必须至少两处写出角色当下感知或身体反应。
 - 每个小样必须说明 precision_strategy：如何保证物件、动词、视线条件和推理链准确；角色不能凭空看见鞋底、不能把刀穗写成腰上别着，也不能让强判断缺少“如果/若是/多半”等条件。
 - scene_plan 只写低成本方案，不扩写整章；被采用后再进入整章生产。
+- 小样里不要随手生造人名、地名、物品名；普通人物优先写身份、动作和关系，新专名必须来自白名单或在同段写清来源/用途/代价。
 - direction、why_it_works、difference_from_existing、anti_ai_flavor_strategy、pov_strategy、precision_strategy、adoption_note 每项控制在 80 个中文字符以内。
 - scene_plan 每项控制在 40 个中文字符以内。
 - 不要输出系统说明、质检术语、导演单标题、JSON 外文本。
@@ -942,18 +965,17 @@ def _sample_adoption_text(*, task_id: int, sample: dict) -> str:
             f"小样名：{sample.get('title', '')}",
             f"叙事实验：{sample.get('experiment_hypothesis', '')}",
             f"读者体验方向：{sample.get('direction', '')}",
-            "必须继承的叙事发动机合同：",
+            "轻量方向约束：",
             *engine_contract,
-            "必须保留的小样气质和开场方法：",
-            _compact(str(sample.get("opening") or ""), 900),
+            "小样气质参考：",
+            _compact(str(sample.get("opening") or ""), 420),
             f"后续场景推进：{plan}",
             f"结构差异：{sample.get('difference_from_existing', '')}",
-            f"去AI味儿策略：{sample.get('anti_ai_flavor_strategy', '')}",
             f"贴身视角策略：{sample.get('pov_strategy', '')}",
             f"表达准确策略：{sample.get('precision_strategy', '')}",
             f"采用说明：{sample.get('adoption_note', '')}",
             f"注意规避：{risks}",
-            "验收方式：下一版整章必须能逐项对应叙事发动机合同；开篇、场景推进、配角作用、信息释放和章末钩子都要沿用同一套压力逻辑，不得只替换几个名词，也不得退回旧稿的机械化推进。",
+            "验收方式：下一版保留小样的压力逻辑和读感即可，不要求逐字复刻小样原文；优先修补当前稿缺口，避免无必要整章重写。",
         ]
     )
 
@@ -966,19 +988,18 @@ def _sample_engine_contract(sample: dict) -> list[str]:
     plan = [_compact(str(item), 80) for item in _list(sample.get("scene_plan"))[:4] if str(item).strip()]
     risks = [_compact(str(item), 80) for item in _list(sample.get("risks"))[:3] if str(item).strip()]
     lines = [
-        f"- 必须保留探索轴：{axis or '以本小样开场压力为准'}。",
-        f"- 必须保留叙事实验：{experiment or '用同一套叙事发动机推进整章'}。",
-        f"- 必须保留读者体验：{direction or '让读者感到主角在具体压力下主动选择并付出代价'}。",
-        f"- 必须让开篇压力在前500字内落地：短期目标、阻碍、身体反应和误判至少各出现一次。",
-        f"- 必须让整章后续场景从小样压力自然长出来，不得换成无关任务链或旧稿默认桥段。",
-        f"- 必须让关键配角承担功能：制造阻碍、暴露利益、纠正误判或递出代价，不能只负责解释设定。",
-        f"- 必须按小样的信息释放方式推进：先给可见证据，再给角色误判，最后用人物反应或新物证修正判断。",
-        f"- 必须让章末钩子来自本章行动后果，而不是突兀追杀、坠崖、陌生人硬塞秘密或系统提示。",
+        f"- 探索轴：{axis or '以本小样开场压力为准'}。",
+        f"- 叙事实验：{experiment or '用同一套叙事发动机推进整章'}。",
+        f"- 读者体验：{direction or '让读者感到主角在具体压力下主动选择并付出代价'}。",
+        "- 开篇保留短期目标、阻碍、身体反应和误判；后续只补齐当前稿缺口。",
+        "- 配角要制造阻碍、暴露利益、纠正误判或递出代价，不能只解释设定。",
+        "- 信息释放先给可见证据，再给角色误判，最后用人物反应或新物证修正判断。",
+        "- 章末钩子来自本章行动后果，不靠突兀追杀、陌生人硬塞秘密或系统提示。",
     ]
     if plan:
-        lines.append(f"- 必须沿用后续推进骨架：{'；'.join(plan)}。")
+        lines.append(f"- 后续推进骨架：{'；'.join(plan)}。")
     if risks:
-        lines.append(f"- 必须规避采用风险：{'；'.join(risks)}。")
+        lines.append(f"- 规避采用风险：{'；'.join(risks)}。")
     if _uses_actor_shortcut(opening):
         lines.append("- 禁止把演员、龙套、导演教过或表演经验当作解决冲突的钥匙。")
     if _sample1_uses_banned_entry(opening):
@@ -1163,6 +1184,8 @@ def _sample_diversity_report(samples: list[dict]) -> dict:
         default=None,
     )
     score = max(0, min(100, score))
+    if not usable_sample_indices:
+        issues.append("no_usable_sample")
     status = "pass" if score >= 65 and not issues else "attention"
     if status != "pass" and score >= 65 and recommended_sample:
         status = "usable"

@@ -10,6 +10,7 @@ from app.llm.providers import get_provider
 from app.llm.schemas import StructuredOutputError
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, FeedbackAdjustment, GenerationTask, QualityReport
 from app.services.bias import apply_model_drift_local_patch, evaluate_generation_bias
+from app.services.brief_sanitizer import sanitize_chapter_brief_fields
 from app.services.chapter_standards import ensure_chapter_production_standard, extract_min_chars
 from app.services.chapter_unit_plans import align_chapter_unit_plan
 from app.services.feedback import REVISION_MODE_FRESH, REVISION_MODE_LOCAL_PATCH, build_rewrite_contract
@@ -22,6 +23,7 @@ from app.services.production_llm import (
     repair_humanized_unit_flow,
 )
 from app.services.production_packet import build_chapter_production_packet
+from app.services.production_gate import assert_production_gate
 from app.services.production_run_review import record_production_run_review
 from app.services.production_state import brief_has_revision_artifacts, latest_foundation, latest_story_brief, next_version_number
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
@@ -82,6 +84,14 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
         mode="revision_brief",
     )
     required = "；".join([required, *writer_loop.rewrite_directives, *writer_loop.acceptance_checks])
+    goal, required, constraints = sanitize_chapter_brief_fields(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        goal=goal,
+        required_beats=required,
+        constraints=constraints,
+    )
     brief = ChapterBrief(chapter_id=chapter.id, goal=goal, required_beats=required, constraints=constraints, status="revision_ready")
     session.add(brief)
     session.flush()
@@ -89,6 +99,7 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
 
 
 def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_run: bool = True) -> ChapterVersion:
+    assert_production_gate(session, book_id=book_id, action="revise_chapter")
     book = session.get(Book, book_id)
     if not book:
         raise ValueError(f"book not found: {book_id}")
@@ -110,7 +121,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     if not revision_brief:
         raise ValueError("revision brief is required before revise")
-    if not quality and not _brief_has_feedback_marker(revision_brief):
+    if not quality and not _brief_has_feedback_marker(revision_brief) and not _brief_has_actionable_revision_plan(revision_brief):
         raise ValueError("quality report is required before revise")
     foundation = latest_foundation(session, book_id)
     if not foundation:
@@ -378,7 +389,7 @@ def _chapter_unit_beats(quality_data: dict) -> list[str]:
             f"拟人化小单元修复：当前单元流评分 {score}，共 {unit_count} 个单元；"
             "修订必须按 300-700 字小单元重建目标、阻碍、动作后果和承接点"
         )
-    for item in report.get("repair_contract") or []:
+    for item in (report.get("repair_contract") or [])[:3]:
         if item:
             rows.append(str(item))
     for unit in report.get("units") or []:
@@ -390,7 +401,7 @@ def _chapter_unit_beats(quality_data: dict) -> list[str]:
         if summary:
             detail += f"；当前片段：{summary}"
         rows.append(detail)
-    return list(dict.fromkeys(rows))[:8]
+    return list(dict.fromkeys(rows))[:5]
 
 
 def _llm_review_diagnostic_beats(llm_review: dict) -> list[str]:
@@ -473,9 +484,24 @@ def _brief_has_feedback_marker(brief: ChapterBrief) -> bool:
     return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
 
 
+def _brief_has_actionable_revision_plan(brief: ChapterBrief) -> bool:
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    if len(text.strip()) < 120:
+        return False
+    required_markers = ("第", "核心设定", "主角", "3000-4500")
+    if not all(marker in text for marker in required_markers):
+        return False
+    stale_markers = ("修订合同:", "原始人工意见:", "验收清单:", "质检报告 #")
+    return not any(marker in text for marker in stale_markers)
+
+
 def _revision_requires_rewrite(brief: ChapterBrief) -> bool:
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-    if "修订模式:targeted" in text or "修订模式:polish" in text:
+    if (
+        f"修订模式:{REVISION_MODE_LOCAL_PATCH}" in text
+        or "修订模式:targeted" in text
+        or "修订模式:polish" in text
+    ):
         return False
     markers = (
         "修订模式:rewrite",

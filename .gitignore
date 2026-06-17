@@ -16,6 +16,7 @@ venv/
 data/*.db
 data/*.db-*
 data/backups/
+data/trash/
 data/test-worker-logs/
 data/worker-stability-logs/
 outputs/

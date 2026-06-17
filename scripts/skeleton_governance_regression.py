@@ -84,6 +84,29 @@ def main() -> int:
     )
     if "sellpoint_crutch_overdefined:system_panel" not in {issue.code for issue in system.issues}:
         failures.append("system_sellpoint_crutch_missing")
+    dramatic_system = audit_skeleton_sources(
+        {
+            "premise": "主角获得剧情演绎系统，遇到事件时复刻经典桥段，复刻程度越高奖励越好。",
+            "reader_promise": "看主角在桥段复刻中拿奖励，也会因为参演人员好感度下降和失败无奖励承担后果。",
+            "world_engine": "剧情演绎系统只在人物因果和场景条件吻合时触发，不能给最优答案，也不能自动解题。",
+            "protagonist_engine": "主角必须主动判断桥段是否适合，错误复刻会造成关系错位和收益污染。",
+            "conflict_engine": "长期压力来自桥段错账、好感度变化、现实同步副作用和玩家竞争。",
+            "forbidden_rules": "禁止签到、抽奖、加点、系统面板最优答案和无代价奖励。",
+        }
+    )
+    if "sellpoint_crutch_overdefined:system_panel" in {issue.code for issue in dramatic_system.issues}:
+        failures.append("dramatic_system_misread_as_panel_crutch")
+    dramatic_performance = audit_skeleton_sources(
+        {
+            "form.premise": "主角激活桥段复刻能力，必须在真实NPC因果中自然演出经典武侠桥段。",
+            "form.reader_promise": "每次复刻像即兴演出，成功获得武学与同步奖励，失败则搞砸关系、闹出笑话。",
+            "form.world_engine": "桥段复刻必须符合场景逻辑，不能凭空触发；NPC会记仇、报恩和传八卦。",
+            "form.protagonist_engine": "主角太想复刻桥段，用力过猛会留下表演痕迹，让NPC信任度下降。",
+            "form.conflict_engine": "长期压力来自桥段错账、关系复杂化、收益污染和现实同步副作用。",
+        }
+    )
+    if "sellpoint_crutch_overdefined:actor_craft" in {issue.code for issue in dramatic_performance.issues}:
+        failures.append("dramatic_performance_misread_as_actor_crutch")
     repaired = repair_skeleton_draft(current_skeleton, current)
     repaired_report = audit_skeleton_sources({f"repaired.{key}": value for key, value in repaired.items()})
     if not repaired_report.passed:

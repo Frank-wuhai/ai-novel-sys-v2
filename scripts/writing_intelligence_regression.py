@@ -6,17 +6,19 @@ from sqlalchemy import select
 
 from app.db.session import session_scope
 from app.models.entities import Book
+from app.services.production import create_book
 from app.services.chapter_standards import build_chapter_production_standard
 from app.services.quality import evaluate_chapter
 from app.services.writing_intelligence import build_writing_intelligence_context
+from regression_db import isolated_database
 
 
 def main() -> int:
+    isolated_database("writing-intelligence-regression")
     with session_scope() as session:
         book = session.scalar(select(Book).order_by(Book.id.desc()))
         if not book:
-            print(json.dumps({"status": "skip", "reason": "no_book"}, ensure_ascii=False))
-            return 0
+            book = create_book(session, title="Writing Intelligence Regression", genre="真实武侠", platform="manual")
         ctx = build_writing_intelligence_context(
             session,
             book_id=book.id,

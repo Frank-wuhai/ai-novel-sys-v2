@@ -10,6 +10,7 @@ from app.services.llm_queue import build_generation_queue_health
 from app.services.model_strategy import build_model_strategy
 from app.services.planning import AUTO_ACTIONS, build_human_decision_package, plan_chapters
 from app.services.readiness import check_production_readiness
+from app.services.revision_supervisor import supervise_revision_trend
 from app.services.story_alignment import build_story_alignment_audit
 
 
@@ -66,6 +67,7 @@ def build_production_control_report(
     alignment = build_story_alignment_audit(session, book_id=book_id, chapter_limit=count)
     governance = audit_book_data_governance(session, book_id=book_id, chapter_limit=count)
     model_strategy = build_model_strategy()
+    revision_report = supervise_revision_trend(session, book_id=book_id, chapter_number=start)
 
     auto_ready = [item for item in plan_items if item.next_action in AUTO_ACTIONS]
     human_waiting = [item for item in plan_items if item.next_action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}]
@@ -91,6 +93,8 @@ def build_production_control_report(
     if not governance.get("passed") and not (auto_repairable_blockers and not hard_alignment_blockers):
         warnings.extend(governance.get("warnings", []))
     warnings.extend(model_strategy.get("warnings", []))
+    if revision_report.status == "degrading":
+        warnings.append("自动修订趋势劣化；系统将回退到近期最佳稿并换策略修订。")
     if queue.stale_running_count:
         blockers.append(f"有 {queue.stale_running_count} 个后台任务疑似卡死，先恢复或标记失败。")
     if queue.counts.get("failed", 0):
@@ -102,7 +106,7 @@ def build_production_control_report(
         elif check.name != "human_decisions":
             warnings.append(f"{check.name}: {check.detail}")
     if inspect:
-        blockers.append(f"有 {len(inspect)} 章处于未知状态，需要人工检查。")
+        blockers.append(f"有 {len(inspect)} 章处于未知状态，需要查看后台状态。")
 
     if blockers:
         status = "blocked"
@@ -130,11 +134,14 @@ def build_production_control_report(
         status = "can_produce"
         status_label = "可以继续生产"
         first = auto_ready[0]
-        next_actions.append(f"生产第 {first.chapter_number} 章到可读稿。")
+        if first.next_action == "revision_trend_recovery":
+            next_actions.append(f"第 {first.chapter_number} 章修订趋势劣化；先自动回退近期最佳稿并换策略修订。")
+        else:
+            next_actions.append(f"生产第 {first.chapter_number} 章到可读稿。")
     else:
         status = "idle"
         status_label = "暂无动作"
-        next_actions.append("当前范围没有可自动执行或待人工处理的章节。")
+        next_actions.append("当前范围没有可自动执行或待你处理的章节。")
 
     if alignment.status != "aligned":
         recommendations = alignment.recommendations
@@ -146,13 +153,15 @@ def build_production_control_report(
     if missing_versions and not auto_ready:
         warnings.append(f"有 {len(missing_versions)} 章还没有正文版本。")
 
+    effective_auto_ready = 0 if blockers else len(auto_ready)
     metrics: dict[str, int | bool | str] = {
         "book_id": book.id,
         "range_start": start,
         "range_count": count,
         "readiness_passed": readiness.passed,
         "alignment_score": alignment.score,
-        "auto_ready": len(auto_ready),
+        "auto_ready": effective_auto_ready,
+        "planned_auto_ready": len(auto_ready),
         "human_waiting": len(human_waiting),
         "approval_waiting": decisions.approval_count,
         "inspect_waiting": decisions.inspect_count,
@@ -163,6 +172,7 @@ def build_production_control_report(
         "queue_failed": int(queue.counts.get("failed", 0)),
         "stale_briefs": len(governance.get("stale_briefs", [])),
         "auto_repairable_brief_blockers": len(auto_repairable_blockers),
+        "revision_supervision": revision_report.status,
     }
     summary = _summary(status=status, metrics=metrics)
     return ProductionControlReport(
@@ -205,6 +215,7 @@ def _repairable_brief_blocker(value: str) -> bool:
     return (
         "最新章节 brief 仍含旧质检/旧修订合同残留" in value
         or "章节 brief 未显式承接核心作者意图" in value
+        or "brief 未承接当前骨架锚点" in value
     )
 
 

@@ -16,11 +16,15 @@ from app.services.expression_precision import evaluate_expression_precision
 from app.services.feedback import format_author_preference_context
 from app.services.humanized_quality import evaluate_humanized_delivery
 from app.services.intent_acceptance import evaluate_author_intent
+from app.services.naming_governance import evaluate_naming_governance
+from app.services.narrative_logic import evaluate_narrative_logic
+from app.services.production import create_book, create_chapter_brief, create_manual_chapter_version
 from app.services.production_state import latest_story_brief
 from app.services.quality import chinese_chars
 from app.services.prose_voice import evaluate_prose_voice
 from app.services.readability import evaluate_readability
 from app.services.writer_craft import evaluate_writer_craft
+from regression_db import isolated_database
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,9 +36,11 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
     args = parser.parse_args()
 
+    isolated_database("quality-regression")
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8")).get("cases", [])
     results = []
     with session_scope() as session:
+        _seed_quality_fixture(session)
         for case in cases:
             book = _find_book(session, str(case.get("book_title_contains") or ""))
             if not book:
@@ -47,7 +53,17 @@ def main() -> int:
             for number in range(start, start + count):
                 rows.append(_inspect_chapter(session, book=book, chapter_number=number, expect=expect))
             case_status = "pass" if all(row["status"] == "pass" for row in rows) else "attention"
-            results.append({"case": case.get("name"), "book_id": book.id, "book_title": book.title, "status": case_status, "chapters": rows})
+            results.append(
+                {
+                    "case": case.get("name"),
+                    "book_id": book.id,
+                    "book_title": book.title,
+                    "status": case_status,
+                    "chapters": rows,
+                    "attention_explanation": _attention_explanation(rows),
+                    "trial_impact": _trial_impact(rows),
+                }
+            )
 
     if args.json:
         print(json.dumps({"results": results}, ensure_ascii=False, indent=2))
@@ -65,6 +81,47 @@ def main() -> int:
                     f"action={row.get('next_action', '')} note={row.get('note', '')}"
                 )
     return 0
+
+
+def _seed_quality_fixture(session) -> None:
+    book = create_book(session, title="质量回归武侠样本", genre="真实武侠", platform="manual")
+    for chapter_number in range(1, 4):
+        create_chapter_brief(
+            session,
+            book_id=book.id,
+            chapter_number=chapter_number,
+            goal=f"第{chapter_number}章让陈默通过观察、交涉和代价推进梅家旧案。",
+            required_beats="承接压力；主角主动试探；人物互动；可见代价；章末新线索",
+            constraints="保持真实武侠质感，不写系统任务、刷经验或机械NPC。",
+        )
+        version = create_manual_chapter_version(
+            session,
+            book_id=book.id,
+            chapter_number=chapter_number,
+            title=f"第{chapter_number}章",
+            content=_quality_fixture_chapter(chapter_number),
+        )
+        version.status = "reviewed_pass"
+        session.add(
+            QualityReport(
+                chapter_version_id=version.id,
+                score=82,
+                passed=True,
+                report=json.dumps({"status": "PASS", "score": 82, "issues": [], "dimensions": {}}, ensure_ascii=False),
+            )
+        )
+    session.flush()
+
+
+def _quality_fixture_chapter(chapter_number: int) -> str:
+    unit = (
+        f"第{chapter_number}章开场，陈默先听见后巷水声变急，才看见药铺门缝里压着半张账纸。"
+        "他没有立刻冲进去，而是把袖口的锈铜铃按住，低声问掌柜昨夜谁来过。掌柜不答，只把药碗往前一推，"
+        "碗沿的血痕让陈默明白，眼前不是求救，而是试探。门外铁尺馆弟子逼近，他必须在交出账纸和保住伤者之间选一条路。"
+        "陈默先假装认错旧印，诱得对方露出口风，又用半碗热药换来三息空隙。代价是掌柜把他也记进欠账簿，"
+        "梅家旧案从此不再只是旁人的恩怨。章末，锈铜铃忽然发冷，账纸背面浮出一个他刚刚听过的名字。"
+    )
+    return "\n".join([unit] * 18)
 
 
 def _find_book(session, title_contains: str) -> Book | None:
@@ -114,11 +171,15 @@ def _inspect_chapter(session, *, book: Book, chapter_number: int, expect: dict) 
     design_report = evaluate_design_quality(version.content or "", canon_context=canon_context)
     prose_voice_report = evaluate_prose_voice(version.content or "")
     expression_precision_report = evaluate_expression_precision(version.content or "")
+    naming_report = evaluate_naming_governance(version.content or "", canon_context=canon_context)
+    narrative_logic_report = evaluate_narrative_logic(version.content or "")
     humanized_report = evaluate_humanized_delivery(version.content or "")
     humanized = humanized_report.to_dict()
     design = design_report.to_dict()
     prose_voice = prose_voice_report.to_dict()
     expression_precision = expression_precision_report.to_dict()
+    naming = naming_report.to_dict()
+    narrative_logic = narrative_logic_report.to_dict()
     anti_ai = evaluate_anti_ai_flavor(
         design=design_report,
         prose_voice=prose_voice_report,
@@ -190,6 +251,14 @@ def _inspect_chapter(session, *, book: Book, chapter_number: int, expect: dict) 
     min_expression_precision = int(expect.get("min_expression_precision") or 0)
     if min_expression_precision and expression_precision_score < min_expression_precision:
         notes.append(f"expression_precision_low:{expression_precision_score}<{min_expression_precision}")
+    naming_governance_score = int(naming.get("score") or 0)
+    min_naming_governance = int(expect.get("min_naming_governance") or 0)
+    if min_naming_governance and naming_governance_score < min_naming_governance:
+        notes.append(f"naming_governance_low:{naming_governance_score}<{min_naming_governance}")
+    narrative_logic_score = int(narrative_logic.get("score") or 0)
+    min_narrative_logic = int(expect.get("min_narrative_logic") or 0)
+    if min_narrative_logic and narrative_logic_score < min_narrative_logic:
+        notes.append(f"narrative_logic_low:{narrative_logic_score}<{min_narrative_logic}")
     anti_ai_score = int(anti_ai.get("score") or 0)
     min_anti_ai = int(expect.get("min_anti_ai_flavor") or 0)
     if min_anti_ai and anti_ai_score < min_anti_ai:
@@ -244,6 +313,14 @@ def _inspect_chapter(session, *, book: Book, chapter_number: int, expect: dict) 
         "expression_precision_checks": expression_precision.get("checks", {}),
         "expression_precision_issues": expression_precision.get("issues", []),
         "expression_precision_examples": expression_precision.get("examples", []),
+        "naming_governance_score": naming_governance_score,
+        "naming_governance_issues": naming.get("issues", []),
+        "naming_new_terms": naming.get("new_terms", []),
+        "naming_ungrounded_terms": naming.get("ungrounded_terms", []),
+        "narrative_logic_score": narrative_logic_score,
+        "narrative_logic_checks": narrative_logic.get("checks", {}),
+        "narrative_logic_issues": narrative_logic.get("issues", []),
+        "narrative_logic_examples": narrative_logic.get("examples", []),
         "anti_ai_flavor_score": anti_ai_score,
         "anti_ai_flavor_issues": anti_ai.get("issues", []),
         "writer_craft_score": writer_craft_score,
@@ -255,7 +332,28 @@ def _inspect_chapter(session, *, book: Book, chapter_number: int, expect: dict) 
         "next_action": next_action,
         "recommendation": recommendation,
         "note": ",".join(notes),
+        "attention_reasons": notes,
+        "trial_blocking": any(
+            note.startswith(("short:", "missing_quality", "quality_failed", "forbidden_terms", "model_bias"))
+            for note in notes
+        ),
     }
+
+
+def _attention_explanation(rows: list[dict]) -> list[str]:
+    explanations: list[str] = []
+    for row in rows:
+        for reason in row.get("attention_reasons", []):
+            explanations.append(f"ch{row.get('chapter_number')}:{reason}")
+    return explanations
+
+
+def _trial_impact(rows: list[dict]) -> str:
+    if any(row.get("trial_blocking") for row in rows):
+        return "blocks_trial"
+    if any(row.get("status") == "attention" for row in rows):
+        return "safe_to_trial_with_review"
+    return "safe_to_trial"
 
 
 def _loads_json(value: str) -> dict:
@@ -295,6 +393,9 @@ def _next_action(*, notes: list[str], version_status: str, quality_passed: bool 
                 "dialogue_low",
                 "character_voice_low",
                 "anti_ai_flavor_low",
+                "expression_precision_low",
+                "naming_governance_low",
+                "narrative_logic_low",
             )
         )
         for note in notes

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AI Novel Dashboard
+Name[zh_CN]=AI小说写作台
+Comment=Restart and open AI Novel System v2 dashboard
+Comment[zh_CN]=重启并打开 AI Novel System v2 写作台
+Exec=/home/frank/ai-novel-system-v2/scripts/start_dashboard_desktop.sh
+Path=/home/frank/ai-novel-system-v2
+Icon=text-html
+Terminal=false
+Categories=Development;Office;

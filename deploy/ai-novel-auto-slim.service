@@ -1,0 +1,7 @@
+[Unit]
+Description=AI Novel System scheduled auto slim
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/frank/ai-novel-system-v2
+ExecStart=/home/frank/ai-novel-system-v2/scripts/auto_slim.sh

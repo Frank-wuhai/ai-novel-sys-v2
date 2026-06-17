@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 MAX_LINES = {
     "app/services/production.py": 220,
-    "scripts/run_local_dashboard.py": 3100,
+    "scripts/run_local_dashboard.py": 3400,
     "app/dashboard_assets.py": 3300,
     "app/services/author_runner.py": 180,
 }

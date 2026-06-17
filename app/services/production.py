@@ -15,6 +15,8 @@ from app.models.entities import (
 from app.services.chapter_drafting import draft_chapter
 from app.services.chapter_revision import create_revision_brief, revise_chapter
 from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.context_contamination import context_anchor_lines
+from app.services.brief_sanitizer import sanitize_chapter_brief_fields
 from app.services.prompts import seed_prompt_templates
 from app.services.production_publishing import (
     auto_prepare_publish_job,
@@ -83,10 +85,20 @@ def create_chapter_brief(
     constraints: str = "",
 ) -> ChapterBrief:
     chapter = get_or_create_chapter(session, book_id=book_id, chapter_number=chapter_number)
+    anchors = context_anchor_lines(session, book_id=book_id)
+    effective_required_beats = "\n".join([item for item in [required_beats, *anchors] if item])
+    goal, effective_required_beats, constraints = sanitize_chapter_brief_fields(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        goal=goal,
+        required_beats=effective_required_beats,
+        constraints=constraints,
+    )
     brief = ChapterBrief(
         chapter_id=chapter.id,
         goal=goal,
-        required_beats=required_beats,
+        required_beats=effective_required_beats,
         constraints=ensure_chapter_production_standard(constraints, chapter_number=chapter_number),
         status="ready",
     )

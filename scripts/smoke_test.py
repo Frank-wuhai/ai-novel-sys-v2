@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 from app.core.config import settings
 
 PYTHON = ROOT / "venv/bin/python"
-TEST_DB = "sqlite:///data/test-novel.db"
+TEST_DB = "sqlite:///data/smoke-regression.db"
 
 
 def json_pair(name: str, value: str | int | float | bool | None) -> str:
@@ -200,7 +200,7 @@ def main() -> int:
         print("chapter plan did not create expected briefs")
         print(created_plan)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         arc_brief = conn.execute(
             """
@@ -510,7 +510,7 @@ def main() -> int:
         "generation_task_id",
         run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "11", "--max-attempts", "2"]),
     )
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         conn.execute(
             "update generation_tasks set status='running', input_json=? where id=?",
@@ -573,7 +573,7 @@ def main() -> int:
         "generation_task_id",
         run(["enqueue-draft", "--book-id", str(book_id), "--chapter-number", "12", "--max-attempts", "2"]),
     )
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         conn.execute(
             "update generation_tasks set status='running', input_json=? where id=?",
@@ -861,7 +861,7 @@ def main() -> int:
         print("show-generation-task did not include expected JSON")
         print(task_detail)
         return 1
-    with sqlite3.connect(ROOT / "data/test-novel.db") as review_conn:
+    with sqlite3.connect(ROOT / "data/smoke-regression.db") as review_conn:
         review_row = review_conn.execute(
             "select review_json from production_run_reviews where chapter_version_id=? and generation_task_id=? order by id desc limit 1",
             (v1, draft_task_id),
@@ -912,7 +912,7 @@ def main() -> int:
         print("show-llm-config did not expose default LLM config")
         print(llm_config)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         prompt_count = conn.execute("select count(*) from prompt_templates where name='draft_chapter' and version='v1'").fetchone()[0]
         if prompt_count != 1:
@@ -1027,7 +1027,7 @@ def main() -> int:
         print("list-feedback-adjustments did not show applied adjustment")
         print(adjustments)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         applied_brief = conn.execute(
             "select required_beats, constraints from chapter_briefs where id=?",
@@ -1038,7 +1038,8 @@ def main() -> int:
             or "按本次修订要求验收" not in applied_brief[0]
             or f"反馈调整#{adjustment_id}" not in applied_brief[1]
             or "修订执行摘要:" not in applied_brief[1]
-            or "修订模式:rewrite" not in applied_brief[1]
+            or "修订模式:targeted" not in applied_brief[1]
+            or "系统修订判定:" not in applied_brief[1]
             or "验收:" not in applied_brief[1]
             or "第3章下一版必须能被人工意见逐条验收" not in applied_brief[1]
         ):
@@ -1066,7 +1067,7 @@ def main() -> int:
         print("quality-trends did not summarize quality reports")
         print(quality_trend)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         quality_report = conn.execute("select report from quality_reports order by id desc limit 1").fetchone()[0]
         quality_data = json.loads(quality_report)
@@ -1154,7 +1155,7 @@ def main() -> int:
         print("failed quality gate did not fail as expected")
         print(failed_review)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         revision_brief_row = conn.execute(
             "select goal, required_beats from chapter_briefs where id=?",
@@ -1206,7 +1207,7 @@ def main() -> int:
         print("version diff did not include expected headers")
         print(version_diff)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         revision_task = conn.execute(
             "select input_json, output_json from generation_tasks where task_type='revise_chapter' order by id desc limit 1"
@@ -1266,7 +1267,7 @@ def main() -> int:
         print("run-next-action did not block manual approval")
         print(auto_approve_block)
         return 1
-    conn = sqlite3.connect(ROOT / "data/test-novel.db")
+    conn = sqlite3.connect(ROOT / "data/smoke-regression.db")
     try:
         chapter_summary, chapter_status = conn.execute(
             "select summary, status from chapters where book_id=? and chapter_number=1",

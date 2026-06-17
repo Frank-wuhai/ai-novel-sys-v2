@@ -29,6 +29,7 @@ from app.models.entities import (
     VisualAsset,
     WorldRule,
 )
+from app.services.aesthetic_profile import strip_aesthetic_profile_blocks
 from app.services.canon import format_canon_context
 
 
@@ -51,26 +52,64 @@ def format_semantic_memory_context(
     limit: int = 5,
 ) -> tuple[str, list[int]]:
     try:
+        summary = ensure_semantic_memory_for_production(session, book_id=book_id)
         hits = retrieve_book_knowledge(
             session,
             book_id=book_id,
             query=f"第{chapter_number}章 {query}",
             limit=limit,
-            dry_run=not bool(settings.ark_agent_plan_api_key),
+            dry_run=not _should_use_live_embedding_query(summary),
         )
     except (OperationalError, RuntimeError, httpx.HTTPError, ValueError):
         session.rollback()
         return "", []
     if not hits:
         return "", []
-    lines = [
-        f"- memory#{hit.embedding_id} score={hit.score:.3f} type={hit.source_type} ref={hit.source_ref_id} label={hit.source_label}: {hit.text[:420]}"
-        for hit in hits
-        if hit.score > 0.15
-    ]
+    lines = []
+    for hit in hits:
+        text = strip_aesthetic_profile_blocks(hit.text)
+        if hit.score > 0.15 and text:
+            lines.append(f"- memory#{hit.embedding_id} score={hit.score:.3f} type={hit.source_type} ref={hit.source_ref_id} label={hit.source_label}: {text[:420]}")
     if not lines:
         return "", []
     return "语义记忆召回（只用于防止遗漏，不得覆盖正式 Canon）：\n" + "\n".join(lines), [hit.embedding_id for hit in hits]
+
+
+def ensure_semantic_memory_for_production(session: Session, *, book_id: int) -> dict:
+    summary = summarize_semantic_memory(session, book_id=book_id)
+    expected_count = int(summary.get("expected_count") or 0)
+    models = set(summary.get("models") or [])
+    has_live_index = settings.ark_embedding_model in models
+    needs_rebuild = bool(summary.get("stale")) or int(summary.get("indexed_count") or 0) == 0 or not has_live_index
+    if not needs_rebuild:
+        summary["auto_live_embedding_action"] = "ready"
+        return summary
+    if not settings.auto_live_embedding:
+        summary["auto_live_embedding_action"] = "disabled"
+        return _ensure_dry_run_memory(session, book_id=book_id, summary=summary)
+    if not settings.ark_agent_plan_api_key:
+        summary["auto_live_embedding_action"] = "missing_api_key"
+        return _ensure_dry_run_memory(session, book_id=book_id, summary=summary)
+    if expected_count > settings.auto_live_embedding_max_chunks:
+        summary["auto_live_embedding_action"] = f"chunk_limit:{expected_count}>{settings.auto_live_embedding_max_chunks}"
+        return _ensure_dry_run_memory(session, book_id=book_id, summary=summary)
+    index_book_knowledge(session, book_id=book_id, dry_run=False, reset=True)
+    refreshed = summarize_semantic_memory(session, book_id=book_id)
+    refreshed["auto_live_embedding_action"] = "rebuilt_live"
+    return refreshed
+
+
+def _ensure_dry_run_memory(session: Session, *, book_id: int, summary: dict) -> dict:
+    if int(summary.get("indexed_count") or 0) == 0 or bool(summary.get("stale")):
+        index_book_knowledge(session, book_id=book_id, dry_run=True, reset=True)
+        refreshed = summarize_semantic_memory(session, book_id=book_id)
+        refreshed["auto_live_embedding_action"] = summary.get("auto_live_embedding_action", "rebuilt_dry_run")
+        return refreshed
+    return summary
+
+
+def _should_use_live_embedding_query(summary: dict) -> bool:
+    return settings.ark_embedding_model in set(summary.get("models") or [])
 
 
 def create_market_research_pack(
@@ -542,8 +581,8 @@ def _knowledge_chunks(session: Session, *, book: Book, limit_chapters: int) -> l
                         bible.protagonist_arc,
                         bible.relationship_arc,
                         bible.power_curve,
-                        bible.forbidden_rules,
-                        bible.style_guide,
+                        strip_aesthetic_profile_blocks(bible.forbidden_rules),
+                        strip_aesthetic_profile_blocks(bible.style_guide),
                     ]
                 ),
             )

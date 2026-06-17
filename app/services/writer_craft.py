@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Book, Chapter, ChapterVersion, GenerationTask
 from app.services.expression_precision import precision_prompt_rules
+from app.services.narrative_logic import narrative_logic_prompt_rules
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class WriterCraftContext:
     voice_cards: list[str]
     negative_feedback: list[str]
     pov_rules: list[str]
+    scene_expansion_rules: list[str]
     precision_rules: list[str]
     revision_checklist: list[str]
     memory_targets: list[str]
@@ -48,6 +50,9 @@ class WriterCraftContext:
             "角色贴身视角：",
             *[f"- {item}" for item in self.pov_rules],
             "",
+            "场景展开度（反装酷式精炼）：",
+            *[f"- {item}" for item in self.scene_expansion_rules],
+            "",
             "语言表述准确性：",
             *[f"- {item}" for item in self.precision_rules],
             "",
@@ -67,6 +72,7 @@ class WriterCraftContext:
             "voice_cards": self.voice_cards,
             "negative_feedback": self.negative_feedback,
             "pov_rules": self.pov_rules,
+            "scene_expansion_rules": self.scene_expansion_rules,
             "precision_rules": self.precision_rules,
             "revision_checklist": self.revision_checklist,
             "memory_targets": self.memory_targets,
@@ -94,8 +100,9 @@ def build_writer_craft_context(
         voice_cards=_voice_cards(source=source),
         negative_feedback=negative_feedback,
         pov_rules=_pov_rules(),
+        scene_expansion_rules=_scene_expansion_rules(),
         precision_rules=precision_prompt_rules(),
-        revision_checklist=_revision_checklist(),
+        revision_checklist=[*narrative_logic_prompt_rules(), *_revision_checklist()],
         memory_targets=_memory_targets(),
     )
 
@@ -108,6 +115,7 @@ def evaluate_writer_craft(text: str) -> dict:
     character_action = _score_character_action(text)
     chapter_necessity = _score_chapter_necessity(text)
     embodied_pov = _score_embodied_pov(text)
+    scene_expansion = _score_scene_expansion(text)
     score = round(
         (
             memorable_image
@@ -116,8 +124,9 @@ def evaluate_writer_craft(text: str) -> dict:
             + character_action
             + chapter_necessity
             + embodied_pov
+            + scene_expansion
         )
-        / 6
+        / 7
     )
     issues = []
     if memorable_image < 60:
@@ -132,6 +141,8 @@ def evaluate_writer_craft(text: str) -> dict:
         issues.append(f"chapter_necessity_low:{chapter_necessity}")
     if embodied_pov < 60:
         issues.append(f"embodied_pov_low:{embodied_pov}")
+    if scene_expansion < 58:
+        issues.append(f"scene_expansion_low:{scene_expansion}")
     if len(paragraphs) < 8:
         issues.append("scene_sequence_thin")
     return {
@@ -143,6 +154,7 @@ def evaluate_writer_craft(text: str) -> dict:
             "character_action": character_action,
             "chapter_necessity": chapter_necessity,
             "embodied_pov": embodied_pov,
+            "scene_expansion": scene_expansion,
         },
         "issues": issues,
     }
@@ -215,6 +227,16 @@ def _pov_rules() -> list[str]:
         "对话前后要有角色接收反应：哪句话刺到了他、他先误会了什么、身体哪里先紧了、为什么改口。",
         "切换观察对象时要明确视角落点，避免上帝视角同时知道所有人的表情和动机。",
         "每 3-5 段至少出现一次角色身体反应、感官细节或内心误判；不要只客观记录谁说了什么、谁走到哪里。",
+    ]
+
+
+def _scene_expansion_rules() -> list[str]:
+    return [
+        "关键场景不能用一个酷词、冷词或一句总结压过去；必须展开成可见动作、感官入口、人物反应和下一步承接。",
+        "“压迫感、荒凉、肃杀、诡异、真实、沉默、尴尬、震撼”等抽象词只能做收束，不能替代描写；先让读者看见为什么压迫、哪里荒凉、谁尴尬。",
+        "每个主要场景至少写出三类材料：空间/光源/气味/声音/触感/站位/关键物/人物小动作/心理误判，避免只用一句氛围判断。",
+        "精炼不是惜字如金；该展开的地方要给 3-6 句连续变化，让读者从进入、观察、误判、反应到行动都跟上。",
+        "不要为了装深沉让人物和叙述都少说话；沉默、冷场或克制必须有身体反应、对方误读或局面变化支撑。",
     ]
 
 
@@ -337,4 +359,47 @@ def _score_embodied_pov(text: str) -> int:
     ratio = pov_paragraphs / len(paragraphs)
     score = 30 + min(25, sensory_hits * 3) + min(20, cognition_hits * 3) + min(15, emotion_hits * 3) + round(ratio * 20)
     score -= min(20, sum(body.count(marker) for marker in objective_markers) * 4)
+    return max(0, min(100, score))
+
+
+def _score_scene_expansion(text: str) -> int:
+    body = str(text or "")
+    paragraphs = [item.strip() for item in body.splitlines() if item.strip()]
+    if not paragraphs:
+        return 0
+    scene_markers = (
+        "院", "门", "街", "屋", "房", "桌", "墙", "窗", "灯", "影", "风", "雨", "雾", "泥", "血",
+        "汗", "味", "声", "脚步", "袖", "手", "眼", "肩", "背", "喉咙", "指尖",
+    )
+    action_markers = ("走", "站", "坐", "跪", "推", "抓", "按", "抬", "低头", "回头", "停", "挪", "缩", "咬", "喘")
+    reaction_markers = ("愣", "慌", "窘", "羞", "怕", "疼", "冷", "热", "发紧", "发麻", "咽", "吸气", "皱眉", "迟疑")
+    abstract_markers = (
+        "压迫感", "荒凉", "肃杀", "诡异", "真实", "沉默", "震撼", "尴尬", "冰冷", "克制",
+        "深沉", "复杂", "难以形容", "说不出的", "某种", "仿佛", "像是某种",
+    )
+    chinese_lengths = [len(re.findall(r"[\u4e00-\u9fff]", paragraph)) for paragraph in paragraphs]
+    avg_len = sum(chinese_lengths) / len(chinese_lengths)
+    short_ratio = sum(1 for length in chinese_lengths if length < 35) / len(chinese_lengths)
+    scene_hits = sum(1 for marker in scene_markers if marker in body)
+    action_hits = sum(1 for marker in action_markers if marker in body)
+    reaction_hits = sum(1 for marker in reaction_markers if marker in body)
+    abstract_hits = sum(body.count(marker) for marker in abstract_markers)
+    expanded_paragraphs = sum(
+        1
+        for paragraph in paragraphs
+        if len(re.findall(r"[\u4e00-\u9fff]", paragraph)) >= 70
+        and any(marker in paragraph for marker in scene_markers)
+        and (any(marker in paragraph for marker in action_markers) or any(marker in paragraph for marker in reaction_markers))
+    )
+    score = 42
+    score += min(18, scene_hits * 2)
+    score += min(16, action_hits * 2)
+    score += min(14, reaction_hits * 2)
+    score += min(18, expanded_paragraphs * 5)
+    if avg_len >= 70:
+        score += 8
+    elif avg_len < 38:
+        score -= 12
+    score -= min(24, abstract_hits * 4)
+    score -= min(18, round(short_ratio * 24))
     return max(0, min(100, score))

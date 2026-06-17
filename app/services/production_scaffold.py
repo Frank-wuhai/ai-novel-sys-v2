@@ -159,11 +159,17 @@ def preview_production_scaffold_repair(
 def _scaffold_source(session: Session, *, book: Book) -> dict[str, str]:
     foundation = session.scalar(select(StoryFoundation).where(StoryFoundation.book_id == book.id).order_by(StoryFoundation.id.desc()))
     bible = get_story_bible(session, book_id=book.id)
+    volume = session.scalar(select(Volume).where(Volume.book_id == book.id, Volume.volume_number == 1))
+    arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book.id, StoryArc.arc_number == 1))
     premise = (foundation.premise if foundation else (bible.positioning if bible else "")).strip() or f"{book.title}：主角在具体危机中获得改变命运的机会。"
     reader_promise = (foundation.reader_promise if foundation else (bible.reader_promise if bible else "")).strip() or "开篇快、冲突强、主角主动破局、每章有可见代价和追读钩子。"
     world_engine = (foundation.world_engine if foundation else (bible.power_curve if bible else "")).strip() or "世界规则必须通过场景、选择、代价和后果呈现。"
     protagonist_engine = (foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else "")).strip() or "主角在压力下主动选择，靠能力收益和代价逐步夺回主动权。"
     conflict_engine = (foundation.conflict_engine if foundation else (bible.main_plot if bible else "")).strip() or "外部压力逐章升级，主角的每次破局都会引出更大的风险。"
+    volume_summary = (volume.summary if volume else "").strip() or "建立主角处境、核心能力代价、第一轮外部压力和持续追读钩子。"
+    arc_goal = (arc.goal if arc else "").strip() or "让主角在具体危机中发现能力、付出代价，并主动踏入更大的主线压力。"
+    arc_climax = (arc.climax if arc else "").strip() or "主角用能力赢下一次局部胜利，但暴露更大危险或更高层关注。"
+    arc_turn = (arc.turn if arc else "").strip() or "主角意识到眼前事件不是偶然，必须主动追查或反击。"
     return {
         "premise": premise,
         "reader_promise": reader_promise,
@@ -172,10 +178,10 @@ def _scaffold_source(session: Session, *, book: Book) -> dict[str, str]:
         "conflict_engine": conflict_engine,
         "forbidden_rules": "避免系统提示词、作者说明、元叙事泄露到正文；不得绕过已登记 Canon。",
         "style_guide": "番茄小说节奏：开篇快，冲突明确，小单元连续推进，章末留钩子。",
-        "volume_summary": "建立主角处境、核心能力代价、第一轮外部压力和持续追读钩子。",
-        "arc_goal": "让主角在具体危机中发现能力、付出代价，并主动踏入更大的主线压力。",
-        "arc_climax": "主角用能力赢下一次局部胜利，但暴露更大危险或更高层关注。",
-        "arc_turn": "主角意识到眼前事件不是偶然，必须主动追查或反击。",
+        "volume_summary": volume_summary,
+        "arc_goal": arc_goal,
+        "arc_climax": arc_climax,
+        "arc_turn": arc_turn,
     }
 
 

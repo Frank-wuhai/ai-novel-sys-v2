@@ -8,7 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, FeedbackAdjustment, PlatformFeedback
+from app.services.brief_sanitizer import sanitize_chapter_brief_fields
 from app.services.evidence import add_evidence_source, add_market_signal
+from app.services.revision_intent import (
+    decide_revision_intent,
+    extract_revision_decision,
+    normalize_revision_mode as normalize_revision_intent_mode,
+)
 from app.workflows.state_machine import move
 
 REVISION_MODE_POLISH = "polish"
@@ -186,12 +192,19 @@ def create_feedback_adjustment(
         raise ValueError(f"book not found: {book_id}")
     feedback_items = _feedback_items(session, book_id=book_id, feedback_ids=feedback_ids)
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == target_chapter_number))
+    text = adjustment_text or _default_adjustment_text(feedback_items, target_chapter_number)
+    routed_text = _auto_route_adjustment_text(
+        session,
+        book_id=book_id,
+        chapter_number=target_chapter_number,
+        text=text,
+    )
     adjustment = FeedbackAdjustment(
         book_id=book_id,
         chapter_id=chapter.id if chapter else None,
         target_chapter_number=target_chapter_number,
         feedback_ids=",".join(str(item.id) for item in feedback_items),
-        adjustment_text=adjustment_text or _default_adjustment_text(feedback_items, target_chapter_number),
+        adjustment_text=routed_text,
         status=status,
     )
     session.add(adjustment)
@@ -217,6 +230,39 @@ def list_feedback_adjustments(
     return list(session.scalars(stmt))
 
 
+def _latest_non_local_brief(session: Session, *, chapter_id: int) -> ChapterBrief | None:
+    briefs = list(
+        session.scalars(
+            select(ChapterBrief)
+            .where(ChapterBrief.chapter_id == chapter_id)
+            .order_by(ChapterBrief.id.desc())
+            .limit(12)
+        )
+    )
+    for brief in briefs:
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        if "system_revision_loop_guard" in text:
+            continue
+        if "修订模式:local_patch" in text or "修订模式：local_patch" in text:
+            continue
+        if str(brief.goal or "").startswith("局部修订"):
+            continue
+        return brief
+    return None
+
+
+def _supersede_previous_revision_briefs(session: Session, *, chapter_id: int, keep_id: int) -> None:
+    briefs = session.scalars(
+        select(ChapterBrief).where(
+            ChapterBrief.chapter_id == chapter_id,
+            ChapterBrief.status == "revision_ready",
+            ChapterBrief.id != keep_id,
+        )
+    )
+    for brief in briefs:
+        brief.status = "superseded"
+
+
 def apply_feedback_adjustment_to_brief(
     session: Session,
     *,
@@ -240,7 +286,17 @@ def apply_feedback_adjustment_to_brief(
         if mode in {REVISION_MODE_LOCAL_PATCH, REVISION_MODE_POLISH}:
             goal = f"局部修订第{adjustment.target_chapter_number}章：{_compact_text(clean_text, limit=220)}"
             required_beats = f"修订模式:{mode}；按本次修订要求验收，不扩大修改范围"
+        elif mode == REVISION_MODE_FRESH:
+            goal = f"按最新设定重写第{adjustment.target_chapter_number}章：{_compact_text(clean_text, limit=260)}"
+            required_beats = (
+                f"修订模式:{mode}；旧稿只作为禁用反例，不沿用旧稿段落顺序、旧场景推进、旧人物名或旧桥段。"
+                "必须以最新 Story Bible、Canon、作品DNA和本次意见为准重新生成。"
+            )
+        elif mode == REVISION_MODE_REWRITE:
+            goal = f"结构重写第{adjustment.target_chapter_number}章：{_compact_text(clean_text, limit=260)}"
+            required_beats = f"修订模式:{mode}；按本次修订要求重做章节结构，不沿用旧恢复底稿。"
         else:
+            latest = _latest_non_local_brief(session, chapter_id=chapter.id) or latest
             goal = latest.goal
             required_beats = _append_unique(
                 _strip_revision_beats(latest.required_beats),
@@ -251,6 +307,14 @@ def apply_feedback_adjustment_to_brief(
         goal = f"根据人工校准合同修订第{adjustment.target_chapter_number}章"
         required_beats = "按本次修订要求验收，不扩大修改范围"
         constraints = f"{label}:\n{brief_contract}"
+    goal, required_beats, constraints = sanitize_chapter_brief_fields(
+        session,
+        book_id=adjustment.book_id,
+        chapter_number=adjustment.target_chapter_number,
+        goal=goal,
+        required_beats=required_beats,
+        constraints=constraints,
+    )
     brief = ChapterBrief(
         chapter_id=chapter.id,
         goal=goal,
@@ -261,6 +325,7 @@ def apply_feedback_adjustment_to_brief(
     session.add(brief)
     adjustment.chapter_id = chapter.id
     adjustment.status = "applied"
+    _supersede_previous_revision_briefs(session, chapter_id=chapter.id, keep_id=brief.id)
     session.flush()
     return brief
 
@@ -272,12 +337,19 @@ def submit_revision_suggestion(
     chapter_number: int,
     suggestion_text: str,
     platform: str = "manual",
-    revision_mode: str = REVISION_MODE_REWRITE,
+    revision_mode: str = "auto",
 ) -> tuple[PlatformFeedback, FeedbackAdjustment, ChapterBrief, ChapterVersion | None]:
     text = suggestion_text.strip()
     if not text:
         raise ValueError("suggestion text is required")
-    mode = normalize_revision_mode(revision_mode)
+    decision = decide_revision_intent(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        suggestion_text=text,
+        requested_mode=revision_mode,
+    )
+    mode = decision.mode
     _supersede_previous_adjustments(session, book_id=book_id, chapter_number=chapter_number)
     feedback = record_platform_feedback(
         session,
@@ -293,7 +365,7 @@ def submit_revision_suggestion(
         book_id=book_id,
         target_chapter_number=chapter_number,
         feedback_ids=[feedback.id],
-        adjustment_text=_revision_mode_prefix(mode) + text,
+        adjustment_text=f"{decision.contract_prefix()}\n{text}",
     )
     brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id, brief_status="revision_ready")
     latest_version = session.scalar(
@@ -317,7 +389,7 @@ def build_brief_revision_contract(suggestion_text: str, *, chapter_number: int) 
         raise ValueError("suggestion text is required")
     mode, clean_text = _extract_revision_mode(text)
     scope = {
-        REVISION_MODE_LOCAL_PATCH: "只修改明确命中的句子、词语或短段落，保留其余正文。",
+        REVISION_MODE_LOCAL_PATCH: "只修改明确命中的句子、词语或短段落，必须按最小范围处理，保留其余正文。",
         REVISION_MODE_TARGETED: "保留可用结构和有效场景，只重写明确不合格的部分。",
         REVISION_MODE_POLISH: "保留剧情结构，只润色表达、节奏密度和现场反应。",
         REVISION_MODE_FRESH: "按最新生产骨架重启本章，旧稿不作为段落参照。",
@@ -417,14 +489,45 @@ def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str
                 "不要用总结式心理活动代替可见行动、对话、压力和后果",
             ]
         )
-    checks = [
-        "是否保留并准确回应原始人工意见的真实意图，而不是只复述关键词",
-        "开篇是否在前500字内进入具体处境，并用人物欲望、关系张力、异常细节、利益交换、行动后果或悬念形成牵引",
-        "主角是否做出主动选择，并产生收益、代价或后果",
-        "人工意见中的每个必须项是否在正文中有可见兑现",
-        "禁止项是否完全没有进入正文",
-        "章末是否留下具体危险、发现、转折或未解决压力",
-    ]
+    if mode in {REVISION_MODE_LOCAL_PATCH, REVISION_MODE_POLISH}:
+        understanding_rules = [
+            "先判断用户真正不满意的是词句、动作、对白、画面、承接还是局部读感。",
+            "如果人工意见只命中句子、词语或短段落，必须按最小范围处理，不要扩大成整章结构调整。",
+            "修完后上下文必须读得顺，不能留下半句话、断动作或前后称谓不一致。",
+        ]
+        checks = [
+            "人工指出的句子、词语、短段落或局部读感是否已修复",
+            "未被点名的问题段落、场景顺序、人物关系和章末事实是否保持不变",
+            "修订后上下文是否自然承接，没有新增解释腔、合同条目或系统信息",
+            "禁止项是否完全没有进入正文",
+        ]
+    elif mode == REVISION_MODE_TARGETED:
+        understanding_rules = [
+            "先判断用户真正不满意的是读者体验、人物动机、场景选择、节奏、爽点、设定兑现、文风还是章末期待。",
+            "把人工意见转化为明确的局部或场景级变化：替换哪些问题段落，补强哪些行动、对白、画面或承接。",
+            "不要把局部问题扩大成整章重做；除非人工意见明确说整章方向废弃。",
+        ]
+        checks = [
+            "是否保留可用结构和有效场景，只处理明确不合格的部分",
+            "人工意见中的每个必须项是否在正文中有可见兑现",
+            "主角行动、场景承接、对白或画面问题是否被定点修复",
+            "禁止项是否完全没有进入正文",
+            "章末事实是否未被无故改变",
+        ]
+    else:
+        understanding_rules = [
+            "先判断用户真正不满意的是读者体验、人物动机、场景选择、节奏、爽点、设定兑现、文风还是章末期待。",
+            "如果人工意见是抽象判断，必须转化为正文里的可见变化：新增/删除/替换哪些场景，主角做什么不同选择，读者会获得什么不同感受。",
+            "不要只替换几个名词或句子；必须让正文结果能被人工意见逐条验收。",
+        ]
+        checks = [
+            "是否保留并准确回应原始人工意见的真实意图，而不是只复述关键词",
+            "开篇是否在前500字内进入具体处境，并用人物欲望、关系张力、异常细节、利益交换、行动后果或悬念形成牵引",
+            "主角是否做出主动选择，并产生收益、代价或后果",
+            "人工意见中的每个必须项是否在正文中有可见兑现",
+            "禁止项是否完全没有进入正文",
+            "章末是否留下具体危险、发现、转折或未解决压力",
+        ]
     return "\n".join(
         [
             "修订合同:",
@@ -432,9 +535,7 @@ def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str
             "原始人工意见（最高优先级，禁止改写含义）:",
             clean_text,
             "意见理解规则:",
-            "- 先判断用户真正不满意的是读者体验、人物动机、场景选择、节奏、爽点、设定兑现、文风还是章末期待。",
-            "- 如果人工意见是抽象判断，必须转化为正文里的可见变化：新增/删除/替换哪些场景，主角做什么不同选择，读者会获得什么不同感受。",
-            "- 不要只替换几个名词或句子；必须让正文结果能被人工意见逐条验收。",
+            *_bullet_lines(understanding_rules),
             "目标读者体验:",
             *_bullet_lines(target[:6]),
             "必须满足:",
@@ -448,6 +549,9 @@ def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str
 
 
 def normalize_revision_mode(mode: str) -> str:
+    value = normalize_revision_intent_mode(mode)
+    if value:
+        return value
     value = (mode or "").strip().lower()
     aliases = {
         "minor": REVISION_MODE_POLISH,
@@ -468,7 +572,7 @@ def normalize_revision_mode(mode: str) -> str:
     }
     value = aliases.get(value, value)
     if value not in REVISION_MODES:
-        return REVISION_MODE_REWRITE
+        return REVISION_MODE_TARGETED
     return value
 
 
@@ -479,7 +583,7 @@ def _revision_mode_prefix(mode: str) -> str:
 def _extract_revision_mode(text: str) -> tuple[str, str]:
     match = re.match(r"\s*修订模式\s*[:：]\s*([a-zA-Z_]+)\s*\n?", text)
     if not match:
-        return REVISION_MODE_REWRITE, text
+        return REVISION_MODE_TARGETED, text
     mode = normalize_revision_mode(match.group(1))
     return mode, text[match.end() :].strip()
 
@@ -588,6 +692,26 @@ def _default_adjustment_text(items: list[PlatformFeedback], target_chapter_numbe
     if evidence:
         return f"第{target_chapter_number}章需回应近期反馈（{metric_part}）：{evidence}"
     return f"第{target_chapter_number}章需回应近期反馈（{metric_part}）。"
+
+
+def _auto_route_adjustment_text(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    text: str,
+) -> str:
+    if _extract_revision_mode(text)[0] != REVISION_MODE_TARGETED or text.lstrip().startswith(("修订模式:", "修订模式：")):
+        return text
+    if extract_revision_decision(text):
+        return text
+    decision = decide_revision_intent(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        suggestion_text=text,
+    )
+    return f"{decision.contract_prefix()}\n{text.strip()}"
 
 
 def _get_or_create_chapter(session: Session, *, book_id: int, chapter_number: int) -> Chapter:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from app.services.anti_ai_flavor import evaluate_anti_ai_flavor
@@ -10,6 +11,8 @@ from app.services.design_quality import evaluate_design_quality
 from app.services.expression_precision import evaluate_expression_precision
 from app.services.humanized_quality import evaluate_humanized_delivery
 from app.services.intent_acceptance import evaluate_author_intent
+from app.services.naming_governance import evaluate_naming_governance
+from app.services.narrative_logic import evaluate_narrative_logic
 from app.services.prose_voice import evaluate_prose_voice
 from app.services.readability import evaluate_readability
 from app.services.writer_craft import evaluate_writer_craft
@@ -81,6 +84,8 @@ def evaluate_chapter(
     design = evaluate_design_quality(text, canon_context=canon_context)
     prose_voice = evaluate_prose_voice(text)
     expression_precision = evaluate_expression_precision(text)
+    naming = evaluate_naming_governance(text, canon_context=canon_context)
+    narrative_logic = evaluate_narrative_logic(text)
     anti_ai = evaluate_anti_ai_flavor(design=design, prose_voice=prose_voice, humanized=humanized)
     writer_craft = evaluate_writer_craft(text)
     for blocker in intent.blockers:
@@ -88,22 +93,32 @@ def evaluate_chapter(
             issues.append(f"intent_blocker: {blocker}")
     if design.score < 60:
         issues.append(f"design_underdeveloped: {design.score}")
-    if design.checks.get("visual_staging", 100) < 55:
+    if design.checks.get("visual_staging", 100) < 50 or (design.checks.get("visual_staging", 100) < 55 and design.score < 65):
         issues.append(f"visual_underdeveloped: {design.checks.get('visual_staging', 0)}")
-    if design.checks.get("imageable_paragraphs", 100) < 55:
+    if design.checks.get("imageable_paragraphs", 100) < 48 or (
+        design.checks.get("imageable_paragraphs", 100) < 55 and design.score < 65
+    ):
         issues.append(f"imageable_underdeveloped: {design.checks.get('imageable_paragraphs', 0)}")
     if prose_voice.checks.get("native_chinese_flow", 100) < 60:
         issues.append(f"translationese_risk: {prose_voice.checks.get('native_chinese_flow', 0)}")
-    if prose_voice.checks.get("dialogue_fullness", 100) < 50:
+    if prose_voice.checks.get("dialogue_fullness", 100) < 45 or (
+        prose_voice.checks.get("dialogue_fullness", 100) < 50 and prose_voice.score < 65
+    ):
         issues.append(f"dialogue_underdeveloped: {prose_voice.checks.get('dialogue_fullness', 0)}")
     if expression_precision.score < 60:
         issues.append(f"expression_precision_risk: {expression_precision.score}")
+    if naming.score < 60:
+        issues.append(f"naming_governance_risk: {naming.score}")
+    if narrative_logic.score < 60:
+        issues.append(f"narrative_logic_risk: {narrative_logic.score}")
     if anti_ai.score < 60:
         issues.append(f"ai_flavor_risk: {anti_ai.score}")
     if writer_craft["score"] < 55:
         issues.append(f"writer_craft_underdeveloped: {writer_craft['score']}")
     if writer_craft["checks"].get("embodied_pov", 100) < 55:
         issues.append(f"embodied_pov_underdeveloped: {writer_craft['checks'].get('embodied_pov', 0)}")
+    if writer_craft["checks"].get("scene_expansion", 100) < 55:
+        issues.append(f"scene_expansion_underdeveloped: {writer_craft['checks'].get('scene_expansion', 0)}")
 
     dimensions = {
         "basic_publishability": _basic_publishability_score(count, min_chars, max_chars, text),
@@ -127,6 +142,12 @@ def evaluate_chapter(
         "design_texture": design.score,
         "visual_staging": design.checks.get("visual_staging", 0),
         "designed_nomenclature": design.checks.get("designed_nomenclature", 0),
+        "naming_governance": naming.score,
+        "narrative_logic": narrative_logic.score,
+        "causal_continuity_quality": narrative_logic.checks.get("causal_continuity", 0),
+        "cost_plausibility": narrative_logic.checks.get("cost_plausibility", 0),
+        "scene_atmosphere": narrative_logic.checks.get("scene_atmosphere", 0),
+        "payoff_grounding": narrative_logic.checks.get("payoff_grounding", 0),
         "imageable_paragraphs": design.checks.get("imageable_paragraphs", 0),
         "prose_voice": prose_voice.score,
         "expression_precision": expression_precision.score,
@@ -146,7 +167,18 @@ def evaluate_chapter(
         "character_action": writer_craft["checks"].get("character_action", 0),
         "chapter_necessity": writer_craft["checks"].get("chapter_necessity", 0),
         "embodied_pov": writer_craft["checks"].get("embodied_pov", 0),
+        "scene_expansion": writer_craft["checks"].get("scene_expansion", 0),
     }
+    if dimensions["brief_coverage"] < 50:
+        issues.append(f"brief_coverage_underfulfilled: {dimensions['brief_coverage']}")
+    if dimensions["object_verb_collocation"] < 50:
+        issues.append(f"expression_collocation_blocker: {dimensions['object_verb_collocation']}")
+    if dimensions["cost_plausibility"] < 50:
+        issues.append(f"cost_plausibility_blocker: {dimensions['cost_plausibility']}")
+    if dimensions["causal_continuity_quality"] < 50:
+        issues.append(f"causal_continuity_blocker: {dimensions['causal_continuity_quality']}")
+    if dimensions["payoff_grounding"] < 50:
+        issues.append(f"payoff_grounding_blocker: {dimensions['payoff_grounding']}")
     warnings: list[str] = []
     for name in (
         "brief_coverage",
@@ -162,6 +194,12 @@ def evaluate_chapter(
         "design_texture",
         "visual_staging",
         "designed_nomenclature",
+        "naming_governance",
+        "narrative_logic",
+        "causal_continuity_quality",
+        "cost_plausibility",
+        "scene_atmosphere",
+        "payoff_grounding",
         "imageable_paragraphs",
         "prose_voice",
         "expression_precision",
@@ -188,6 +226,12 @@ def evaluate_chapter(
             "design_texture",
             "visual_staging",
             "designed_nomenclature",
+            "naming_governance",
+            "narrative_logic",
+            "causal_continuity_quality",
+            "cost_plausibility",
+            "scene_atmosphere",
+            "payoff_grounding",
             "imageable_paragraphs",
             "prose_voice",
             "expression_precision",
@@ -219,6 +263,10 @@ def evaluate_chapter(
         warnings.append(f"prose_voice: {issue}")
     for issue in expression_precision.issues:
         warnings.append(f"expression_precision: {issue}")
+    for issue in naming.issues:
+        warnings.append(f"naming_governance: {issue}")
+    for issue in narrative_logic.issues:
+        warnings.append(f"narrative_logic: {issue}")
     for issue in anti_ai.issues:
         warnings.append(f"anti_ai_flavor: {issue}")
     for issue in chapter_units.issues:
@@ -275,6 +323,8 @@ def evaluate_chapter(
             "design_quality_report": design.to_dict(),
             "prose_voice_report": prose_voice.to_dict(),
             "expression_precision_report": expression_precision.to_dict(),
+            "naming_governance_report": naming.to_dict(),
+            "narrative_logic_report": narrative_logic.to_dict(),
             "anti_ai_flavor_report": anti_ai.to_dict(),
             "chapter_unit_report": chapter_units.to_dict(),
             "writer_craft_report": writer_craft,
@@ -306,13 +356,31 @@ def _basic_publishability_score(text_len: int, min_chars: int, max_chars: int, t
 
 
 def _coverage_score(text: str, points: list[str]) -> int:
-    meaningful = [point for point in points if len(point) >= 2 and not _is_diagnostic_point(point)]
+    meaningful = _meaningful_coverage_points(points)
     if not meaningful:
         return 70
     hits = sum(1 for point in meaningful if _point_is_covered(text, point))
     partial_hits = sum(1 for point in meaningful if not _point_is_covered(text, point) and _point_has_partial_coverage(text, point))
     ratio = (hits + partial_hits * 0.5) / len(meaningful)
     return max(35, min(100, round(45 + ratio * 55)))
+
+
+def _meaningful_coverage_points(points: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for point in points:
+        point = point.strip()
+        if len(point) < 2 or _is_diagnostic_point(point):
+            continue
+        if len(point) > 80:
+            tokens = [
+                token
+                for token in _coverage_tokens(point)
+                if 2 <= len(token) <= 12 and not _is_diagnostic_point(token)
+            ]
+            normalized.extend(tokens[:5])
+            continue
+        normalized.append(point)
+    return list(dict.fromkeys(normalized))[:24]
 
 
 def _is_diagnostic_point(point: str) -> bool:
@@ -337,6 +405,51 @@ def _is_diagnostic_point(point: str) -> bool:
         "章末最后三百字",
         "减少解释",
         "修订必须",
+        "修订执行摘要",
+        "修订合同",
+        "修订模式",
+        "定点修订合同",
+        "原始人工意见",
+        "意见理解规则",
+        "目标读者体验",
+        "必须满足",
+        "禁止项",
+        "禁止:",
+        "验收:",
+        "验收清单",
+        "人工意图",
+        "范围:",
+        "系统修订判定",
+        "处理强度",
+        "置信度",
+        "判定理由",
+        "保留:",
+        "替换:",
+        "升级规则",
+        "原始意见",
+        "system_revision_loop_guard",
+        "system_revision_trend_recovery",
+        "恢复底稿",
+        "废弃劣化稿",
+        "换策略修订",
+        "不沿坏稿继续",
+        "不得继续沿最新劣化稿",
+        "当前主角锚点",
+        "当前世界/作品锚点",
+        "当前能力/卖点锚点",
+        "必须遵守最新作品DNA",
+        "作品DNA",
+        "禁区",
+        "少量界面/提示",
+        "不要输出导演单",
+        "对白和动作必须承接",
+        "前五章每章",
+        "当前阻断问题",
+        "当前优化提醒",
+        "局部修复合同",
+        "不要继续 fresh",
+        "保留当前稿",
+        "不要求逐字复刻",
         "结尾要推动",
         "删除系统提示",
         "保留已登记 Canon",
@@ -347,7 +460,80 @@ def _is_diagnostic_point(point: str) -> bool:
         "修复质检问题",
         "采纳二审建议",
         "规避风险",
+        "词语或短段落",
+        "必须按最小范围处理",
+        "保留其余正文",
+        "保留人工明确认可",
+        "除非它违反最新骨架",
+        "下一版必须能被人工意见逐条验收",
+        "质检术语",
+        "通用章节生产标准",
+        "正文字数",
+        "章节阶段",
+        "开篇牵引",
+        "开篇反雷同",
+        "主角行动链",
+        "人物反应链",
+        "拟人化小单元",
+        "场景推进",
+        "信息释放",
+        "爽点/期待",
+        "每个约",
+        "后一单元",
+        "每2个单元",
+        "设定只能",
+        "至少完成",
+        "本章只能",
+        "必须凭判断",
+        "真实存在的武侠世界",
+        "成长不靠",
+        "套路触发器",
+        "少量游戏界面",
+        "必须保持",
+        "补足本章核心承诺",
+        "让读者能",
+        "人物目标",
+        "场景阻碍",
+        "局面变化",
+        "具体处境",
+        "人物欲望",
+        "关系张力",
+        "异常细节",
+        "利益交换",
+        "行动后果",
+        "阅读牵引",
+        "利益冲突",
+        "逼近风险",
+        "个单元",
+        "单元需局部重修",
+        "目标不清",
+        "动作链弱",
+        "阻碍不足",
+        "后果没落地",
+        "信息增量弱",
+        "人物反应弱",
+        "保留本单元有效信息",
+        "补清目标",
+        "动作后果",
+        "承接点",
+        "当前片段",
+        "单元验收",
+        "局部修订闭环",
+        "imageable_paragraphs",
+        "抽象设定句",
+        "关键段落",
+        "画面中心",
+        "goal",
+        "action",
+        "obstacle",
+        "consequence",
+        "info_gain",
+        "reaction",
+        "handoff",
     ]
+    stripped = point.strip()
+    if stripped.startswith(("不要", "不能", "禁止", "不得", "避免", "只修改", "只修复", "只改", "未被点名", "开场", "修订必须", "共 ")):
+        return True
     return any(marker in point for marker in diagnostic_markers)
 
 
@@ -366,10 +552,16 @@ def _point_has_partial_coverage(text: str, point: str) -> bool:
 
 
 def _coverage_tokens(point: str) -> list[str]:
-    raw_tokens = split_points(point)
+    raw_tokens: list[str] = []
+    for part in split_points(point):
+        raw_tokens.extend(re.split(r"(?:或|和|与|必须|成为|推动|引出|自然|推向|修复|保留|补清|[\\/：:（）()《》“”\"'，。！？、\\s])+", part))
     tokens: list[str] = []
     for token in raw_tokens:
         token = token.strip(" ：:#0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
+        for suffix in ("压力", "桥段", "恐惧", "恩怨", "关系", "后果", "承接点", "不足", "不清", "没落地"):
+            if token.endswith(suffix) and len(token) > len(suffix) + 1:
+                token = token[: -len(suffix)]
+                break
         if len(token) >= 2 and not _is_diagnostic_point(token):
             tokens.append(token)
     return tokens

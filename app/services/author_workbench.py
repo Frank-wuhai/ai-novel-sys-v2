@@ -311,10 +311,10 @@ def _revision_mode(text: str, brief_beats: str) -> str:
     for mode in ("local_patch", "targeted", "rewrite", "fresh", "polish"):
         if f"修订模式:{mode}" in merged or f"revision_mode:{mode}" in merged:
             return mode
-    if "整章重写" in merged or "重启" in merged:
-        return "fresh"
     if "局部" in merged:
         return "local_patch"
+    if "整章重写" in merged or "重启" in merged:
+        return "fresh"
     return "targeted"
 
 

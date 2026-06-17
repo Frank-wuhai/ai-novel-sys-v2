@@ -34,6 +34,7 @@ from app.services.agent_plan_intelligence import (
     run_agent_plan_enhancement_cycle,
     summarize_semantic_memory,
 )
+from app.services.aesthetic_profile import apply_aesthetic_profile
 from app.services.author_command_center import build_author_command_center
 from app.services.canon import (
     add_character,
@@ -127,6 +128,7 @@ from app.services.prompts import get_prompt_template
 from app.services.quality_insights import build_quality_calibration, build_quality_trends
 from app.services.production_control import build_production_control_report
 from app.services.production_scaffold import repair_production_scaffold
+from app.services.revision_intent import extract_revision_decision
 from app.services.data_governance import audit_book_data_governance
 from app.services.development_governance import build_development_status
 from app.services.model_strategy import build_model_strategy
@@ -152,6 +154,16 @@ def _parse_id_text(value: str, *, field_name: str) -> tuple[int, str]:
     return int(raw_id), text
 
 
+def _print_revision_decision(adjustment_text: str) -> None:
+    decision = extract_revision_decision(adjustment_text)
+    if not decision:
+        return
+    print(f"revision_mode={decision.get('处理强度', '')}")
+    print(f"revision_confidence={decision.get('置信度', '')}")
+    print(f"revision_reason={decision.get('判定理由', '')}")
+    print(f"revision_escalation={decision.get('升级规则', '')}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="novel-v2")
     parser.add_argument("--database-url", default="", help="Override DATABASE_URL for this command.")
@@ -166,6 +178,11 @@ def main() -> None:
     p.add_argument("--title", required=True)
     p.add_argument("--genre", default="")
     p.add_argument("--platform", default="")
+    p.add_argument("--prose-style", default="")
+    p.add_argument("--atmosphere", default="")
+    p.add_argument("--story-route", default="")
+    p.add_argument("--style-must-have", default="")
+    p.add_argument("--style-must-not", default="")
 
     p = sub.add_parser("create-foundation")
     p.add_argument("--book-id", type=int, required=True)
@@ -189,6 +206,14 @@ def main() -> None:
 
     p = sub.add_parser("show-story-bible")
     p.add_argument("--book-id", type=int, required=True)
+
+    p = sub.add_parser("set-aesthetic-profile")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--prose-style", default="")
+    p.add_argument("--atmosphere", default="")
+    p.add_argument("--story-route", default="")
+    p.add_argument("--style-must-have", default="")
+    p.add_argument("--style-must-not", default="")
 
     p = sub.add_parser("create-volume")
     p.add_argument("--book-id", type=int, required=True)
@@ -256,6 +281,7 @@ def main() -> None:
     p.add_argument("--constraints", default="")
     p.add_argument("--platform", default="manual")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--preview-only", action="store_true", help="only report the next action; do not write versions, reports, or jobs")
     p.add_argument("--queue-generation", action="store_true")
 
     p = sub.add_parser("run-book-cycle")
@@ -616,7 +642,8 @@ def main() -> None:
 
     p = sub.add_parser("index-book-knowledge")
     p.add_argument("--book-id", type=int, required=True)
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="use deterministic local hash embeddings")
+    p.add_argument("--live-embedding", action="store_true", help="call the Agent Plan embedding model")
     p.add_argument("--reset", action="store_true")
     p.add_argument("--limit-chapters", type=int, default=80)
 
@@ -624,7 +651,8 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=8)
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="use deterministic local hash embeddings")
+    p.add_argument("--live-embedding", action="store_true", help="call the Agent Plan embedding model for the query vector")
 
     p = sub.add_parser("create-visual-asset")
     p.add_argument("--book-id", type=int, required=True)
@@ -684,7 +712,7 @@ def main() -> None:
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--suggestion", required=True)
     p.add_argument("--platform", default="manual")
-    p.add_argument("--revision-mode", choices=["polish", "local_patch", "targeted", "rewrite", "fresh"], default="targeted")
+    p.add_argument("--revision-mode", choices=["auto", "polish", "local_patch", "targeted", "rewrite", "fresh"], default="auto")
 
     p = sub.add_parser("add-character")
     p.add_argument("--book-id", type=int, required=True)
@@ -777,6 +805,18 @@ def main() -> None:
             if args.cmd == "create-book":
                 book = create_book(session, title=args.title, genre=args.genre, platform=args.platform)
                 print(f"book_id={book.id}")
+                if any([args.prose_style, args.atmosphere, args.story_route, args.style_must_have, args.style_must_not]):
+                    block = apply_aesthetic_profile(
+                        session,
+                        book_id=book.id,
+                        prose_style=args.prose_style,
+                        atmosphere=args.atmosphere,
+                        story_route=args.story_route,
+                        must_have=args.style_must_have,
+                        must_not=args.style_must_not,
+                    )
+                    print("aesthetic_profile=applied")
+                    print(block)
             elif args.cmd == "create-foundation":
                 foundation = create_foundation(
                     session,
@@ -819,6 +859,18 @@ def main() -> None:
                 print(f"power_curve={bible.power_curve}")
                 print(f"forbidden_rules={bible.forbidden_rules}")
                 print(f"style_guide={bible.style_guide}")
+            elif args.cmd == "set-aesthetic-profile":
+                block = apply_aesthetic_profile(
+                    session,
+                    book_id=args.book_id,
+                    prose_style=args.prose_style,
+                    atmosphere=args.atmosphere,
+                    story_route=args.story_route,
+                    must_have=args.style_must_have,
+                    must_not=args.style_must_not,
+                )
+                print("aesthetic_profile=applied")
+                print(block)
             elif args.cmd == "create-volume":
                 volume = create_volume(
                     session,
@@ -931,6 +983,7 @@ def main() -> None:
                     platform=args.platform,
                     dry_run=args.dry_run,
                     queue_generation=args.queue_generation,
+                    preview_only=args.preview_only,
                 )
                 print(f"chapter_number={result.chapter_number}")
                 print(f"action={result.action}")
@@ -1924,7 +1977,7 @@ def main() -> None:
                 result = index_book_knowledge(
                     session,
                     book_id=args.book_id,
-                    dry_run=args.dry_run,
+                    dry_run=not args.live_embedding,
                     reset=args.reset,
                     limit_chapters=args.limit_chapters,
                 )
@@ -1937,7 +1990,7 @@ def main() -> None:
                     book_id=args.book_id,
                     query=args.query,
                     limit=args.limit,
-                    dry_run=args.dry_run,
+                    dry_run=not args.live_embedding,
                 ):
                     print(
                         "\t".join(
@@ -2060,6 +2113,7 @@ def main() -> None:
                 print(f"feedback_ids={adjustment.feedback_ids}")
                 print(f"status={adjustment.status}")
                 print(f"adjustment_text={adjustment.adjustment_text}")
+                _print_revision_decision(adjustment.adjustment_text)
                 if args.apply_to_brief:
                     brief = apply_feedback_adjustment_to_brief(session, adjustment_id=adjustment.id)
                     print(f"brief_id={brief.id}")
@@ -2103,6 +2157,7 @@ def main() -> None:
                 print(f"brief_status={brief.status}")
                 print(f"latest_version_id={version.id if version else ''}")
                 print(f"latest_version_status={version.status if version else ''}")
+                _print_revision_decision(adjustment.adjustment_text)
             elif args.cmd == "add-character":
                 character = add_character(
                     session,

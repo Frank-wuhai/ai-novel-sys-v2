@@ -153,7 +153,7 @@ def repair_skeleton_until_pass(skeleton: dict[str, str], *, max_rounds: int = 2)
 def repair_skeleton_draft(skeleton: dict[str, str], report: SkeletonGovernanceReport | None = None) -> dict[str, str]:
     report = report or audit_skeleton_sources({f"draft.{key}": str(value or "") for key, value in skeleton.items()})
     repaired = {key: str(value or "").strip() for key, value in skeleton.items()}
-    premise = repaired.get("premise") or "陈默进入真实武侠世界，凭判断与代价争取机缘，并逐步面对现实同步危机。"
+    premise = repaired.get("premise") or "主角进入核心矛盾后发现，核心卖点不是万能钥匙；他只能凭现场证据、风险选择和承担代价逐步争取主动。"
     current_book = _looks_like_current_wuxia_sync(repaired)
     if any(
         issue.code in {"protagonist_crutch_overdefined", "world_logic_conflict"}
@@ -163,13 +163,13 @@ def repair_skeleton_draft(skeleton: dict[str, str], report: SkeletonGovernanceRe
         repaired["premise"] = _repair_premise(premise)
         if current_book:
             repaired["reader_promise"] = (
-                "看陈默在真实江湖里凭现场证据、武侠套路知识和风险选择争取主动权；每次机缘都来自人物因果、误判修正和可见代价。"
+                "看主角在真实江湖或拟真游戏世界里凭现场证据、武侠套路知识和风险选择争取主动权；每次机缘都来自人物因果、误判修正和可见代价。"
             )
             repaired["world_engine"] = (
-                "《大江湖》是真实武侠世界，本地人有利益、恐惧和立场；套路触发只能在真实事件后被识别，不能机械刷取、骗取或操控本地人配合。收益必须对应风险、伤势、人情债或门派后果。"
+                "游戏/江湖世界按真实人物因果运行，本地人有利益、恐惧和立场；桥段触发只能在真实事件后被识别，不能机械刷取、骗取或操控本地人配合。收益必须对应风险、伤势、人情债或门派后果。"
             )
             repaired["protagonist_engine"] = (
-                "陈默可保留懂武侠桥段和会观察的背景，但职业履历不能成为万能解法；他的有效解法来自现场证据、风险判断、人物误读、小步试探和承担代价。"
+                "主角可保留懂武侠桥段和会观察的优势，但任何履历或能力都不能成为万能解法；有效解法来自现场证据、风险判断、人物误读、小步试探和承担代价。"
             )
             repaired["conflict_engine"] = (
                 "主线压力来自真实江湖因果与现实同步危机：门派追查、人情债、资源交换、身份暴露和玩家势力介入逐步升级。"
@@ -236,7 +236,7 @@ def _force_repair_blockers(skeleton: dict[str, str], report: SkeletonGovernanceR
                     else "世界规则稳定自洽，核心卖点只能扩大选择空间；收益必须依赖调查、行动、交易、失败概率和后果承担。"
                 ),
                 "protagonist_engine": (
-                    "陈默的有效解法来自观察证据、小步试探、误判修正和承担代价；旧职业履历只作背景，不能替他自动解题。"
+                    "主角的有效解法来自观察证据、小步试探、误判修正和承担代价；旧职业履历或特殊能力只作有限工具，不能替他自动解题。"
                     if current_book
                     else "主角不能靠单一能力自动解题；有效解法来自观察、试探、选择、承担后果和阶段性成长。"
                 ),
@@ -919,7 +919,10 @@ def _derive_sellpoint_risks(sources: dict[str, str]) -> dict[str, dict[str, list
         domain_sources = [
             name
             for name, text in sources.items()
-            if "forbidden_rules" not in name and not _negative_constraint_context(text) and any(marker in text for marker in markers)
+            if "forbidden_rules" not in name
+            and not _negative_constraint_context(text)
+            and not _benign_sellpoint_context(domain, text)
+            and any(marker in text for marker in markers)
         ]
         shortcut_sources = [
             name
@@ -972,6 +975,48 @@ def _has_shortcut_context(text: str, domain_markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in shortcut_markers)
 
 
+def _benign_sellpoint_context(domain: str, text: str) -> bool:
+    text = str(text or "")
+    dramatic_system_markers = (
+        "剧情演绎系统",
+        "剧情演绎",
+        "演绎系统",
+        "经典桥段",
+        "复刻桥段",
+        "复刻程度",
+        "参演人员",
+        "好感度",
+        "失败无法获得奖励",
+        "失败无奖励",
+        "桥段复刻",
+        "演绎相似度",
+        "即兴演出",
+        "演出痕迹",
+    )
+    if domain == "system_panel":
+        hard_panel_markers = (
+            "系统面板",
+            "属性面板",
+            "签到系统",
+            "签到",
+            "抽奖",
+            "加点",
+            "最优答案",
+            "自动解题",
+            "秒杀",
+            "碾压",
+            "无代价",
+            "任务大厅",
+            "刷经验",
+            "刷副本",
+        )
+        return any(marker in text for marker in dramatic_system_markers) and not any(marker in text for marker in hard_panel_markers)
+    if domain == "actor_craft":
+        hard_actor_markers = ("龙套", "演员", "演技", "片场", "横店", "导演", "靠表演", "靠演技", "职业履历")
+        return any(marker in text for marker in dramatic_system_markers) and not any(marker in text for marker in hard_actor_markers)
+    return False
+
+
 def _dominant_set_piece_sources(sources: dict[str, str]) -> tuple[str, list[str]] | None:
     set_pieces = (
         ("坠崖得功", ("坠崖", "追杀后坠崖", "跌落山崖")),
@@ -1018,19 +1063,26 @@ def _negative_actor_context(text: str) -> bool:
 
 
 def _repair_premise(value: str) -> str:
-    if "陈默" not in value:
-        return "主角进入核心矛盾后发现，核心卖点不是万能钥匙；他只能凭现场证据、风险选择和承担代价逐步争取主动。"
-    return "陈默进入真实武侠世界后发现，这里不能刷怪升级；他只能凭现场证据、武侠套路知识和承担代价，在真实人物因果中争取机缘，并逐步卷入现实同步危机。"
+    if _looks_like_wuxia_sync_text(value):
+        return "主角进入真实江湖或拟真游戏世界后发现，这里不能刷怪升级；他只能凭现场证据、武侠套路知识和承担代价，在真实人物因果中争取机缘，并逐步面对现实同步或世界升维带来的危机。"
+    return "主角进入核心矛盾后发现，核心卖点不是万能钥匙；他只能凭现场证据、风险选择和承担代价逐步争取主动。"
 
 
 def _looks_like_current_wuxia_sync(skeleton: dict[str, str]) -> bool:
     text = "\n".join(str(value or "") for value in skeleton.values())
-    return "陈默" in text or "大江湖" in text or "真实武侠" in text
+    return _looks_like_wuxia_sync_text(text)
+
+
+def _looks_like_wuxia_sync_text(text: str) -> bool:
+    value = str(text or "")
+    wuxia_markers = ("武侠", "江湖", "门派", "修炼", "内力", "轻功")
+    game_sync_markers = ("全真", "网游", "游戏", "现实同步", "同步现实", "拟真", "内测")
+    return any(marker in value for marker in wuxia_markers) and any(marker in value for marker in game_sync_markers + ("真实",))
 
 
 def _repair_volume_summary(current_book: bool) -> str:
     if current_book:
-        return "第一卷写陈默从误入真实江湖到学会用证据和代价试探套路触发：求医、护送、身份误认、门派规矩、人情债轮换推进，最终引出现实同步危机。"
+        return "第一卷写主角从误入真实江湖或拟真游戏世界，到学会用证据和代价试探桥段触发：求医、护送、身份误认、门派规矩、人情债轮换推进，最终引出现实同步或世界升维危机。"
     return "第一卷写主角从误用核心卖点到理解其边界：通过调查、交易、误判修正、关系变化和代价支付逐步打开局面，并在卷末暴露更高层压力。"
 
 
@@ -1042,13 +1094,13 @@ def _repair_arc_goal(current_book: bool) -> str:
 
 def _repair_arc_climax(current_book: bool) -> str:
     if current_book:
-        return "第一卷高潮不固定为坠崖得功，而是让陈默在门派追查、身份误认、资源交换、伤病求医、护送失物等多种桥段中主动选择一条高风险路线，并为此欠下关键人情或暴露线索。"
+        return "第一卷高潮不固定为单一奇遇，而是让主角在门派追查、身份误认、资源交换、伤病求医、护送失物等多种桥段中主动选择一条高风险路线，并为此欠下关键人情或暴露线索。"
     return "第一卷高潮不固定为单一桥段，而是让主角在身份压力、资源交换、关系误读、规则惩罚和外部追逼中选择一条高风险路线，并留下清晰后果。"
 
 
 def _repair_arc_turn(current_book: bool) -> str:
     if current_book:
-        return "陈默发现所谓桥段不是可刷任务，而是会改变人物关系和门派追查的真实因果。"
+        return "主角发现所谓桥段不是可刷任务，而是会改变人物关系和门派追查的真实因果。"
     return "主角发现核心卖点不能直接兑现胜利，它每次使用都会改变人物关系、暴露信息或引来新的代价。"
 
 

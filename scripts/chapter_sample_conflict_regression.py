@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
+from app.db.session import session_scope
+from app.models.entities import Book, Chapter, GenerationTask
 from app.services.chapter_samples import (
+    TASK_TYPE_CHAPTER_SAMPLE,
     _sample1_uses_banned_entry,
     _sample_adoption_text,
     _sample_diversity_report,
     _uses_actor_shortcut,
+    latest_chapter_samples,
 )
 from app.services.writer_loop import sample_failure_director
+from regression_db import isolated_database
 
 
 def main() -> int:
+    isolated_database("chapter-sample-conflict-regression")
     failures: list[str] = []
 
     background_only = "陈默想起自己曾在横店跑过龙套，但这点经历没有帮他认出眼前刀伤。他只能蹲下去看血迹方向，又被药铺掌柜一句话逼得改口。"
@@ -79,13 +86,14 @@ def main() -> int:
         failures.append("usable_sample_indices_missing")
     adoption_text = _sample_adoption_text(task_id=999, sample=samples[0])
     for marker in (
-        "必须继承的叙事发动机合同",
-        "必须保留探索轴",
-        "必须让开篇压力在前500字内落地",
-        "必须让关键配角承担功能",
-        "必须按小样的信息释放方式推进",
-        "必须让章末钩子来自本章行动后果",
-        "逐项对应叙事发动机合同",
+        "轻量方向约束",
+        "探索轴",
+        "开篇保留短期目标、阻碍、身体反应和误判",
+        "配角要制造阻碍",
+        "信息释放先给可见证据",
+        "章末钩子来自本章行动后果",
+        "不要求逐字复刻小样原文",
+        "避免无必要整章重写",
     ):
         if marker not in adoption_text:
             failures.append(f"adoption_contract_missing:{marker}")
@@ -103,6 +111,9 @@ def main() -> int:
     if "禁用现实片场" in joined_directives or "不得用横店" in joined_directives:
         failures.append("director_uses_hard_ban_for_setting_terms")
 
+    stale_result = _check_stale_running_sample()
+    failures.extend(stale_result["failures"])
+
     print(
         json.dumps(
             {
@@ -110,12 +121,83 @@ def main() -> int:
                 "failures": failures,
                 "sample_report": report,
                 "director": director,
+                "stale_running": stale_result,
             },
             ensure_ascii=False,
             indent=2,
         )
     )
     return 1 if failures else 0
+
+
+def _check_stale_running_sample() -> dict:
+    failures: list[str] = []
+    with session_scope() as session:
+        cleanup_ids: list[int] = []
+        book = Book(title=f"stale-sample-regression-{datetime.utcnow().timestamp()}", genre="玄幻", target_platform="test")
+        session.add(book)
+        session.flush()
+        cleanup_ids.append(book.id)
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        completed = GenerationTask(
+            book_id=book.id,
+            task_type=TASK_TYPE_CHAPTER_SAMPLE,
+            status="completed",
+            input_json=json.dumps({"chapter_number": 1}, ensure_ascii=False),
+            output_json=json.dumps({"samples": [_sample_fixture(1)], "gate_passed": True}, ensure_ascii=False),
+            created_at=datetime.utcnow() - timedelta(minutes=30),
+        )
+        stale = GenerationTask(
+            book_id=book.id,
+            task_type=TASK_TYPE_CHAPTER_SAMPLE,
+            status="running",
+            input_json=json.dumps({"chapter_number": 1}, ensure_ascii=False),
+            output_json="{}",
+            created_at=datetime.utcnow() - timedelta(minutes=20),
+        )
+        session.add_all([completed, stale])
+        session.flush()
+        try:
+            latest = latest_chapter_samples(session, book_id=book.id, chapter_number=1)
+            refreshed = session.get(GenerationTask, stale.id)
+            if refreshed.status != "failed":
+                failures.append("stale_running_sample_not_marked_failed")
+            if latest.get("status") != "failed":
+                failures.append("latest_stale_status_not_failed")
+            if latest.get("fallback_task_id") != completed.id:
+                failures.append("stale_running_fallback_missing")
+            if latest.get("error_category") != "stale_running":
+                failures.append("stale_running_error_category_missing")
+            return {
+                "failures": failures,
+                "latest_status": latest.get("status"),
+                "fallback_task_id": latest.get("fallback_task_id"),
+                "stale_status": refreshed.status,
+                "error_category": latest.get("error_category"),
+            }
+        finally:
+            for task in (completed, stale):
+                session.delete(task)
+            session.delete(chapter)
+            session.delete(book)
+
+
+def _sample_fixture(index: int) -> dict:
+    return {
+        "index": index,
+        "title": "可用小样",
+        "exploration_axis": "人物处境",
+        "experiment_hypothesis": "用现场压力推动选择",
+        "direction": "主角在压力下主动选择",
+        "opening": "药铺后堂的灯油快尽了，陈默先闻到血腥味，才看见账本边缘那道湿痕。掌柜没有求他救人，只把门闩往下一扣，问他昨夜为什么偏偏从后巷回来。陈默喉咙发紧，手指却先按住账页缺口。他知道自己不能解释来历，只能用眼前能看见的血迹和脚印，换一个不被赶出去的机会。",
+        "scene_plan": ["验血迹", "掌柜逼问", "章末发现账页缺口"],
+        "difference_from_existing": "从现场压力切入。",
+        "anti_ai_flavor_strategy": "用灯油、血痕和门闩承载冲突。",
+        "pov_strategy": "先闻到、再看见、最后误判。",
+        "precision_strategy": "推断只来自可见物证。",
+    }
 
 
 if __name__ == "__main__":

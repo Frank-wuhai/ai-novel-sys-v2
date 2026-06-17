@@ -145,12 +145,15 @@ class DryRunProvider(BaseLLMProvider):
 class ArkOpenAIProvider(BaseLLMProvider):
     name = "ark_openai_compatible"
 
-    def __init__(self) -> None:
+    def __init__(self, *, timeout: float | None = None) -> None:
         api_key = _ark_api_key_for_current_plan()
         if not api_key or not settings.ark_base_url:
             raise RuntimeError(_missing_ark_credentials_message())
         _validate_ark_plan_base_url(settings.ark_base_url)
-        self.client = OpenAI(api_key=api_key, base_url=settings.ark_base_url)
+        kwargs = {"api_key": api_key, "base_url": settings.ark_base_url}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        self.client = OpenAI(**kwargs)
 
     def generate(
         self,

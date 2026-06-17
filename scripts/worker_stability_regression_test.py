@@ -32,8 +32,59 @@ def main() -> int:
             "稳定性测试用长任务队列",
             "--reader-promise",
             "每章都有压力、选择、代价和钩子",
+            "--world-engine",
+            "测试世界规则稳定且可被章节承接",
+            "--protagonist-engine",
+            "主角通过选择、代价和行动推进",
+            "--conflict-engine",
+            "队列压力、任务失败和章节钩子递进",
         ]
     )
+    _run_cli(
+        [
+            "upsert-story-bible",
+            "--book-id",
+            str(book_id),
+            "--positioning",
+            "稳定性测试用长任务队列",
+            "--reader-promise",
+            "每章都有压力、选择、代价和钩子",
+            "--main-plot",
+            "队列压力、任务失败和章节钩子递进",
+            "--protagonist-arc",
+            "主角通过选择、代价和行动推进",
+            "--power-curve",
+            "测试世界规则稳定且可被章节承接",
+            "--forbidden-rules",
+            "禁止空设定和无代价推进",
+            "--style-guide",
+            "dry-run regression only",
+            "--status",
+            "approved",
+        ]
+    )
+    _run_cli(
+        [
+            "create-story-arc",
+            "--book-id",
+            str(book_id),
+            "--arc-number",
+            "1",
+            "--title",
+            "稳定测试剧情段",
+            "--start-chapter",
+            "1",
+            "--end-chapter",
+            "5",
+            "--goal",
+            "验证队列能稳定处理多章生成。",
+            "--climax",
+            "队列在超时恢复后完成所有任务。",
+            "--turn",
+            "后台状态回到健康。",
+        ]
+    )
+    _approve_skeleton(book_id)
     task_ids: list[int] = []
     for chapter_number in range(1, 6):
         _run_cli(
@@ -154,6 +205,30 @@ def _mark_stale_running(task_id: int, *, chapter_number: int) -> None:
                 task_id,
             ),
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _approve_skeleton(book_id: int) -> None:
+    conn = sqlite3.connect(TEST_DB_PATH)
+    try:
+        values = {
+            "premise": "稳定性测试用长任务队列",
+            "reader_promise": "每章都有压力、选择、代价和钩子",
+            "world_engine": "测试世界规则稳定且可被章节承接",
+            "protagonist_engine": "主角通过选择、代价和行动推进",
+            "conflict_engine": "队列压力、任务失败和章节钩子递进",
+            "arc_goal": "验证队列能稳定处理多章生成。",
+            "arc_climax": "队列在超时恢复后完成所有任务。",
+            "arc_turn": "后台状态回到健康。",
+        }
+        for key, value in values.items():
+            conn.execute(
+                "insert into platform_feedback (book_id, chapter_id, platform, metric_name, metric_value, raw_text, collected_at) "
+                "values (?, null, 'regression', 'skeleton_approval', ?, ?, datetime('now'))",
+                (book_id, key, value),
+            )
         conn.commit()
     finally:
         conn.close()

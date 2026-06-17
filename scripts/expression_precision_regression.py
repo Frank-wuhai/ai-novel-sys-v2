@@ -1,66 +1,51 @@
 from __future__ import annotations
 
-import argparse
 import json
-from pathlib import Path
 
 from app.services.expression_precision import evaluate_expression_precision
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Calibrate expression precision heuristics.")
-    parser.add_argument("--cases", default=str(ROOT / "evals" / "expression_precision_cases.json"))
-    args = parser.parse_args()
-
-    payload = json.loads(Path(args.cases).read_text(encoding="utf-8"))
-    rows = []
-    failures = []
-    for case in payload.get("cases", []):
-        report = evaluate_expression_precision(str(case.get("text") or "")).to_dict()
-        expect = case.get("expect") or {}
-        status, notes = _case_status(report, expect)
-        row = {
-            "name": case.get("name", ""),
-            "status": status,
-            "score": report.get("score"),
-            "checks": report.get("checks", {}),
-            "examples": report.get("examples", []),
-            "notes": notes,
-        }
-        rows.append(row)
-        if status != "pass":
-            failures.append(row)
-
-    result = {
-        "status": "pass" if not failures else "fail",
-        "case_count": len(rows),
-        "failure_count": len(failures),
-        "cases": rows,
-    }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    failures: list[str] = []
+    bad = (
+        "布上有刺鼻的靛蓝味，陈默刚喝了水，妇人便说：喝了水，就少拿嘴买命。"
+        "铁尺馆的人冷笑，死在馆里，馆里给薄棺，别让铁尺馆量不到你的骨头。"
+    )
+    report = evaluate_expression_precision(bad)
+    examples = "\n".join(report.examples)
+    for marker in ("靛蓝味", "拿嘴买命", "薄棺", "量不到你的骨头"):
+        if marker not in examples:
+            failures.append(f"bad_phrase_not_detected:{marker}")
+    incomplete_action = "陈默被他扣住的手腕还疼着，本能想挣。"
+    action_report = evaluate_expression_precision(incomplete_action)
+    action_examples = "\n".join(action_report.examples)
+    if "想挣" not in action_examples:
+        failures.append("incomplete_action_not_detected")
+    if report.checks.get("object_verb_collocation", 100) >= 70:
+        failures.append("bad_phrase_penalty_too_weak")
+    good = "粗布散着刺鼻的染料味，靛蓝水顺着布纹渗开。妇人低声道：喝了水，就少开口惹祸。"
+    good_report = evaluate_expression_precision(good)
+    if good_report.checks.get("object_verb_collocation", 0) < 80:
+        failures.append("natural_phrase_penalized")
+    good_action = "陈默被他扣住的手腕还疼着，本能想挣脱，却被对方压回桌边。"
+    good_action_report = evaluate_expression_precision(good_action)
+    if good_action_report.checks.get("object_verb_collocation", 0) < 80:
+        failures.append("complete_action_penalized")
+    print(
+        json.dumps(
+            {
+                "status": "fail" if failures else "pass",
+                "failures": failures,
+                "bad_report": report.to_dict(),
+                "action_report": action_report.to_dict(),
+                "good_report": good_report.to_dict(),
+                "good_action_report": good_action_report.to_dict(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
     return 1 if failures else 0
-
-
-def _case_status(report: dict, expect: dict) -> tuple[str, list[str]]:
-    notes: list[str] = []
-    score = int(report.get("score") or 0)
-    min_score = int(expect.get("min_score") or 0)
-    max_score = int(expect.get("max_score") or 0)
-    examples_text = "\n".join(str(item) for item in report.get("examples", []))
-    if min_score and score < min_score:
-        notes.append(f"score_low:{score}<{min_score}")
-    if max_score and score > max_score:
-        notes.append(f"score_high:{score}>{max_score}")
-    for marker in expect.get("must_examples_contain", []):
-        if str(marker) not in examples_text:
-            notes.append(f"missing_example:{marker}")
-    for marker in expect.get("forbid_examples_contain", []):
-        if str(marker) in examples_text:
-            notes.append(f"unexpected_example:{marker}")
-    return ("pass" if not notes else "fail"), notes
 
 
 if __name__ == "__main__":

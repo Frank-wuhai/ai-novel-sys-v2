@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.models.entities import GenerationTask
 from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
+from app.services.production_gate import assert_production_gate
 
 
 QUEUE_DRAFT = "queue_draft_chapter"
@@ -90,6 +91,7 @@ def enqueue_draft_chapter(
     max_attempts: int = 3,
     timeout_seconds: int = 3600,
 ) -> GenerationTask:
+    assert_production_gate(session, book_id=book_id, action="enqueue_draft_chapter")
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
     return _enqueue(
         session,
@@ -111,6 +113,7 @@ def enqueue_revise_chapter(
     max_attempts: int = 3,
     timeout_seconds: int = 3600,
 ) -> GenerationTask:
+    assert_production_gate(session, book_id=book_id, action="enqueue_revise_chapter")
     _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
     return _enqueue(
         session,
@@ -467,12 +470,19 @@ def _failure_summary(task: GenerationTask) -> QueueFailureSummary:
 
 
 def _queue_llm_parameter_snapshot(*, queue_type: str, dry_run: bool) -> dict:
-    max_tokens = settings.llm_revision_max_tokens if queue_type == QUEUE_REVISE else settings.llm_draft_max_tokens
+    if queue_type == QUEUE_REVISE:
+        model = settings.llm_revision_model
+        max_tokens = settings.llm_revision_max_tokens
+        temperature = settings.llm_revision_temperature
+    else:
+        model = settings.llm_draft_model
+        max_tokens = settings.llm_draft_max_tokens
+        temperature = settings.llm_draft_temperature
     return {
         "provider_mode": "dry_run" if dry_run else "live",
-        "requested_model": settings.model_name,
+        "requested_model": model,
         "max_tokens": max_tokens,
-        "temperature": settings.llm_temperature,
+        "temperature": temperature,
     }
 
 

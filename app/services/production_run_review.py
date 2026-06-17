@@ -234,9 +234,9 @@ def _recommendations(*, alignment: dict[str, Any], unit_report: dict[str, Any], 
         rows.append("返修未被接受，下一步应降低单次修订范围或改为整章重写。")
     if weak_units:
         indexes = "、".join(str(item.get("index")) for item in weak_units[:5])
-        rows.append(f"重点关注第 {indexes} 单元。")
+        rows.append(f"下轮生产重点关注第 {indexes} 单元。")
     if int(unit_report.get("score") or 0) < 70:
-        rows.append("单元流仍低于 70 分，下一次不建议人工审批。")
+        rows.append("单元流仍低于 70 分，下一轮生产应优先优化单元衔接；当前章是否通过以质检结论和人工阅读为准。")
     return list(dict.fromkeys(rows))[:6]
 
 

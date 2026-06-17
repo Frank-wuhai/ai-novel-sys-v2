@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PublishJob, QualityReport, StoryArc
 from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.brief_sanitizer import sanitize_existing_chapter_brief
+from app.services.context_contamination import audit_context_contamination, context_anchor_lines
+from app.services.feedback import submit_revision_suggestion
 from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REVISE, enqueue_draft_chapter, enqueue_revise_chapter
 from app.services.production import (
     create_chapter_brief,
@@ -20,7 +23,10 @@ from app.services.production import (
     revise_chapter,
     review_chapter,
 )
+from app.services.production_state import next_version_number
+from app.services.production_gate import check_production_gate
 from app.services.story import arcs_for_chapter, list_story_arcs
+from app.services.story_dna import chapter_engine_for_number, story_dna_for_book
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,7 @@ AUTO_ACTIONS = {
     "enqueue_draft_chapter",
     "review_chapter",
     "create_revision_brief",
+    "revision_trend_recovery",
     "revise_chapter",
     "enqueue_revise_chapter",
     "create_publish_job",
@@ -200,9 +207,15 @@ def run_next_action(
     platform: str = "manual",
     dry_run: bool = True,
     queue_generation: bool = False,
+    preview_only: bool = False,
 ) -> RunNextActionResult:
     item = _plan_one(session, book_id=book_id, chapter_number=chapter_number)
     action = item.next_action
+    gate_message = _production_gate_blocker(session, book_id=book_id, action=action)
+    if gate_message:
+        return RunNextActionResult(chapter_number, action, "blocked", gate_message, None)
+    if preview_only:
+        return RunNextActionResult(chapter_number, action, "preview", item.reason, item.latest_version_id or item.brief_id or item.publish_job_id)
     if action == "create_chapter_brief":
         fields = _chapter_brief_fields(
             session,
@@ -240,11 +253,18 @@ def run_next_action(
         brief = create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
         return RunNextActionResult(chapter_number, action, "executed", "created revision brief", brief.id)
     if action == "revise_chapter":
+        guard_brief = _maybe_apply_revision_loop_guard(session, book_id=book_id, chapter_number=chapter_number)
         if queue_generation:
             task = enqueue_revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
-            return RunNextActionResult(chapter_number, "enqueue_revise_chapter", "executed", "queued revision generation task", task.id)
+            message = "queued revision generation task"
+            if guard_brief:
+                message = f"revision safety guard applied; queued light revision task with brief {guard_brief.id}"
+            return RunNextActionResult(chapter_number, "enqueue_revise_chapter", "executed", message, task.id)
         version = revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
-        return RunNextActionResult(chapter_number, action, "executed", "created revised draft version", version.id)
+        message = "created revised draft version"
+        if guard_brief:
+            message = f"revision safety guard applied; created light revised draft version with brief {guard_brief.id}"
+        return RunNextActionResult(chapter_number, action, "executed", message, version.id)
     if action == "create_publish_job":
         if not item.latest_version_id:
             raise ValueError("latest version is required to create publish job")
@@ -267,9 +287,43 @@ def run_next_action(
         return RunNextActionResult(chapter_number, action, "executed", "publish job retried", job.id)
     if action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}:
         return RunNextActionResult(chapter_number, action, "blocked", "manual decision required", None)
+    if action == "revision_trend_recovery":
+        brief = _apply_revision_trend_recovery(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            reason=item.reason,
+        )
+        if not brief:
+            return RunNextActionResult(chapter_number, action, "blocked", item.reason, item.latest_version_id)
+        return RunNextActionResult(
+            chapter_number,
+            "revision_trend_recovery",
+            "executed",
+            "修订趋势劣化，已自动回退到近期最佳稿并生成换策略修订单。",
+            brief.id,
+        )
     if action == "done":
         return RunNextActionResult(chapter_number, action, "noop", "chapter is complete", None)
     return RunNextActionResult(chapter_number, action, "blocked", item.reason, None)
+
+
+_PRODUCTION_GATED_ACTIONS = {
+    "draft_chapter",
+    "enqueue_draft_chapter",
+    "review_chapter",
+    "revise_chapter",
+    "enqueue_revise_chapter",
+    "create_publish_job",
+    "publish_job_dry_run",
+    "queue_publish_job",
+    "retry_publish_job",
+}
+
+
+def _production_gate_blocker(session: Session, *, book_id: int, action: str) -> str:
+    result = check_production_gate(session, book_id=book_id, action=action)
+    return "" if result.passed else result.message
 
 
 def run_book_cycle(
@@ -383,6 +437,78 @@ def _decision_item(item: ChapterPlanItem, *, book_id: int) -> HumanDecisionItem 
     return None
 
 
+def _maybe_apply_revision_loop_guard(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> ChapterBrief | None:
+    chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+    if not chapter:
+        return None
+    version = _latest_version(session, chapter_id=chapter.id)
+    if not version or version.status != "needs_revision":
+        return None
+    brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    quality = _latest_quality(session, version_id=version.id)
+    if not brief or not quality or quality.passed:
+        return None
+    brief_text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    if "system_revision_loop_guard" in brief_text:
+        return None
+    if not _revision_brief_is_heavy(brief_text):
+        return None
+    if _quality_needs_broader_revision(quality):
+        return None
+    failed_count = _recent_failed_revision_count(session, chapter_id=chapter.id, limit=4)
+    slow_count = _recent_slow_revision_task_count(session, book_id=book_id, chapter_number=chapter_number, limit=4)
+    if failed_count < 2 and slow_count < 2:
+        return None
+    suggestion = _revision_loop_guard_suggestion(
+        chapter_number=chapter_number,
+        quality=quality,
+        failed_count=failed_count,
+        slow_count=slow_count,
+    )
+    _feedback, _adjustment, guard_brief, _version = submit_revision_suggestion(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        platform="system_revision_loop_guard",
+        suggestion_text=suggestion,
+        revision_mode="local_patch",
+    )
+    return guard_brief
+
+
+def _quality_needs_broader_revision(quality: QualityReport) -> bool:
+    report = _loads_json(quality.report)
+    dimensions = report.get("dimensions") if isinstance(report.get("dimensions"), dict) else {}
+    broader_dimension_thresholds = {
+        "chapter_necessity": 55,
+        "scene_atmosphere": 45,
+        "payoff_grounding": 55,
+        "character_action": 65,
+        "chapter_unit_flow": 63,
+    }
+    if any(int(dimensions.get(name) or 100) < threshold for name, threshold in broader_dimension_thresholds.items()):
+        return True
+    review = report.get("llm_review") if isinstance(report.get("llm_review"), dict) else {}
+    review_text = "；".join(str(item) for item in [*(review.get("issues") or []), *(review.get("revision_suggestions") or [])])
+    broader_markers = (
+        "文笔生硬",
+        "感情基调",
+        "心理活动",
+        "爽点",
+        "奖励感",
+        "章末钩子",
+        "主角反应不自然",
+        "单元目标",
+        "节奏",
+    )
+    return any(marker in review_text for marker in broader_markers)
+
+
 def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> ChapterPlanItem:
     chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
     if not chapter:
@@ -399,10 +525,22 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
             reason="chapter and brief are missing",
         )
 
+    _restore_reconciled_readable_version(session, chapter_id=chapter.id)
     brief = _latest_brief(session, chapter_id=chapter.id)
     version = _latest_version(session, chapter_id=chapter.id)
     quality = _latest_quality(session, version_id=version.id) if version else None
     job = _latest_publish_job(session, version_id=version.id) if version else None
+    if version and quality and version.status == "needs_revision":
+        from app.services.production_reviewing import reconcile_existing_quality_report
+
+        if reconcile_existing_quality_report(session, version=version, quality=quality):
+            version = _latest_version(session, chapter_id=chapter.id)
+            quality = _latest_quality(session, version_id=version.id) if version else None
+    if version and version.status in {"reviewed_pass", "approved"}:
+        _supersede_active_revision_briefs(session, chapter_id=chapter.id)
+        from app.services.chapter_archive import archive_chapter_history_after_readable
+
+        archive_chapter_history_after_readable(session, chapter_id=chapter.id, readable_version_id=version.id)
 
     if not brief:
         action, reason = "create_chapter_brief", "chapter exists but brief is missing"
@@ -417,10 +555,13 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     elif version.status == "needs_revision":
         revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
         queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
+        trend_blocker = "" if _active_revision_trend_recovery(version, revision_brief) else _revision_quality_trend_blocker(session, chapter_id=chapter.id)
         if queue_task:
             action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
+        elif trend_blocker:
+            action, reason = "revision_trend_recovery", trend_blocker
         elif revision_brief and _revision_brief_has_feedback_marker(revision_brief) and quality is None:
-            action, reason = "revise_chapter", "latest version needs manual feedback revision"
+            action, reason = "revise_chapter", "latest version has a feedback/recovery brief and should continue revision"
         elif revision_brief and quality and (_revision_brief_matches_quality(revision_brief, quality) or _revision_brief_matches_feedback_reopen(revision_brief, quality)):
             action, reason = "revise_chapter", "latest version needs revision and revision brief exists"
         elif revision_brief and _revision_brief_is_story_clean(revision_brief):
@@ -451,6 +592,370 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     )
 
 
+def _supersede_active_revision_briefs(session: Session, *, chapter_id: int) -> int:
+    changed = 0
+    for brief in session.scalars(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter_id, ChapterBrief.status == "revision_ready")):
+        brief.status = "superseded"
+        changed += 1
+    if changed:
+        session.flush()
+    return changed
+
+
+def _restore_reconciled_readable_version(session: Session, *, chapter_id: int) -> ChapterVersion | None:
+    latest = _latest_version(session, chapter_id=chapter_id)
+    if not latest or latest.status in {"reviewed_pass", "approved", "draft"}:
+        return None
+    from app.services.production_reviewing import reconcile_existing_quality_report
+
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.id.desc())
+            .limit(8)
+        )
+    )
+    reconciled: list[tuple[ChapterVersion, QualityReport]] = []
+    for version in versions:
+        quality = _latest_quality(session, version_id=version.id)
+        if not quality:
+            continue
+        if reconcile_existing_quality_report(session, version=version, quality=quality):
+            reconciled.append((version, quality))
+    if not reconciled:
+        return None
+    source_version, source_quality = max(reconciled, key=lambda row: (int(row[1].score or 0), int(row[0].id or 0)))
+    latest = _latest_version(session, chapter_id=chapter_id)
+    if latest and latest.id == source_version.id:
+        return source_version
+    restored = ChapterVersion(
+        chapter_id=chapter_id,
+        version_number=next_version_number(session, chapter_id),
+        title=source_version.title,
+        content=source_version.content,
+        status="reviewed_pass",
+        source=f"quality_reconcile:v{source_version.id}",
+    )
+    session.add(restored)
+    session.flush()
+    report = _loads_json(source_quality.report)
+    report["reconciled_from_version_id"] = source_version.id
+    report["reconcile_reason"] = "历史稿硬门禁通过且主编审稿通过，按当前审稿规则恢复为可读稿。"
+    session.add(
+        QualityReport(
+            chapter_version_id=restored.id,
+            score=int(source_quality.score or report.get("score") or 75),
+            passed=True,
+            report=json.dumps(report, ensure_ascii=False),
+        )
+    )
+    _supersede_active_revision_briefs(session, chapter_id=chapter_id)
+    session.flush()
+    return restored
+
+
+def _active_revision_trend_recovery(version: ChapterVersion, brief: ChapterBrief | None) -> bool:
+    if not str(version.source or "").startswith("revision_recovery:") or not brief:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return "system_revision_trend_recovery" in text
+
+
+def _revision_brief_is_heavy(text: str) -> bool:
+    normalized = (text or "").replace("：", ":")
+    heavy_markers = (
+        "修订模式:fresh",
+        "修订模式:rewrite",
+        "整章重写",
+        "结构性重写",
+        "按最新生产骨架重启",
+        "旧稿已废弃",
+        "采用章节小样",
+        "小样气质",
+        "叙事发动机合同",
+    )
+    return len(normalized) >= 2600 or any(marker in normalized for marker in heavy_markers)
+
+
+def _recent_failed_revision_count(session: Session, *, chapter_id: int, limit: int) -> int:
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id, ChapterVersion.source.like("revision:%"))
+            .order_by(ChapterVersion.id.desc())
+            .limit(limit)
+        )
+    )
+    failed = 0
+    for version in versions:
+        quality = _latest_quality(session, version_id=version.id)
+        if quality and not quality.passed:
+            failed += 1
+    return failed
+
+
+def _revision_quality_trend_blocker(session: Session, *, chapter_id: int) -> str:
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.id.desc())
+            .limit(5)
+        )
+    )
+    failed_rows: list[tuple[ChapterVersion, QualityReport, dict]] = []
+    for version in versions:
+        quality = _latest_quality(session, version_id=version.id)
+        if not quality or quality.passed:
+            continue
+        failed_rows.append((version, quality, _loads_json(quality.report)))
+    if len(failed_rows) < 2:
+        return ""
+    latest_version, latest_quality, latest_report = failed_rows[0]
+    previous_version, previous_quality, previous_report = failed_rows[1]
+    latest_score = int(latest_quality.score or 0)
+    previous_score = int(previous_quality.score or 0)
+    if latest_score <= previous_score:
+        return (
+            "修订趋势劣化：最新未通过稿 "
+            f"v{latest_version.id} score={latest_score} 没有高于上一版 "
+            f"v{previous_version.id} score={previous_score}。停止继续自动修订，避免把坏方向修深。"
+        )
+    best_recent_score = max(int(row[1].score or 0) for row in failed_rows[1:])
+    if best_recent_score - latest_score >= 8:
+        return (
+            "修订趋势劣化：最新未通过稿明显低于近期最佳未通过稿，"
+            f"latest={latest_score}, recent_best={best_recent_score}。需要自动回退并换策略修订。"
+        )
+    latest_dims = latest_report.get("dimensions") if isinstance(latest_report.get("dimensions"), dict) else {}
+    previous_dims = previous_report.get("dimensions") if isinstance(previous_report.get("dimensions"), dict) else {}
+    watched = ("brief_coverage", "reader_momentum", "hook_strength", "chapter_unit_flow", "scene_atmosphere", "writer_craft")
+    degraded = [
+        f"{name}:{int(previous_dims.get(name) or 0)}->{int(latest_dims.get(name) or 0)}"
+        for name in watched
+        if int(previous_dims.get(name) or 0) - int(latest_dims.get(name) or 0) >= 8
+    ]
+    if len(degraded) >= 2:
+        return "修订趋势劣化：关键维度连续下降（" + "；".join(degraded[:4]) + "）。需要自动回退并换策略修订。"
+    return ""
+
+
+def _apply_revision_trend_recovery(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    reason: str,
+) -> ChapterBrief | None:
+    chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+    if not chapter:
+        return None
+    active_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    active_text = "\n".join([active_brief.goal or "", active_brief.required_beats or "", active_brief.constraints or ""]) if active_brief else ""
+    latest = _latest_version(session, chapter_id=chapter.id)
+    if (
+        active_brief
+        and "system_revision_trend_recovery" in active_text
+        and latest
+        and str(latest.source or "").startswith("revision_recovery:")
+    ):
+        return active_brief
+    rows = _recent_failed_quality_rows(session, chapter_id=chapter.id, limit=5)
+    if len(rows) < 2:
+        return None
+    latest_version = rows[0][0]
+    clean_rows = [
+        row
+        for row in rows
+        if not _version_content_has_stale_context(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            content=row[0].content,
+        )
+    ]
+    if len(clean_rows) < 2:
+        return None
+    best_version, best_quality, best_report = max(clean_rows, key=lambda row: (int(row[1].score or 0), -int(row[0].id or 0)))
+    if best_version.id == latest_version.id:
+        return None
+    recovery_version = ChapterVersion(
+        chapter_id=chapter.id,
+        version_number=next_version_number(session, chapter.id),
+        title=best_version.title,
+        content=best_version.content,
+        status="needs_revision",
+        source=f"revision_recovery:v{best_version.id}",
+    )
+    session.add(recovery_version)
+    session.flush()
+    for brief in session.scalars(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")):
+        brief.status = "superseded"
+    suggestion = _revision_trend_recovery_suggestion(
+        chapter_number=chapter_number,
+        reason=reason,
+        best_version=best_version,
+        best_quality=best_quality,
+        latest_version=latest_version,
+        best_report=best_report,
+    )
+    _feedback, _adjustment, recovery_brief, _version = submit_revision_suggestion(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        platform="system_revision_trend_recovery",
+        suggestion_text=suggestion,
+        revision_mode="targeted",
+    )
+    recovery_brief.goal = f"换策略修订第{chapter_number}章：以近期最佳稿 v{best_version.id} 为底稿，修复未通过项，不沿坏稿继续。"
+    recovery_brief.required_beats = "\n".join(
+        [
+            "system_revision_trend_recovery: detected",
+            f"恢复底稿：v{best_version.id} score={int(best_quality.score or 0)}；废弃劣化稿：v{latest_version.id}。",
+            "修订模式:targeted；不得 fresh，不得整章重写，不得继续沿最新劣化稿修。",
+            "本轮目标：保留近期最佳稿的主事件、场景顺序、人物行动链和章末方向，只修导致未通过的具体单元。",
+            "换策略要求：若上一轮靠扩大冲突失败，本轮改为增强场景可视化、人物反应递进、动作后果、对白声线和钩子落地。",
+        ]
+    )
+    recovery_brief.constraints = "\n".join(
+        [
+            recovery_brief.constraints or "",
+            "system_revision_trend_recovery: 自动趋势恢复，不向作者索要方向，系统先自行换策略处理。",
+            "禁止：追杀模板、现实机构关注、门派通缉、系统面板直接解题、冷硬装酷式精炼。",
+            "验收：self_check 必须说明从哪一版恢复、废弃了哪一版、具体换了什么修订策略。",
+        ]
+    )
+    sanitize_existing_chapter_brief(session, book_id=book_id, brief=recovery_brief)
+    session.flush()
+    return recovery_brief
+
+
+def _version_content_has_stale_context(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    content: str,
+) -> bool:
+    anchors = "\n".join(context_anchor_lines(session, book_id=book_id))
+    report = audit_context_contamination(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        brief_text=anchors,
+        canon_context=anchors,
+        previous_content=content or "",
+    )
+    return any("previous_content 含旧设定锚点" in blocker for blocker in report.blockers)
+
+
+def _recent_failed_quality_rows(
+    session: Session,
+    *,
+    chapter_id: int,
+    limit: int,
+) -> list[tuple[ChapterVersion, QualityReport, dict]]:
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.id.desc())
+            .limit(limit)
+        )
+    )
+    rows: list[tuple[ChapterVersion, QualityReport, dict]] = []
+    for version in versions:
+        quality = _latest_quality(session, version_id=version.id)
+        if quality and not quality.passed:
+            rows.append((version, quality, _loads_json(quality.report)))
+    return rows
+
+
+def _revision_trend_recovery_suggestion(
+    *,
+    chapter_number: int,
+    reason: str,
+    best_version: ChapterVersion,
+    best_quality: QualityReport,
+    latest_version: ChapterVersion,
+    best_report: dict,
+) -> str:
+    issues = [str(item) for item in (best_report.get("issues") or [])[:6]]
+    warnings = [str(item) for item in (best_report.get("warnings") or [])[:6]]
+    return "\n".join(
+        [
+            "system_revision_trend_recovery: detected",
+            f"第{chapter_number}章自动修订趋势劣化：{reason}",
+            f"恢复到近期最佳未通过稿 v{best_version.id} score={int(best_quality.score or 0)}，废弃最新劣化稿 v{latest_version.id}。",
+            "不要向作者索要方向；系统先换策略修。",
+            "不要继续沿最新劣化稿修；不要 fresh；不要整章重写；不要扩大俗套冲突。",
+            "保留恢复稿的主事件、场景顺序、人物行动链和章末方向。",
+            "只修明确未通过项：画面可视化、行动后果、对白丰满度、人物反应递进、章末钩子落地。",
+            "当前最佳稿问题：" + "；".join(issues) if issues else "当前最佳稿问题：按质量报告修复弱项。",
+            "当前最佳稿提醒：" + "；".join(warnings) if warnings else "",
+        ]
+    )
+
+
+def _recent_slow_revision_task_count(session: Session, *, book_id: int, chapter_number: int, limit: int) -> int:
+    tasks = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.book_id == book_id, GenerationTask.task_type == "revise_chapter")
+            .order_by(GenerationTask.id.desc())
+            .limit(limit * 3)
+        )
+    )
+    count = 0
+    seen = 0
+    for task in tasks:
+        input_data = _loads_json(task.input_json)
+        if int(input_data.get("chapter_number") or 0) != chapter_number:
+            continue
+        seen += 1
+        output_data = _loads_json(task.output_json)
+        elapsed = int(output_data.get("elapsed_ms") or 0)
+        total_tokens = int(output_data.get("actual_total_tokens") or 0)
+        prompt_chars = int(output_data.get("prompt_chars") or 0)
+        if elapsed >= 120_000 or total_tokens >= 15_000 or prompt_chars >= 18_000:
+            count += 1
+        if seen >= limit:
+            break
+    return count
+
+
+def _revision_loop_guard_suggestion(
+    *,
+    chapter_number: int,
+    quality: QualityReport,
+    failed_count: int,
+    slow_count: int,
+) -> str:
+    report = _loads_json(quality.report)
+    issues = [str(item) for item in (report.get("issues") or [])[:6]]
+    warnings = [str(item) for item in (report.get("warnings") or [])[:8]]
+    repair_contract = []
+    unit_report = report.get("chapter_unit_report") if isinstance(report.get("chapter_unit_report"), dict) else {}
+    if isinstance(unit_report, dict):
+        repair_contract = [str(item) for item in (unit_report.get("repair_contract") or [])[:5]]
+    rows = [
+        "system_revision_loop_guard: detected",
+        f"第{chapter_number}章已触发修订熔断：近期修订失败 {failed_count} 次，高耗时修订 {slow_count} 次。",
+        "不要继续 fresh/整章重写，也不要继续扩大旧小样合同。",
+        "保留当前稿中已经可用的主线、场景顺序、人物行动和章末方向，只做轻量修补。",
+        "优先处理当前质检阻断项：画面可视化、对白丰满度、本章目标覆盖、单元承接、动作后果。",
+        "只改失败单元、弱段落和明确问题句；不得重排整章结构，不得重新引入旧小样长文本。",
+    ]
+    if issues:
+        rows.append("当前阻断问题：" + "；".join(issues))
+    if warnings:
+        rows.append("当前优化提醒：" + "；".join(warnings))
+    if repair_contract:
+        rows.append("局部修复合同：" + "；".join(repair_contract))
+    return "\n".join(rows)
+
+
 def _publish_action(job: PublishJob | None) -> tuple[str, str]:
     if not job:
         return "create_publish_job", "approved version has no publish job"
@@ -476,13 +981,18 @@ def _chapter_brief_fields(
     required_beats: str = "",
     constraints: str = "",
 ) -> ChapterBriefFields:
+    dna = story_dna_for_book(session, book_id=book_id)
+    chapter_engine = chapter_engine_for_number(dna, chapter_number) if dna else ""
     arcs = arcs_for_chapter(session, book_id=book_id, chapter_number=chapter_number, limit=1)
     if not arcs:
+        beat_parts = [required_beats] if required_beats else []
+        if chapter_engine:
+            beat_parts.append(f"本章章节发动机:{chapter_engine}")
         return ChapterBriefFields(
             goal=f"{goal_prefix} 第{chapter_number}章",
-            required_beats=required_beats,
+            required_beats="，".join(_dedupe(_split_csv("，".join(beat_parts)))) if beat_parts else required_beats,
             constraints=ensure_chapter_production_standard(
-                constraints,
+                "，".join(_dedupe(_split_csv(constraints) + ([f"执行作品DNA章节发动机:{chapter_engine}"] if chapter_engine else []))),
                 chapter_number=chapter_number,
             ),
         )
@@ -502,6 +1012,7 @@ def _chapter_brief_fields(
 
     beat_parts = [
         f"剧情段阶段:{phase}",
+        f"本章章节发动机:{chapter_engine}" if chapter_engine else "",
         "压力",
         "选择",
         "代价",
@@ -519,6 +1030,7 @@ def _chapter_brief_fields(
     constraint_parts = [
         f"保持在第{arc.start_chapter}-{arc.end_chapter}章剧情段边界内",
         "不得偏离 Story Bible 和已登记 Canon",
+        f"执行作品DNA章节发动机:{chapter_engine}" if chapter_engine else "",
     ]
     constraint_parts.extend(_split_csv(constraints))
     return ChapterBriefFields(
@@ -557,6 +1069,8 @@ def _dedupe(items: list[str]) -> list[str]:
     seen = set()
     result = []
     for item in items:
+        if not item:
+            continue
         if item in seen:
             continue
         seen.add(item)
@@ -586,6 +1100,14 @@ def _latest_version(session: Session, *, chapter_id: int) -> ChapterVersion | No
 
 def _latest_quality(session: Session, *, version_id: int) -> QualityReport | None:
     return session.scalar(select(QualityReport).where(QualityReport.chapter_version_id == version_id).order_by(QualityReport.id.desc()))
+
+
+def _loads_json(value: str | None) -> dict:
+    try:
+        data = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _revision_brief_matches_quality(brief: ChapterBrief, quality: QualityReport) -> bool:

@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.automation.openclaw_ops import OpenClawPublishingOperator
-from app.models.entities import ChapterVersion, PublishExecution, PublishJob, PublishingTarget
+from app.models.entities import Chapter, ChapterVersion, PublishExecution, PublishJob, PublishingTarget
+from app.services.production_gate import assert_production_gate
 from app.services.publish_preflight import build_publish_preflight
 from app.workflows.state_machine import WorkflowError, move
 
@@ -15,6 +16,7 @@ def create_publish_job(session: Session, *, version_id: int, platform: str) -> P
     version = session.get(ChapterVersion, version_id)
     if not version:
         raise ValueError(f"chapter version not found: {version_id}")
+    _assert_publish_gate(session, version=version, action="create_publish_job")
     if version.status != "approved":
         raise ValueError("only approved chapter versions can create publish jobs")
     existing = session.scalar(
@@ -210,6 +212,7 @@ def publish_job_dry_run(session: Session, *, job_id: int) -> PublishJob:
     version = session.get(ChapterVersion, job.chapter_version_id)
     if not version:
         raise ValueError("publish job points to missing chapter version")
+    _assert_publish_gate(session, version=version, action="publish_job_dry_run")
     if version.status != "approved":
         raise ValueError("publish dry-run requires approved chapter version")
     payload = _loads_json(job.automation_payload)
@@ -231,9 +234,20 @@ def queue_publish_job(session: Session, *, job_id: int) -> PublishJob:
     job = session.get(PublishJob, job_id)
     if not job:
         raise ValueError(f"publish job not found: {job_id}")
+    version = session.get(ChapterVersion, job.chapter_version_id)
+    if not version:
+        raise ValueError("publish job points to missing chapter version")
+    _assert_publish_gate(session, version=version, action="queue_publish_job")
     job.status = move("publish_job", job.status, "queued", "queue_for_platform")
     session.flush()
     return job
+
+
+def _assert_publish_gate(session: Session, *, version: ChapterVersion, action: str) -> None:
+    chapter = session.get(Chapter, version.chapter_id)
+    if not chapter:
+        raise ValueError("chapter version points to missing chapter")
+    assert_production_gate(session, book_id=chapter.book_id, action=action)
 
 
 def mark_publish_job(session: Session, *, job_id: int, status: str, report: str = "") -> PublishJob:
@@ -257,6 +271,10 @@ def retry_publish_job(session: Session, *, job_id: int) -> PublishJob:
     job = session.get(PublishJob, job_id)
     if not job:
         raise ValueError(f"publish job not found: {job_id}")
+    version = session.get(ChapterVersion, job.chapter_version_id)
+    if not version:
+        raise ValueError("publish job points to missing chapter version")
+    _assert_publish_gate(session, version=version, action="retry_publish_job")
     job.status = move("publish_job", job.status, "queued", "retry")
     session.flush()
     return job

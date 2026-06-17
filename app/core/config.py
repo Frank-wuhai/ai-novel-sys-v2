@@ -55,6 +55,8 @@ class Settings:
     ark_vision_model: str = os.getenv("ARK_VISION_MODEL", "doubao-seed-2.0-lite")
     ark_image_model: str = os.getenv("ARK_IMAGE_MODEL", "doubao-seedream-5.0-lite")
     ark_video_model: str = os.getenv("ARK_VIDEO_MODEL", "doubao-seedance-2.0-fast")
+    auto_live_embedding: bool = _bool_env("AUTO_LIVE_EMBEDDING", True)
+    auto_live_embedding_max_chunks: int = _int_env("AUTO_LIVE_EMBEDDING_MAX_CHUNKS", 160)
     llm_require_coding_plan: bool = _bool_env("LLM_REQUIRE_CODING_PLAN", False)
     model_name: str = os.getenv("MODEL_NAME", "deepseek-v4-pro")
     llm_planning_model: str = os.getenv("LLM_PLANNING_MODEL", os.getenv("MODEL_NAME", "deepseek-v4-flash"))

@@ -40,12 +40,12 @@ def build_author_command_center(
         return _center(
             status="blocked",
             stage="setup",
-            headline="先修复生产准备度",
-            detail=blockers[0] if blockers else "生产门禁未通过。",
-            primary_label="查看并修复作品设定",
-            primary_intent="open_skeleton",
+            headline="生产前有打断项",
+            detail=_author_blocker_detail(blockers[0] if blockers else "生产门禁未通过。"),
+            primary_label="自动处理打断项",
+            primary_intent="auto_resolve_blocker",
             blockers=blockers,
-            next_actions=["先处理生产门禁，再进入章节生产。"],
+            next_actions=["让系统先处理可自动修复的准备项；若需要确认设定草案，系统会只保留一个确认入口。"],
         )
     if running:
         return _center(
@@ -77,10 +77,10 @@ def build_author_command_center(
             stage="diagnose",
             headline="有生成任务需要处理",
             detail=f"{chapter_text}的{type_text}失败：{error_text}",
-            primary_label="查看处理建议",
-            primary_intent="inspect_failure",
+            primary_label="自动处理打断项",
+            primary_intent="auto_resolve_blocker",
             blockers=["generation_queue_failed"],
-            next_actions=["在写作台的“卡在哪里”里重试或取消失败任务。"],
+            next_actions=["系统会优先重试可恢复的失败任务；不能自动处理时只给出一个下一步。"],
             failed_tasks=failed_tasks,
         )
     if not current:
@@ -180,11 +180,24 @@ def _center(
             "intent": primary_intent,
             "target_chapter_number": target_chapter_number,
         },
-        "secondary_actions": ["作品设定", "修改与审批", "后台诊断"],
+        "secondary_actions": ["作品设定", "写修改意见", "后台排错"],
         "blockers": blockers or [],
         "next_actions": next_actions or [],
         "failed_tasks": failed_tasks or [],
     }
+
+
+def _author_blocker_detail(value: str) -> str:
+    text = str(value or "")
+    if "skeleton" in text or "story_bible" in text or "StoryBible" in text or "骨架" in text:
+        return "作品设定需要整理。系统会先生成修复草案；需要你确认时，只需点“保存并启用”。"
+    if "semantic_memory" in text or "语义" in text:
+        return "语义记忆需要重建。系统可以自动处理。"
+    if "evidence" in text or "市场" in text:
+        return "生产证据不足。系统可以自动补齐本地证据并继续。"
+    if "canon" in text or "Canon" in text:
+        return "长期设定需要整理。系统会先尝试自动补齐。"
+    return "系统检测到生产前阻断，会先尝试自动处理可修复项。"
 
 
 def _active_failed_tasks(session: Session, *, book_id: int, limit: int = 5) -> list[dict[str, Any]]:
