@@ -149,6 +149,7 @@ def maybe_apply_editorial_stratification(
     stratification = stratify_quality_report(report_data)
     report_data["editorial_stratification"] = stratification.to_dict()
     report_data["editorial_guidance"] = build_editorial_guidance(stratification)
+    report_data["editor_in_chief"] = build_editor_in_chief_report(stratification, report_data)
     quality.report = json.dumps(report_data, ensure_ascii=False)
     if not stratification.should_auto_revise:
         session.flush()
@@ -253,6 +254,104 @@ def build_editorial_guidance(stratification: EditorialStratification) -> dict:
         "revision_depth": "approve",
         "preserve_policy": "不自动修订。",
     }
+
+
+def build_editor_in_chief_report(stratification: EditorialStratification, report_data: dict) -> dict:
+    dimensions = report_data.get("dimensions") if isinstance(report_data.get("dimensions"), dict) else {}
+    review = report_data.get("llm_review") if isinstance(report_data.get("llm_review"), dict) else {}
+    weakest = _weakest_dimensions(dimensions)
+    strengths = [str(item) for item in review.get("strengths") or []] or stratification.preserve[:4]
+    issues = [str(item) for item in review.get("issues") or []] or stratification.blockers[:4]
+    suggestions = [str(item) for item in review.get("revision_suggestions") or []] or stratification.elevate[:4]
+    return {
+        "status": "ready",
+        "draft_level": stratification.label,
+        "decision": _chief_decision(stratification),
+        "largest_problem": _largest_problem(weakest, issues),
+        "preserve": strengths[:5],
+        "minimum_effective_revision": _minimum_effective_revision(stratification, weakest, suggestions),
+        "forbidden_revision": stratification.forbidden[:6],
+        "acceptance_checks": _chief_acceptance_checks(stratification, weakest),
+        "source": "llm_review+rule_quality" if review.get("status") == "completed" else "rule_quality",
+    }
+
+
+def _chief_decision(stratification: EditorialStratification) -> str:
+    if stratification.tier == TIER_CONTAMINATED:
+        return "先清污染，不修正文。"
+    if stratification.tier == TIER_REBUILD:
+        return "回到骨架重建，不沿坏稿继续。"
+    if stratification.tier == TIER_PROBLEM_DRAFT:
+        return "定点修阻断，暂不升华。"
+    if stratification.tier == TIER_SOLID_DRAFT:
+        return "保留底稿，逐场升华。"
+    if stratification.tier == TIER_NEAR_FINAL:
+        return "只做轻润色或等待审批。"
+    return "进入最终确认。"
+
+
+def _weakest_dimensions(dimensions: dict) -> list[dict]:
+    rows = [
+        {"name": str(name), "score": int(score or 0), "label": _dimension_label(str(name))}
+        for name, score in dimensions.items()
+        if isinstance(score, int) or str(score).isdigit()
+    ]
+    return sorted(rows, key=lambda item: item["score"])[:6]
+
+
+def _largest_problem(weakest: list[dict], issues: list[str]) -> str:
+    if weakest:
+        item = weakest[0]
+        return f"{item['label']}不足，当前 {item['score']} 分。"
+    return issues[0] if issues else "没有明显阻断，重点检查读者追读感。"
+
+
+def _minimum_effective_revision(stratification: EditorialStratification, weakest: list[dict], suggestions: list[str]) -> list[str]:
+    rows: list[str] = []
+    for item in weakest[:3]:
+        label = item["label"]
+        if item["name"] in {"dialogue_fullness", "character_voice"}:
+            rows.append(f"补强{label}：让关键对白承担试探、遮掩、交易或情绪变化。")
+        elif item["name"] in {"scene_atmosphere", "visual_staging", "imageable_paragraphs", "scene_expansion"}:
+            rows.append(f"补强{label}：把概括词改成空间、物件、动作、感官和现场后果。")
+        elif item["name"] in {"brief_coverage", "author_intent"}:
+            rows.append(f"补强{label}：把本章承诺写进具体场景，不只在说明里出现。")
+        else:
+            rows.append(f"补强{label}：只修最低分单元，保留已经成立的主事件。")
+    rows.extend(suggestions[:3])
+    if not rows:
+        rows.append(stratification.summary)
+    return list(dict.fromkeys(rows))[:6]
+
+
+def _chief_acceptance_checks(stratification: EditorialStratification, weakest: list[dict]) -> list[str]:
+    checks = [
+        "下一版不得出现质检术语、系统字段或修订合同文本。",
+        "合格段落只做轻调，不为追求变化而重写。",
+    ]
+    if stratification.tier == TIER_SOLID_DRAFT:
+        checks.append("必须说明保留了源版本哪些主事件、场景顺序和章末事实。")
+    for item in weakest[:3]:
+        checks.append(f"{item['label']}必须在正文中有可见改善。")
+    return checks[:6]
+
+
+def _dimension_label(name: str) -> str:
+    labels = {
+        "readability": "可读性",
+        "author_intent": "作者意图承接",
+        "prose_voice": "笔触声音",
+        "dialogue_fullness": "对白丰满度",
+        "character_voice": "人物声线",
+        "scene_atmosphere": "场景氛围",
+        "brief_coverage": "章节承诺覆盖",
+        "reader_momentum": "阅读牵引",
+        "hook_strength": "章末钩子",
+        "scene_expansion": "场景展开",
+        "visual_staging": "画面调度",
+        "imageable_paragraphs": "可画面化段落",
+    }
+    return labels.get(name, name)
 
 
 def maybe_rollback_failed_elevation(

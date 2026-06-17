@@ -62,6 +62,7 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
             *_revision_issue_beats(issues),
             *_chapter_unit_beats(quality_data),
             *_llm_review_diagnostic_beats(llm_review),
+            *_editor_in_chief_beats(quality_data),
             *local_revision_brief_lines(quality_data, chapter_number=chapter_number),
         ]
     )
@@ -413,6 +414,27 @@ def _llm_review_diagnostic_beats(llm_review: dict) -> list[str]:
     if llm_review.get("risk_flags"):
         beats.append("重新检查连续性、平台可读性、爽点节奏和章末钩子风险；具体处理以最新生产骨架和人工意见为准")
     return beats
+
+
+def _editor_in_chief_beats(quality_data: dict) -> list[str]:
+    chief = quality_data.get("editor_in_chief") if isinstance(quality_data.get("editor_in_chief"), dict) else {}
+    if not chief:
+        return []
+    rows: list[str] = []
+    decision = str(chief.get("decision") or "").strip()
+    largest = str(chief.get("largest_problem") or "").strip()
+    if decision:
+        rows.append(f"主编裁决：{decision}")
+    if largest:
+        rows.append(f"最大问题：{largest}")
+    for item in (chief.get("minimum_effective_revision") or [])[:4]:
+        rows.append(f"最小有效修法：{item}")
+    forbidden = "；".join(str(item) for item in (chief.get("forbidden_revision") or [])[:5])
+    if forbidden:
+        rows.append(f"禁止修法：{forbidden}")
+    for item in (chief.get("acceptance_checks") or [])[:3]:
+        rows.append(f"主编验收：{item}")
+    return rows
 
 
 def _latest_story_brief_for_revision(session: Session, *, chapter: Chapter) -> ChapterBrief | None:

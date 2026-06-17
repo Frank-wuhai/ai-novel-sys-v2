@@ -12,6 +12,7 @@ from app.services.llm_queue import build_generation_queue_health
 from app.services.planning import AUTO_ACTIONS, plan_chapters, run_next_action
 from app.services.production_control import build_production_control_report
 from app.services.readiness import check_production_readiness
+from app.services.status_language import author_status_text
 from app.services.story_alignment import build_story_alignment_audit
 
 
@@ -285,10 +286,10 @@ def _result(
 def _blocked_author_state(blockers: list[str]) -> tuple[str, str, str, str]:
     merged = "\n".join(blockers)
     if any(marker in merged for marker in ("骨架", "StoryFoundation", "StoryBible", "核心设定源", "skeleton")):
-        return ("作品设定需要修复", "当前设定里还有会影响后续正文方向的冲突或旧内容。系统会先生成修复草案。", "自动处理打断项", "auto_resolve_blocker")
+        return ("作品设定需要修复", author_status_text(merged), "自动处理打断项", "auto_resolve_blocker")
     if "evidence" in merged or "market" in merged or "市场" in merged:
-        return ("需要补齐生产准备", "当前作品缺少必要的市场/证据准备，系统会先自动补齐可处理项。", "自动处理打断项", "auto_resolve_blocker")
-    return ("需要处理生产阻断", "系统发现继续生产会跑偏的阻断项，会先尝试自动处理。", "自动处理打断项", "auto_resolve_blocker")
+        return ("需要补齐生产准备", author_status_text(merged), "自动处理打断项", "auto_resolve_blocker")
+    return ("需要处理生产阻断", author_status_text(merged), "自动处理打断项", "auto_resolve_blocker")
 
 
 def _repairable_brief_chapters(blockers: list[str], *, fallback: int) -> list[int]:

@@ -70,6 +70,10 @@ def main() -> int:
         run(["author-command-center", "--book-id", str(book_id), "--chapter-number", "1", "--start", "1", "--count", "1"])
     )
     assert_center(before, status="blocked", intent="auto_resolve_blocker")
+    if any(marker in before.get("detail", "") for marker in ("StoryBible", "StoryFoundation", "brief", "canon", "_")):
+        print("command center leaked internal blocker detail")
+        print(json.dumps(before, ensure_ascii=False, indent=2, sort_keys=True))
+        raise SystemExit(1)
 
     preview = json.loads(run(["repair-production-scaffold", "--book-id", str(book_id)]))
     if preview.get("mode") != "preview":
@@ -80,6 +84,10 @@ def main() -> int:
         run(["author-command-center", "--book-id", str(book_id), "--chapter-number", "1", "--start", "1", "--count", "1"])
     )
     assert_center(still_blocked, status="blocked", intent="auto_resolve_blocker")
+    if not still_blocked.get("next_actions") or "点击主按钮" not in still_blocked["next_actions"][0]:
+        print("command center did not provide author-facing next action")
+        print(json.dumps(still_blocked, ensure_ascii=False, indent=2, sort_keys=True))
+        raise SystemExit(1)
 
     run(["repair-production-scaffold", "--book-id", str(book_id), "--apply"])
     run(

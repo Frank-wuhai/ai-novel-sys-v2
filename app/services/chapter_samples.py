@@ -905,6 +905,9 @@ Canon 与世界规则：
 
 小样要求：
 - focus={focus}。每个小样写 350-550 个中文字符的“可直接放进正文的开场/关键场景片段”，不是提纲。
+- 每个 opening 必须满足可用小样底线：有主角短期目标、现场阻碍、至少两处身体/感官反应、一个可见证据、一次局面变化和一个能扩成整章的后续诱因。
+- 如果某个小样只能概括“气质/氛围/规则”，却没有人物互动、阻碍变化和收益代价，它就是失败小样。
+- 三个小样必须分别测试不同“整章发动机”：例如关系交易、规则误判、身体异变、门槛考验、利益交换、道德选择、信息错认；不得都靠盘问、追杀、欠账、机构关注或系统提示制造推进。
 - 本轮目标是探索，不是复刻已采用小样。采用记录只代表试写历史，不代表作者偏好；除非人工明确验证，否则不得学习为固定模板。
 - 三个小样必须先各自声明 exploration_axis 和 experiment_hypothesis：分别测试不同叙事发动机，例如人物处境、关系压力、规则误判、场景奇观、道德选择、信息悬疑；不得只是三个不同地点的同一套开场。
 - 三个小样必须先在脑中完成“发动机分配”：短期目标、主压力、配角功能、秘密来源、章末诱因五项不能成套复用。若两个小样都靠欠账/盘问/追杀/演技观察推动，即为失败。
@@ -1134,6 +1137,7 @@ def _sample_retry_feedback(report: dict, samples: list[dict], *, director: dict 
     director = director or {}
     director_lines = [str(item) for item in director.get("rewrite_directives", [])[:6]]
     blocked_lines = [str(item) for item in director.get("blocked_patterns", [])[:6]]
+    quality_lines = [str(item) for item in report.get("retry_directives", [])[:8]]
     return "\n".join(
         [
             f"- 上轮分数：{int(report.get('score') or 0)}/{SAMPLE_DIVERSITY_THRESHOLD}",
@@ -1143,6 +1147,7 @@ def _sample_retry_feedback(report: dict, samples: list[dict], *, director: dict 
             *motif_lines,
             *[f"- 编辑导演单：{item}" for item in director_lines],
             *[f"- 避免复刻：{item}" for item in blocked_lines],
+            *[f"- 可用性修复：{item}" for item in quality_lines],
             "- 下一轮不要复刻这些标题、入口、职业困境、盘问结构、追杀坠崖、人情交易和规矩打脸组合；已登记设定可以保留，但不能当偷懒解法。",
         ]
     )
@@ -1245,6 +1250,7 @@ def _sample_diversity_report(samples: list[dict]) -> dict:
     score = max(0, min(100, score))
     if not usable_sample_indices:
         issues.append("no_usable_sample")
+    retry_directives = _sample_retry_directives(sample_scores, repeated_motifs)
     status = "pass" if score >= 65 and not issues else "attention"
     if status != "pass" and score >= 65 and recommended_sample:
         status = "usable"
@@ -1263,6 +1269,13 @@ def _sample_diversity_report(samples: list[dict]) -> dict:
             recommended_sample=recommended_sample,
             repeated_motifs=repeated_motifs,
         ),
+        "usable_requirements": [
+            "opening 必须达到 350-550 中文字符，并包含短期目标、现场阻碍、身体/感官反应、可见证据和一个局面变化。",
+            "每个小样必须能扩展成整章：至少有场景推进、人物互动、收益代价和章末诱因。",
+            "不得只换地点/道具复刻同一套盘问、追杀、欠账、奇遇或机构关注结构。",
+        ],
+        "retry_directives": retry_directives,
+        "failure_reasons": _sample_failure_reasons(sample_scores, issues),
         "experiments": experiments,
         "axes": axes,
         "issues": issues,
@@ -1314,6 +1327,12 @@ def _sample_quality_score(sample: dict, *, motifs: set[str], repeated_motifs: se
     if len(opening) < 260:
         score -= 10
         issues.append("opening_too_thin")
+    if not _opening_has_scene_change(opening):
+        score -= 8
+        issues.append("missing_scene_turn")
+    if not _opening_has_embodied_pov(opening):
+        score -= 8
+        issues.append("missing_embodied_pov")
     if len(motifs) < 2:
         score -= 8
         issues.append("motif_too_sparse")
@@ -1328,6 +1347,43 @@ def _sample_quality_score(sample: dict, *, motifs: set[str], repeated_motifs: se
         "score": max(0, min(100, score)),
         "issues": issues,
     }
+
+
+def _sample_retry_directives(sample_scores: list[dict], repeated_motifs: list[str]) -> list[str]:
+    issue_set = {str(issue) for row in sample_scores for issue in (row.get("issues") or [])}
+    rows: list[str] = []
+    if "opening_too_thin" in issue_set:
+        rows.append("下一轮 opening 不得写成提纲式片段，必须扩展到 350-550 中文字符。")
+    if "missing_scene_turn" in issue_set:
+        rows.append("每个 opening 必须出现一次局面变化：被拒、误判、交换、暴露、受伤、得失或新线索。")
+    if "missing_embodied_pov" in issue_set:
+        rows.append("每个 opening 至少写两处角色身体反应、感官输入或误判修正。")
+    if "motif_too_sparse" in issue_set:
+        rows.append("小样不能只有一个概念，必须有具体场域、人物关系、阻碍和章末诱因。")
+    if "shares_repeated_motif" in issue_set or repeated_motifs:
+        rows.append("重排三个小样的发动机，避免复用：" + "、".join(repeated_motifs[:6]))
+    if any(str(issue).startswith("missing:") for issue in issue_set):
+        rows.append("补齐 exploration_axis、experiment_hypothesis、difference、去AI味、视角和准确性策略。")
+    return rows or ["下一轮保持差异度，同时把每个小样写成可直接扩展为整章的正文片段。"]
+
+
+def _sample_failure_reasons(sample_scores: list[dict], issues: list[str]) -> list[str]:
+    rows = [str(item) for item in issues[:6]]
+    for score in sample_scores:
+        sample_issues = "、".join(str(item) for item in (score.get("issues") or [])[:4])
+        if sample_issues:
+            rows.append(f"样本{score.get('index')}：{sample_issues}")
+    return rows[:10]
+
+
+def _opening_has_scene_change(text: str) -> bool:
+    markers = ("却", "忽然", "只见", "转身", "递", "拒", "问", "喊", "响", "痛", "烫", "倒", "推", "拦", "露出")
+    return any(marker in text for marker in markers)
+
+
+def _opening_has_embodied_pov(text: str) -> bool:
+    markers = ("掌心", "指尖", "胸口", "喉", "背", "汗", "冷", "热", "疼", "痛", "麻", "烫", "闻", "听", "看见", "盯")
+    return sum(1 for marker in markers if marker in text) >= 2
 
 
 def _sample_motifs(text: str) -> set[str]:

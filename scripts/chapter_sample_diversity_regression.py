@@ -51,9 +51,15 @@ def main() -> int:
         and "句段节奏" in adopted_text
         and "场景展开" in adopted_text
     )
+    sample_retry_ok = bool(report.get("retry_directives")) and bool(report.get("usable_requirements"))
     status = (
         "pass"
-        if not latest_failed and score >= args.min_score and not report.get("issues") and no_usable_guard_ok and adoption_fingerprint_ok
+        if not latest_failed
+        and score >= args.min_score
+        and not report.get("issues")
+        and no_usable_guard_ok
+        and adoption_fingerprint_ok
+        and sample_retry_ok
         else "attention"
     )
     print(
@@ -71,6 +77,7 @@ def main() -> int:
                 "diversity_report": report,
                 "no_usable_guard": no_usable_report,
                 "adoption_fingerprint_ok": adoption_fingerprint_ok,
+                "sample_retry_ok": sample_retry_ok,
                 "attention_explanation": _attention_explanation(latest=latest, report=report, threshold=args.min_score),
                 "trial_impact": "blocks_trial" if latest_failed else ("safe_to_trial_with_review" if status == "attention" else "safe_to_trial"),
             },

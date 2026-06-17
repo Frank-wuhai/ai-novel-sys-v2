@@ -88,6 +88,13 @@ def main() -> int:
             failures.append("quality_report_missing_revision_depth")
         if "不推翻重写" not in guidance.get("decision", ""):
             failures.append("quality_guidance_does_not_protect_solid_draft")
+        chief = quality_data.get("editor_in_chief") if isinstance(quality_data.get("editor_in_chief"), dict) else {}
+        if chief.get("draft_level") != "合格底稿":
+            failures.append("editor_in_chief_missing_draft_level")
+        if "保留底稿" not in chief.get("decision", ""):
+            failures.append("editor_in_chief_missing_preserve_decision")
+        if not chief.get("minimum_effective_revision") or not chief.get("acceptance_checks"):
+            failures.append("editor_in_chief_missing_actionable_contract")
 
         failed_version = ChapterVersion(
             chapter_id=chapter.id,

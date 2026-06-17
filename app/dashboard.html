@@ -2704,6 +2704,7 @@
       const quality = detail.latest_quality;
       const qualityData = quality?.data || {};
       const review = qualityData.llm_review || {};
+      const chief = qualityData.editor_in_chief || {};
       const canApprove = canApproveCurrentChapter(chapter, latest, quality);
       const approveLabel = chapter?.next_action === 'record_chapter_continuity' ? '回写连续性并采用当前章' : '采用当前章，进入发布准备';
       const title = latest.title || detail.chapter.title || `第${detail.chapter.number}章`;
@@ -2721,6 +2722,7 @@
                 <div class="timeline-item"><span>推荐</span><b>${escapeHtml(editorRecommendation(review))}</b></div>
               </div>
               ${renderQualityConsistency(chapter, latest, quality)}
+              ${renderEditorInChief(chief)}
               ${renderQualityDetail(qualityData)}
               ${renderLLMReview(review)}
               <pre class="chapter-text">${escapeHtml(latest.content || '')}</pre>
@@ -2758,6 +2760,23 @@
           <div class="timeline-item"><span>质检</span><b>暂无</b></div>
           <div class="timeline-item"><span>主编审稿</span><b>暂无</b></div>
           <div class="timeline-item"><span>建议动作</span><b>回写作台</b></div>
+        </div>`;
+    }
+
+    function renderEditorInChief(chief) {
+      if (!chief || chief.status !== 'ready') return '';
+      const revisions = (chief.minimum_effective_revision || []).slice(0, 4);
+      const checks = (chief.acceptance_checks || []).slice(0, 4);
+      return `
+        <div class="subtle-panel">
+          <h4>主编判断</h4>
+          <div class="timeline">
+            <div class="timeline-item"><span>稿件层级</span><b>${escapeHtml(chief.draft_level || '未分层')}</b></div>
+            <div class="timeline-item"><span>处理方式</span><b>${escapeHtml(chief.decision || '等待判断')}</b></div>
+            <div class="timeline-item"><span>最大问题</span><b>${escapeHtml(chief.largest_problem || '暂无')}</b></div>
+          </div>
+          ${chips('最小有效修法', revisions)}
+          ${chips('验收点', checks)}
         </div>`;
     }
 

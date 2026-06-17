@@ -11,6 +11,7 @@ from app.models.entities import Book, GenerationTask
 from app.services.llm_queue import QUEUE_TYPES
 from app.services.planning import AUTO_ACTIONS, plan_chapters
 from app.services.readiness import check_production_readiness
+from app.services.status_language import author_next_action_text, author_status_text
 
 
 def build_author_command_center(
@@ -37,15 +38,16 @@ def build_author_command_center(
 
     if not readiness.passed:
         blockers = [f"{item.name}: {item.detail}" for item in readiness.blockers]
+        detail = author_status_text(blockers[0] if blockers else "生产门禁未通过。")
         return _center(
             status="blocked",
             stage="setup",
             headline="生产前有打断项",
-            detail=_author_blocker_detail(blockers[0] if blockers else "生产门禁未通过。"),
+            detail=detail,
             primary_label="自动处理打断项",
             primary_intent="auto_resolve_blocker",
             blockers=blockers,
-            next_actions=["让系统先处理可自动修复的准备项；若需要确认设定草案，系统会只保留一个确认入口。"],
+            next_actions=[author_next_action_text(detail)],
         )
     if running:
         return _center(
@@ -71,16 +73,16 @@ def build_author_command_center(
         first = failed_tasks[0] if failed_tasks else {}
         chapter_text = f"第 {first.get('chapter_number')} 章" if first.get("chapter_number") else "未知章节"
         type_text = _task_type_label(str(first.get("task_type") or ""))
-        error_text = str(first.get("error") or first.get("error_category") or "未记录具体错误")
+        error_text = author_status_text(str(first.get("error") or first.get("error_category") or "未记录具体错误"))
         return _center(
             status="blocked",
             stage="diagnose",
             headline="有生成任务需要处理",
-            detail=f"{chapter_text}的{type_text}失败：{error_text}",
+            detail=f"{chapter_text}的{type_text}需要处理：{error_text}",
             primary_label="自动处理打断项",
             primary_intent="auto_resolve_blocker",
             blockers=["generation_queue_failed"],
-            next_actions=["系统会优先重试可恢复的失败任务；不能自动处理时只给出一个下一步。"],
+            next_actions=[author_next_action_text(error_text)],
             failed_tasks=failed_tasks,
         )
     if not current:
@@ -130,30 +132,30 @@ def build_author_command_center(
             status="can_produce",
             stage="produce",
             headline="可以继续生产当前章",
-            detail=current.reason,
+            detail=author_status_text(current.reason),
             primary_label="生产到可读稿",
             primary_intent="continue",
-            next_actions=[current.reason],
+            next_actions=[author_next_action_text(current.reason)],
         )
     if auto_item:
         return _center(
             status="can_produce",
             stage="produce",
             headline=f"当前章需人工处理，可先推进第 {auto_item.chapter_number} 章",
-            detail=auto_item.reason,
+            detail=author_status_text(auto_item.reason),
             primary_label=f"切到第 {auto_item.chapter_number} 章继续",
             primary_intent="continue_auto_chapter",
             target_chapter_number=auto_item.chapter_number,
-            next_actions=[auto_item.reason],
+            next_actions=[author_next_action_text(auto_item.reason)],
         )
     return _center(
         status="idle",
         stage="idle",
         headline="当前范围暂无可自动推进事项",
-        detail=current.reason,
+        detail=author_status_text(current.reason),
         primary_label="刷新状态",
         primary_intent="refresh",
-        next_actions=[current.reason],
+        next_actions=[author_next_action_text(current.reason)],
     )
 
 
