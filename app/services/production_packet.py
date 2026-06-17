@@ -12,6 +12,7 @@ from app.services.aesthetic_profile import profile_from_story_text
 from app.services.agent_plan_intelligence import format_semantic_memory_context
 from app.services.author_workbench import build_author_workbench_report
 from app.services.bias import build_bias_guard_block
+from app.services.book_aesthetic_standard import build_book_aesthetic_standard
 from app.services.canon import format_canon_context
 from app.services.chapter_unit_plans import ensure_chapter_unit_plan, format_chapter_unit_plan
 from app.services.chapter_standards import ensure_chapter_production_standard
@@ -43,6 +44,7 @@ class ChapterProductionPacket:
     chapter_unit_plan_id: int | None
     chapter_unit_plan: dict
     production_pattern_memory: dict
+    book_aesthetic_standard: dict
     market_signal_ids: list[int]
     canon_refs: dict[str, list[int]]
     semantic_memory_ids: list[int]
@@ -73,6 +75,7 @@ class ChapterProductionPacket:
             "chapter_unit_plan_id": self.chapter_unit_plan_id,
             "chapter_unit_plan": self.chapter_unit_plan,
             "production_pattern_memory": self.production_pattern_memory,
+            "book_aesthetic_standard": self.book_aesthetic_standard,
             "production_context_audit": self.context.audit,
             "production_packet_audit": self.audit,
         }
@@ -197,6 +200,7 @@ def build_chapter_production_packet(
         chapter_number=chapter_number,
         limit=8,
     )
+    book_aesthetic_standard = build_book_aesthetic_standard(session, book_id=book.id)
     naming_governance_block = build_naming_governance_block(
         session,
         book_id=book.id,
@@ -278,6 +282,7 @@ def build_chapter_production_packet(
             mode=mode,
             source="production_packet",
             pattern_memory=production_pattern_memory,
+            aesthetic_standard=book_aesthetic_standard.to_dict(),
         )
         chapter_unit_plan_id = chapter_unit_plan.id
         try:
@@ -291,6 +296,7 @@ def build_chapter_production_packet(
         for item in [
             director_sheet,
             aesthetic_profile,
+            book_aesthetic_standard.prompt_block(),
             dna_block,
             chapter_unit_plan_block,
             format_production_pattern_memory(production_pattern_memory),
@@ -319,6 +325,8 @@ def build_chapter_production_packet(
         "chapter_unit_plan_id": chapter_unit_plan_id,
         "chapter_unit_plan_units": len(chapter_unit_plan_payload.get("units") or []),
         "production_pattern_memory_reviews": production_pattern_memory.get("source_review_count", 0),
+        "book_aesthetic_standard": book_aesthetic_standard.status,
+        "book_taste_memory_count": len(book_aesthetic_standard.taste_memory),
         "aesthetic_profile": bool(aesthetic_profile),
         "story_dna": bool(story_dna),
         "chapter_engine": chapter_engine,
@@ -340,6 +348,7 @@ def build_chapter_production_packet(
         chapter_unit_plan_id=chapter_unit_plan_id,
         chapter_unit_plan=chapter_unit_plan_payload,
         production_pattern_memory=production_pattern_memory,
+        book_aesthetic_standard=book_aesthetic_standard.to_dict(),
         market_signal_ids=market_signal_ids,
         canon_refs=canon_refs,
         semantic_memory_ids=semantic_memory_ids,

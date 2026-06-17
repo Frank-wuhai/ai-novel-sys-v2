@@ -50,6 +50,7 @@ def ensure_chapter_unit_plan(
     mode: str = "draft",
     source: str = "system",
     pattern_memory: dict[str, Any] | None = None,
+    aesthetic_standard: dict[str, Any] | None = None,
 ) -> ChapterUnitPlan:
     existing = session.scalar(
         select(ChapterUnitPlan)
@@ -68,6 +69,7 @@ def ensure_chapter_unit_plan(
         previous_chapter_context=previous_chapter_context,
         mode=mode,
         pattern_memory=pattern_memory,
+        aesthetic_standard=aesthetic_standard,
     )
     if existing and _loads(existing.plan_json) == payload:
         return existing
@@ -94,6 +96,7 @@ def build_chapter_unit_plan_payload(
     previous_chapter_context: str = "",
     mode: str = "draft",
     pattern_memory: dict[str, Any] | None = None,
+    aesthetic_standard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     beats = _split_beats(required_beats)
     if not beats:
@@ -110,6 +113,7 @@ def build_chapter_unit_plan_payload(
             constraints=constraints,
             mode=mode,
             total=unit_count,
+            aesthetic_standard=aesthetic_standard,
         ).to_dict()
         for index, beat in enumerate(selected, start=1)
     ]
@@ -122,12 +126,14 @@ def build_chapter_unit_plan_payload(
         "chapter_goal": _one_line(goal, 220),
         "units": units,
         "pattern_memory": _compact_pattern_memory(pattern_memory),
+        "aesthetic_standard": _compact_aesthetic_standard(aesthetic_standard),
         "acceptance": [
             "正文不显示单元编号，但实际段落推进必须能对应这些单元。",
             "每个单元都有小目标、阻碍、可见动作、人物反应、信息增量和承接点。",
             "后一单元必须承接前一单元动作后果，不跳成剧情梗概。",
             "章末单元必须由本章行动自然引出新危险、新发现或未解决压力。",
             *_pattern_acceptance(pattern_memory),
+            *_aesthetic_acceptance(aesthetic_standard),
         ],
     }
 
@@ -198,6 +204,7 @@ def _planned_unit(
     constraints: str,
     mode: str,
     total: int,
+    aesthetic_standard: dict[str, Any] | None = None,
 ) -> PlannedChapterUnit:
     role = _role(index, total)
     compact_beat = _one_line(beat, 130)
@@ -229,7 +236,7 @@ def _planned_unit(
         goal=_goal_from_beat(compact_beat, fallback=goal),
         obstacle=_obstacle_from_text(compact_beat + constraints) or "具体人物、环境、伤势、利益或误判形成阻碍",
         action=_action_for_index(index, mode=mode),
-        reaction="人物必须有可见反应：犹豫、试探、疼痛、怀疑、愤怒、沉默或临场找补",
+        reaction=_unit_reaction(aesthetic_standard),
         info_gain=compact_beat,
         handoff="单元末让局面微变，并把后果递给下一单元",
     )
@@ -351,8 +358,36 @@ def _compact_pattern_memory(memory: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _compact_aesthetic_standard(standard: dict[str, Any] | None) -> dict[str, Any]:
+    if not standard:
+        return {}
+    return {
+        "narrative_flavor": [str(item) for item in (standard.get("narrative_flavor") or [])[:3]],
+        "scene_density": [str(item) for item in (standard.get("scene_density") or [])[:3]],
+        "forbidden_tone": [str(item) for item in (standard.get("forbidden_tone") or [])[:4]],
+    }
+
+
 def _pattern_acceptance(memory: dict[str, Any] | None) -> list[str]:
     if not memory or int(memory.get("source_review_count") or 0) <= 0:
         return []
     rows = [str(item) for item in (memory.get("recommendations") or [])[:4]]
     return [f"复盘避坑：{item}" for item in rows if item]
+
+
+def _aesthetic_acceptance(standard: dict[str, Any] | None) -> list[str]:
+    compact = _compact_aesthetic_standard(standard)
+    rows: list[str] = []
+    for item in compact.get("scene_density") or []:
+        rows.append(f"审美密度：{item}")
+    forbidden = "、".join(compact.get("forbidden_tone") or [])
+    if forbidden:
+        rows.append(f"禁止笔触：{forbidden}")
+    return rows[:4]
+
+
+def _unit_reaction(standard: dict[str, Any] | None) -> str:
+    compact = _compact_aesthetic_standard(standard)
+    if any("烟火" in item or "热闹" in item for item in compact.get("narrative_flavor") or []):
+        return "人物必须有可见反应：犹豫、试探、疼痛、嘴硬、吐槽、讨价还价或临场找补"
+    return "人物必须有可见反应：犹豫、试探、疼痛、怀疑、愤怒、沉默或临场找补"

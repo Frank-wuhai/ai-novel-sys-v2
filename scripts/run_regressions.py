@@ -50,6 +50,7 @@ def main() -> int:
             ("writing_intelligence", ["scripts/writing_intelligence_regression.py"]),
             ("expression_precision", ["scripts/expression_precision_regression.py"]),
             ("aesthetic_profile", ["scripts/aesthetic_profile_regression.py"]),
+            ("book_aesthetic_standard", ["scripts/book_aesthetic_standard_regression.py"]),
             ("book2_style_flow", ["scripts/book2_style_flow_regression.py"]),
             ("story_dna_workflow", ["scripts/story_dna_workflow_regression.py"]),
             ("story_dna_isolation", ["scripts/story_dna_isolation_regression.py"]),

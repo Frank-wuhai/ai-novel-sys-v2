@@ -28,6 +28,7 @@ from app.services.production_run_review import record_production_run_review
 from app.services.production_state import brief_has_revision_artifacts, latest_foundation, latest_story_brief, next_version_number
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.services.quality import chinese_chars
+from app.services.paragraph_aesthetic import format_paragraph_aesthetic_contract
 from app.services.writer_loop import build_writer_loop_plan, local_revision_brief_lines
 
 
@@ -63,6 +64,7 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
             *_chapter_unit_beats(quality_data),
             *_llm_review_diagnostic_beats(llm_review),
             *_editor_in_chief_beats(quality_data),
+            *_paragraph_aesthetic_beats(quality_data),
             *local_revision_brief_lines(quality_data, chapter_number=chapter_number),
         ]
     )
@@ -435,6 +437,12 @@ def _editor_in_chief_beats(quality_data: dict) -> list[str]:
     for item in (chief.get("acceptance_checks") or [])[:3]:
         rows.append(f"主编验收：{item}")
     return rows
+
+
+def _paragraph_aesthetic_beats(quality_data: dict) -> list[str]:
+    report = quality_data.get("paragraph_aesthetic_report") if isinstance(quality_data.get("paragraph_aesthetic_report"), dict) else {}
+    contract = format_paragraph_aesthetic_contract(report)
+    return [line for line in contract.splitlines() if line.strip()][:8]
 
 
 def _latest_story_brief_for_revision(session: Session, *, chapter: Chapter) -> ChapterBrief | None:

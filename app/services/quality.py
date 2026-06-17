@@ -13,6 +13,7 @@ from app.services.humanized_quality import evaluate_humanized_delivery
 from app.services.intent_acceptance import evaluate_author_intent
 from app.services.naming_governance import evaluate_naming_governance
 from app.services.narrative_logic import evaluate_narrative_logic
+from app.services.paragraph_aesthetic import evaluate_paragraph_aesthetic
 from app.services.prose_voice import evaluate_prose_voice
 from app.services.readability import evaluate_readability
 from app.services.writer_craft import evaluate_writer_craft
@@ -88,6 +89,7 @@ def evaluate_chapter(
     narrative_logic = evaluate_narrative_logic(text)
     anti_ai = evaluate_anti_ai_flavor(design=design, prose_voice=prose_voice, humanized=humanized)
     writer_craft = evaluate_writer_craft(text)
+    paragraph_aesthetic = evaluate_paragraph_aesthetic(text)
     for blocker in intent.blockers:
         if blocker != "intent_underfulfilled":
             issues.append(f"intent_blocker: {blocker}")
@@ -119,6 +121,8 @@ def evaluate_chapter(
         issues.append(f"embodied_pov_underdeveloped: {writer_craft['checks'].get('embodied_pov', 0)}")
     if writer_craft["checks"].get("scene_expansion", 100) < 55:
         issues.append(f"scene_expansion_underdeveloped: {writer_craft['checks'].get('scene_expansion', 0)}")
+    if paragraph_aesthetic.score < 55:
+        issues.append(f"paragraph_aesthetic_underdeveloped: {paragraph_aesthetic.score}")
 
     dimensions = {
         "basic_publishability": _basic_publishability_score(count, min_chars, max_chars, text),
@@ -168,6 +172,7 @@ def evaluate_chapter(
         "chapter_necessity": writer_craft["checks"].get("chapter_necessity", 0),
         "embodied_pov": writer_craft["checks"].get("embodied_pov", 0),
         "scene_expansion": writer_craft["checks"].get("scene_expansion", 0),
+        "paragraph_aesthetic": paragraph_aesthetic.score,
     }
     if dimensions["brief_coverage"] < 50:
         issues.append(f"brief_coverage_underfulfilled: {dimensions['brief_coverage']}")
@@ -218,8 +223,9 @@ def evaluate_chapter(
         "designed_asset",
         "character_action",
         "chapter_necessity",
-        "embodied_pov",
-    ):
+            "embodied_pov",
+            "paragraph_aesthetic",
+        ):
         if dimensions[name] < 50:
             warnings.append(f"weak_narrative_dimension: {name}={dimensions[name]}")
         elif name in {
@@ -251,6 +257,7 @@ def evaluate_chapter(
             "character_action",
             "chapter_necessity",
             "embodied_pov",
+            "paragraph_aesthetic",
         } and dimensions[name] < 65:
             warnings.append(f"weak_design_dimension: {name}={dimensions[name]}")
     for issue in readability.issues:
@@ -273,6 +280,8 @@ def evaluate_chapter(
         warnings.append(f"chapter_unit_flow: {issue}")
     for issue in writer_craft["issues"]:
         warnings.append(f"writer_craft: {issue}")
+    for issue in paragraph_aesthetic.issues:
+        warnings.append(f"paragraph_aesthetic: {issue}")
     blocking = [issue for issue in issues if issue.startswith(("forbidden_marker", "setting_contradiction"))]
     score = round(sum(dimensions.values()) / len(dimensions))
     if count < min_chars:
@@ -328,6 +337,7 @@ def evaluate_chapter(
             "anti_ai_flavor_report": anti_ai.to_dict(),
             "chapter_unit_report": chapter_units.to_dict(),
             "writer_craft_report": writer_craft,
+            "paragraph_aesthetic_report": paragraph_aesthetic.to_dict(),
             "thresholds": {
                 "pass_score": 70,
                 "hard_min_dimension": 50,
