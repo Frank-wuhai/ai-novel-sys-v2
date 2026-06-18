@@ -389,6 +389,62 @@ def main() -> int:
         if "保留最佳稿的主事件" not in budget_text:
             failures.append("budget_recovery_missing_preserve_boundary")
 
+        stalled_chapter = Chapter(book_id=book.id, chapter_number=5, title="第5章", status="drafting")
+        session.add(stalled_chapter)
+        session.flush()
+        created["chapters"].append(stalled_chapter)
+        stalled_brief = ChapterBrief(
+            chapter_id=stalled_chapter.id,
+            goal="第5章：旧覆盖停滞修订",
+            required_beats="继续修覆盖，但不要让作者给方向。",
+            constraints="必须遵守最新作品DNA：【作品DNA】 - 题材主味: 玄幻脑洞 【作品DNA结束】",
+            status="revision_ready",
+        )
+        session.add(stalled_brief)
+        session.flush()
+        created["chapter_briefs"].append(stalled_brief)
+        for index, score in enumerate([56, 55, 57], start=1):
+            stalled_version = ChapterVersion(
+                chapter_id=stalled_chapter.id,
+                version_number=index,
+                title=f"stalled-v{index}",
+                content=("第5章正文" + str(index)) * 1200,
+                status="needs_revision",
+                source="revision:budget",
+            )
+            session.add(stalled_version)
+            session.flush()
+            created["chapter_versions"].append(stalled_version)
+            stalled_quality = QualityReport(
+                chapter_version_id=stalled_version.id,
+                score=score,
+                passed=False,
+                report=json.dumps(
+                    {
+                        "status": "FAIL",
+                        "score": score,
+                        "issues": ["brief_coverage_underfulfilled: 47"],
+                        "dimensions": {
+                            "brief_coverage": 47,
+                            "canon_consistency": 55,
+                            "arc_alignment": 50,
+                            "chapter_necessity": 53,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            session.add(stalled_quality)
+            session.flush()
+            created["quality_reports"].append(stalled_quality)
+        stalled_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=5)
+        stalled_recovery_brief = session.get(ChapterBrief, stalled_recovery.recovery_brief_id) if stalled_recovery.recovery_brief_id else None
+        stalled_text = "\n".join([stalled_recovery_brief.goal or "", stalled_recovery_brief.required_beats or "", stalled_recovery_brief.constraints or ""]) if stalled_recovery_brief else ""
+        if "自动重建" not in stalled_text or "修订模式:rewrite" not in stalled_text:
+            failures.append("stalled_budget_did_not_rebuild_brief")
+        if "玄幻脑洞" in stalled_text:
+            failures.append("stalled_budget_kept_stale_genre_dna")
+
         for key in (
             "feedback_adjustments",
             "platform_feedback",

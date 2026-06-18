@@ -126,7 +126,7 @@ def evaluate_chapter(
 
     dimensions = {
         "basic_publishability": _basic_publishability_score(count, min_chars, max_chars, text),
-        "brief_coverage": _coverage_score(text, [goal, *split_points(required_beats), *split_points(constraints)]),
+        "brief_coverage": _coverage_score(text, coverage_points_for_brief(goal, required_beats, constraints)),
         "canon_consistency": _canon_score(text, canon_context),
         "reader_momentum": _marker_score(text, MOMENTUM_MARKERS),
         "conflict_pressure": _marker_score(text, CONFLICT_MARKERS),
@@ -355,6 +355,14 @@ def split_points(value: str) -> list[str]:
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
+def coverage_points_for_brief(goal: str, required_beats: str, constraints: str = "") -> list[str]:
+    points = [goal, *split_points(required_beats)]
+    for item in split_points(constraints):
+        if _is_constraint_coverage_candidate(item):
+            points.append(item)
+    return points
+
+
 def _basic_publishability_score(text_len: int, min_chars: int, max_chars: int, text: str) -> int:
     score = 100
     if text_len < min_chars:
@@ -545,6 +553,16 @@ def _is_diagnostic_point(point: str) -> bool:
     if stripped.startswith(("不要", "不能", "禁止", "不得", "避免", "只修改", "只修复", "只改", "未被点名", "开场", "修订必须", "共 ")):
         return True
     return any(marker in point for marker in diagnostic_markers)
+
+
+def _is_constraint_coverage_candidate(point: str) -> bool:
+    stripped = point.strip()
+    if len(stripped) < 4 or len(stripped) > 60 or _is_diagnostic_point(stripped):
+        return False
+    if stripped.startswith(("-", "【", "当前", "通用", "正文字数", "章节阶段")):
+        return False
+    positive_markers = ("完成", "出现", "发现", "选择", "代价", "后果", "目标", "阻碍", "行动", "章末", "钩子", "承接", "回报")
+    return any(marker in stripped for marker in positive_markers)
 
 
 def _point_is_covered(text: str, point: str) -> bool:

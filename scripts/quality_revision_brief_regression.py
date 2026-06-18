@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from app.services.quality import _coverage_score, evaluate_chapter, split_points
+from app.services.quality import _coverage_score, coverage_points_for_brief, evaluate_chapter
 
 
 def main() -> int:
@@ -21,7 +21,7 @@ def main() -> int:
         ]
     )
     constraints = "通用章节生产标准: 正文字数:3000-4500中文字符；主角行动链:目标->阻碍->主动选择->可见代价->结果变化。"
-    coverage = _coverage_score(text, [goal, *split_points(required), *split_points(constraints)])
+    coverage = _coverage_score(text, coverage_points_for_brief(goal, required, constraints))
     quality = evaluate_chapter(
         text,
         goal=goal,

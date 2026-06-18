@@ -93,6 +93,7 @@ def apply_revision_budget_recovery(
     rows = _failed_quality_rows(session, chapter_id=chapter.id, limit=8)
     if not rows:
         return RevisionBudgetRecovery("missing_quality", None, None, latest.id, "缺少失败质检报告，无法自动判断最佳底稿。")
+    stalled = _stalled_revision_dimensions(rows)
     best_version, best_quality, best_report = max(rows, key=lambda row: (int(row[1].score or 0), -int(row[0].id or 0)))
     recovery_version = best_version
     if latest.id != best_version.id:
@@ -114,24 +115,42 @@ def apply_revision_budget_recovery(
         best_quality=best_quality,
         latest_version=latest,
         report=best_report,
+        stalled_dimensions=stalled,
     )
+    revision_mode = "rewrite" if stalled else "targeted"
     _feedback, _adjustment, brief, _version = submit_revision_suggestion(
         session,
         book_id=book_id,
         chapter_number=chapter_number,
         platform="system_revision_budget_recovery",
         suggestion_text=suggestion,
-        revision_mode="targeted",
+        revision_mode=revision_mode,
     )
-    brief.goal = f"自动恢复修订第{chapter_number}章：以当前最佳稿 v{best_version.id} 为底稿，换策略完成可读稿。"
+    brief.goal = (
+        f"自动重建第{chapter_number}章修订目标：旧 brief 覆盖停滞，按当前作品设定重做章节承诺。"
+        if stalled
+        else f"自动恢复修订第{chapter_number}章：以当前最佳稿 v{best_version.id} 为底稿，换策略完成可读稿。"
+    )
     brief.required_beats = "\n".join(
         [
             "system_revision_budget_recovery: detected",
             f"自动修订预算触顶后，系统选择最佳底稿 v{best_version.id} score={int(best_quality.score or 0)}。",
             f"当前最新待修稿：v{latest.id}；不得继续沿无效方向堆修。",
-            "修订模式:targeted；禁止 fresh；禁止整章重写；禁止要求作者给方向。",
-            "本轮只修最低分的 2-4 个明确问题：承接、场景展开、对白、人物反应、奖励代价或章末压力。",
-            "保留最佳稿的主事件、场景顺序、人物行动链和章末事实；合格段落不动。",
+            (
+                "修订模式:rewrite；允许重排场景顺序和章节承诺；旧稿只保留可用素材，不保留失败结构。"
+                if stalled
+                else "修订模式:targeted；禁止 fresh；禁止整章重写；禁止要求作者给方向。"
+            ),
+            (
+                "本轮先重建章节目标：进入游戏的具体处境、桥段复刻任务、一次可见回报、一次可见代价、章末同步钩子。"
+                if stalled
+                else "本轮只修最低分的 2-4 个明确问题：承接、场景展开、对白、人物反应、奖励代价或章末压力。"
+            ),
+            (
+                "正文必须覆盖上述五个承诺点；不得继续追逐旧 brief 里的通用标准、禁区清单或系统恢复文本。"
+                if stalled
+                else "保留最佳稿的主事件、场景顺序、人物行动链和章末事实；合格段落不动。"
+            ),
             "如果无法提升，保留最佳稿并停止继续消耗，不生成更差版本。",
         ]
     )
@@ -139,6 +158,7 @@ def apply_revision_budget_recovery(
         [
             brief.constraints or "",
             "system_revision_budget_recovery: 系统自行换策略，不向作者索要抽象方向。",
+            "coverage_rebuild: " + ("；".join(stalled) if stalled else "none"),
             "禁止：追杀模板、现实机构关注、门派通缉、系统面板直接解题、冷硬装酷式精炼。",
             "禁止只换形容词或压缩句子；必须把抽象判断写成可见动作、空间、对白和后果。",
             "验收：self_check 必须说明保留了哪一版、修了哪些最低分问题、为什么没有扩大重写。",
@@ -151,8 +171,29 @@ def apply_revision_budget_recovery(
         recovery_version.id,
         brief.id,
         best_version.id,
-        f"自动选择最佳稿 v{best_version.id} 并换策略修订，不再要求人工给方向。",
+        (
+            f"连续低分项停滞（{','.join(stalled)}），系统已自动重建 brief 并改用结构修订。"
+            if stalled
+            else f"自动选择最佳稿 v{best_version.id} 并换策略修订，不再要求人工给方向。"
+        ),
     )
+
+
+def _stalled_revision_dimensions(rows: list[tuple[ChapterVersion, QualityReport, dict]]) -> list[str]:
+    if len(rows) < 3:
+        return []
+    watched = ("brief_coverage", "canon_consistency", "arc_alignment", "chapter_necessity")
+    stalled: list[str] = []
+    recent = rows[:5]
+    for name in watched:
+        scores = []
+        for _version, _quality, report in recent:
+            dimensions = report.get("dimensions") if isinstance(report.get("dimensions"), dict) else {}
+            if name in dimensions:
+                scores.append(int(dimensions.get(name) or 0))
+        if len(scores) >= 3 and max(scores) < 60 and max(scores) - min(scores) <= 5:
+            stalled.append(name)
+    return stalled
 
 
 def _failed_quality_rows(session: Session, *, chapter_id: int, limit: int) -> list[tuple[ChapterVersion, QualityReport, dict]]:
@@ -187,6 +228,7 @@ def _budget_recovery_suggestion(
     best_quality: QualityReport,
     latest_version: ChapterVersion,
     report: dict,
+    stalled_dimensions: list[str] | None = None,
 ) -> str:
     dimensions = report.get("dimensions") if isinstance(report.get("dimensions"), dict) else {}
     weak = [
@@ -200,7 +242,12 @@ def _budget_recovery_suggestion(
             "system_revision_budget_recovery: detected",
             f"第{chapter_number}章自动修订预算触顶，系统不得继续向作者索要抽象方向。",
             f"选择最佳底稿 v{best_version.id} score={int(best_quality.score or 0)}；最新待修稿 v{latest_version.id}。",
-            "策略：回到最佳稿，定点修最低分问题；不 fresh，不重开，不扩大俗套冲突。",
+            (
+                "策略：覆盖类指标连续停滞，自动重建章节 brief，允许结构修订；不向作者索要方向。"
+                if stalled_dimensions
+                else "策略：回到最佳稿，定点修最低分问题；不 fresh，不重开，不扩大俗套冲突。"
+            ),
+            "停滞维度：" + ("；".join(stalled_dimensions) if stalled_dimensions else "无"),
             "低分维度：" + ("；".join(weak) if weak else "按质检报告中的最低分维度处理。"),
             "失败问题：" + ("；".join(issues) if issues else "按质检报告修复明确阻断。"),
         ]
