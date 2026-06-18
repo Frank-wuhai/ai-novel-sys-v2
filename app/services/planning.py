@@ -568,7 +568,11 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
         trend_blocker = (
             ""
-            if _active_revision_trend_recovery(version, revision_brief) or _revision_brief_is_rebuild_recovery(revision_brief)
+            if (
+                _active_revision_trend_recovery(version, revision_brief)
+                or _revision_brief_is_rebuild_recovery(revision_brief)
+                or _revision_brief_has_protected_review_marker(revision_brief)
+            )
             else _revision_quality_trend_blocker(session, chapter_id=chapter.id)
         )
         if queue_task:
@@ -613,6 +617,7 @@ def _revision_brief_blocks_quality_reconcile(brief: ChapterBrief | None) -> bool
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
     return (
         _revision_brief_has_feedback_marker(brief)
+        or _revision_brief_has_protected_review_marker(brief)
         or "system_revision_trend_recovery" in text
         or _revision_brief_is_story_clean(brief)
     )
@@ -1177,6 +1182,20 @@ def _revision_brief_matches_feedback_reopen(brief: ChapterBrief, quality: Qualit
 def _revision_brief_has_feedback_marker(brief: ChapterBrief) -> bool:
     marker = "反馈调整#"
     return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
+
+
+def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> bool:
+    if not brief:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return any(
+        marker in text
+        for marker in (
+            "reading_assessment_contract",
+            "阅读评估结论",
+            "当前稿不是正式批准稿",
+        )
+    )
 
 
 def _revision_brief_is_story_clean(brief: ChapterBrief) -> bool:

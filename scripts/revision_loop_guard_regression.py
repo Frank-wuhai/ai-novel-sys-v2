@@ -480,6 +480,70 @@ def main() -> int:
         if active_readable_briefs:
             failures.append("budget_recovery_left_revision_brief_after_passed_restore")
 
+        protected_restore_chapter = Chapter(book_id=book.id, chapter_number=41, title="第41章", status="drafting")
+        session.add(protected_restore_chapter)
+        session.flush()
+        created["chapters"].append(protected_restore_chapter)
+        protected_brief = ChapterBrief(
+            chapter_id=protected_restore_chapter.id,
+            goal="阅读评估后定点修订第41章",
+            required_beats="修订模式:targeted",
+            constraints="reading_assessment_contract: 当前稿不是正式批准稿，只作为可用底稿。",
+            status="superseded",
+        )
+        session.add(protected_brief)
+        session.flush()
+        created["chapter_briefs"].append(protected_brief)
+        protected_pass = ChapterVersion(
+            chapter_id=protected_restore_chapter.id,
+            version_number=1,
+            title="protected-pass",
+            content="阅读评估未解决的历史通过稿" * 1200,
+            status="needs_revision",
+            source="regression:protected_pass",
+        )
+        session.add(protected_pass)
+        session.flush()
+        created["chapter_versions"].append(protected_pass)
+        protected_pass_quality = QualityReport(
+            chapter_version_id=protected_pass.id,
+            score=75,
+            passed=True,
+            report=json.dumps({"status": "PASS", "score": 75, "passed": True, "issues": []}, ensure_ascii=False),
+        )
+        session.add(protected_pass_quality)
+        session.flush()
+        created["quality_reports"].append(protected_pass_quality)
+        protected_failed = ChapterVersion(
+            chapter_id=protected_restore_chapter.id,
+            version_number=2,
+            title="protected-failed",
+            content="阅读评估修坏稿" * 1200,
+            status="needs_revision",
+            source="revision:protected",
+        )
+        session.add(protected_failed)
+        session.flush()
+        created["chapter_versions"].append(protected_failed)
+        protected_failed_quality = QualityReport(
+            chapter_version_id=protected_failed.id,
+            score=55,
+            passed=False,
+            report=json.dumps({"status": "FAIL", "score": 55, "passed": False, "issues": ["brief_coverage_underfulfilled: 40"]}, ensure_ascii=False),
+        )
+        session.add(protected_failed_quality)
+        session.flush()
+        created["quality_reports"].append(protected_failed_quality)
+        protected_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=41)
+        protected_restored = session.get(ChapterVersion, protected_recovery.recovery_version_id) if protected_recovery.recovery_version_id else None
+        session.refresh(protected_brief)
+        if protected_recovery.status != "restored_readable_needs_revision":
+            failures.append(f"protected_recovery_marked_approvable:{protected_recovery.status}")
+        if not protected_restored or protected_restored.status != "needs_revision":
+            failures.append("protected_recovery_version_not_held_for_revision")
+        if protected_brief.status != "revision_ready":
+            failures.append("protected_recovery_did_not_reactivate_reading_brief")
+
         stalled_chapter = Chapter(book_id=book.id, chapter_number=5, title="第5章", status="drafting")
         session.add(stalled_chapter)
         session.flush()

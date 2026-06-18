@@ -94,28 +94,39 @@ def apply_revision_budget_recovery(
     passed = _best_passed_quality_row(session, chapter_id=chapter.id, limit=24)
     if passed:
         passed_version, passed_quality, passed_report = passed
+        protected_brief = _latest_protected_revision_brief(session, chapter_id=chapter.id)
+        restore_status = "needs_revision" if protected_brief else "reviewed_pass"
         for brief in session.scalars(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")):
+            if protected_brief and brief.id == protected_brief.id:
+                continue
             brief.status = "superseded"
+        if protected_brief:
+            protected_brief.status = "revision_ready"
         if latest.id == passed_version.id:
             recovery_version = passed_version
-            recovery_version.status = "reviewed_pass"
+            recovery_version.status = restore_status
         else:
             recovery_version = ChapterVersion(
                 chapter_id=chapter.id,
                 version_number=_next_version_number(session, chapter.id),
                 title=passed_version.title,
                 content=passed_version.content,
-                status="reviewed_pass",
+                status=restore_status,
                 source=f"revision_budget_readable_restore:v{passed_version.id}",
             )
             session.add(recovery_version)
             session.flush()
         restored_report = dict(passed_report)
         restored_report["revision_budget_recovery"] = {
-            "status": "restored_readable",
+            "status": "restored_readable_needs_revision" if protected_brief else "restored_readable",
             "source_version_id": passed_version.id,
             "latest_failed_version_id": latest.id,
-            "reason": "自动修订预算耗尽时已有历史通过稿，恢复可读稿并停止继续消耗。",
+            "protected_brief_id": protected_brief.id if protected_brief else None,
+            "reason": (
+                "自动修订预算耗尽时已有历史通过稿，但存在未解决的阅读评估/人工修订合同，恢复为待修订底稿而非待审批稿。"
+                if protected_brief
+                else "自动修订预算耗尽时已有历史通过稿，恢复可读稿并停止继续消耗。"
+            ),
         }
         session.add(
             QualityReport(
@@ -127,11 +138,15 @@ def apply_revision_budget_recovery(
         )
         session.flush()
         return RevisionBudgetRecovery(
-            "restored_readable",
+            "restored_readable_needs_revision" if protected_brief else "restored_readable",
             recovery_version.id,
-            None,
+            protected_brief.id if protected_brief else None,
             passed_version.id,
-            f"已恢复历史通过稿 v{passed_version.id}，停止继续自动修订。",
+            (
+                f"已恢复历史通过稿 v{passed_version.id}，但保留阅读评估/人工修订合同 #{protected_brief.id}，不能进入审批。"
+                if protected_brief
+                else f"已恢复历史通过稿 v{passed_version.id}，停止继续自动修订。"
+            ),
         )
     rows = _failed_quality_rows(session, chapter_id=chapter.id, limit=8)
     if not rows:
@@ -276,6 +291,30 @@ def _best_passed_quality_row(session: Session, *, chapter_id: int, limit: int) -
     if not rows:
         return None
     return max(rows, key=lambda row: (int(row[1].score or 0), int(row[0].id or 0)))
+
+
+def _latest_protected_revision_brief(session: Session, *, chapter_id: int) -> ChapterBrief | None:
+    briefs = list(
+        session.scalars(
+            select(ChapterBrief)
+            .where(ChapterBrief.chapter_id == chapter_id)
+            .order_by(ChapterBrief.id.desc())
+            .limit(16)
+        )
+    )
+    for brief in briefs:
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        if any(
+            marker in text
+            for marker in (
+                "reading_assessment_contract",
+                "阅读评估结论",
+                "当前稿不是正式批准稿",
+                "人工意图:",
+            )
+        ):
+            return brief
+    return None
 
 
 def _loads_json(value: str) -> dict:
