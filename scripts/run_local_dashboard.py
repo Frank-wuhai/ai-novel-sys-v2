@@ -168,6 +168,7 @@ from app.dashboard_payloads import (
 
 
 _BACKGROUND_LOCK = threading.Lock()
+_DB_WRITE_LOCK = threading.RLock()
 _BACKGROUND_RUNS: dict[str, dict] = {}
 
 
@@ -196,7 +197,7 @@ def _start_background_queue_run(*, max_tasks: int = 1, book_id: int = 0, chapter
 
     def worker() -> None:
         try:
-            with session_scope() as session:
+            with _DB_WRITE_LOCK, session_scope() as session:
                 if selected_task_id:
                     result = run_generation_queue_task(session, task_id=selected_task_id)
                     executed_count = 1 if result.task.status in {"completed", "failed", "pending"} else 0
@@ -260,7 +261,7 @@ def _start_background_review_run(
             max_actions = max_revision_cycles * 3 + 4
             for _ in range(max_actions):
                 try:
-                    with session_scope() as session:
+                    with _DB_WRITE_LOCK, session_scope() as session:
                         result = run_next_action(
                             session,
                             book_id=book_id,
@@ -368,7 +369,7 @@ def _start_background_sample_run(
 
     def worker() -> None:
         try:
-            with session_scope() as session:
+            with _DB_WRITE_LOCK, session_scope() as session:
                 task = generate_chapter_samples(
                     session,
                     book_id=book_id,
@@ -454,12 +455,13 @@ def _start_background_author_run(
     def worker() -> None:
         executed: list[dict] = []
         try:
-            run = run_author_mode(
-                book_id=book_id,
-                chapter_number=chapter_number,
-                platform=platform,
-                max_revision_cycles=max_revision_cycles,
-            )
+            with _DB_WRITE_LOCK:
+                run = run_author_mode(
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    platform=platform,
+                    max_revision_cycles=max_revision_cycles,
+                )
             executed = run.executed
             with _BACKGROUND_LOCK:
                 _BACKGROUND_RUNS[run_id].update(
@@ -1629,15 +1631,20 @@ def _perform_restore_action(payload: dict) -> dict:
 
 def _perform_action_with_retry(payload: dict) -> dict:
     last_error: Exception | None = None
-    for attempt in range(6):
-        try:
-            with session_scope() as session:
-                return _perform_action(session, payload)
-        except OperationalError as exc:
-            if "database is locked" not in str(exc).lower():
-                raise
-            last_error = exc
-            time.sleep(0.25 * (attempt + 1))
+    if not _DB_WRITE_LOCK.acquire(timeout=2):
+        return {"status": "busy", "message": "后台任务正在写入数据库，请等待当前任务结束后再继续操作。"}
+    try:
+        for attempt in range(12):
+            try:
+                with session_scope() as session:
+                    return _perform_action(session, payload)
+            except OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
+                last_error = exc
+                time.sleep(0.5 * (attempt + 1))
+    finally:
+        _DB_WRITE_LOCK.release()
     raise RuntimeError("数据库正在被后台任务写入，请稍后重试。原始错误：database is locked") from last_error
 
 

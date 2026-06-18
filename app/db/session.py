@@ -24,14 +24,14 @@ def _database_url() -> str:
 
 def _engine_kwargs(database_url: str) -> dict:
     if database_url.startswith("sqlite:///"):
-        return {"connect_args": {"timeout": 30}}
+        return {"connect_args": {"timeout": 120}}
     return {}
 
 
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     try:
-        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA busy_timeout=120000")
         cursor.execute("PRAGMA synchronous=NORMAL")
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
