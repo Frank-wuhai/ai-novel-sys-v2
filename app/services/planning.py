@@ -566,7 +566,11 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     elif version.status == "needs_revision":
         revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
         queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
-        trend_blocker = "" if _active_revision_trend_recovery(version, revision_brief) else _revision_quality_trend_blocker(session, chapter_id=chapter.id)
+        trend_blocker = (
+            ""
+            if _active_revision_trend_recovery(version, revision_brief) or _revision_brief_is_rebuild_recovery(revision_brief)
+            else _revision_quality_trend_blocker(session, chapter_id=chapter.id)
+        )
         if queue_task:
             action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
         elif trend_blocker:
@@ -687,6 +691,13 @@ def _active_revision_trend_recovery(version: ChapterVersion, brief: ChapterBrief
     return "system_revision_trend_recovery" in text
 
 
+def _revision_brief_is_rebuild_recovery(brief: ChapterBrief | None) -> bool:
+    if not brief:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return "system_revision_budget_recovery" in text and ("修订模式:rewrite" in text or "coverage_rebuild:" in text)
+
+
 def _revision_brief_is_heavy(text: str) -> bool:
     normalized = (text or "").replace("：", ":")
     heavy_markers = (
@@ -786,6 +797,16 @@ def _apply_revision_trend_recovery(
         and str(latest.source or "").startswith("revision_recovery:")
     ):
         return active_brief
+    if active_brief and "system_revision_trend_recovery" in active_text and latest and str(latest.source or "").startswith("revision:"):
+        from app.services.revision_supervisor import apply_revision_budget_recovery
+
+        recovery = apply_revision_budget_recovery(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            force_rebuild_reason="trend_recovery_failed",
+        )
+        return session.get(ChapterBrief, recovery.recovery_brief_id) if recovery.recovery_brief_id else None
     rows = _recent_failed_quality_rows(session, chapter_id=chapter.id, limit=5)
     if len(rows) < 2:
         return None

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from sqlalchemy import select
+
 from app.db.session import session_scope
 from app.models.entities import (
     Book,
@@ -444,6 +446,85 @@ def main() -> int:
             failures.append("stalled_budget_did_not_rebuild_brief")
         if "玄幻脑洞" in stalled_text:
             failures.append("stalled_budget_kept_stale_genre_dna")
+
+        trend_chapter = Chapter(book_id=book.id, chapter_number=6, title="第6章", status="drafting")
+        session.add(trend_chapter)
+        session.flush()
+        created["chapters"].append(trend_chapter)
+        trend_brief = ChapterBrief(
+            chapter_id=trend_chapter.id,
+            goal="换策略修订第6章：以近期最佳稿为底稿。",
+            required_beats="system_revision_trend_recovery: detected\n修订模式:targeted。",
+            constraints="system_revision_trend_recovery: 自动趋势恢复，不向作者索要方向。",
+            status="revision_ready",
+        )
+        session.add(trend_brief)
+        session.flush()
+        created["chapter_briefs"].append(trend_brief)
+        best_trend = ChapterVersion(
+            chapter_id=trend_chapter.id,
+            version_number=1,
+            title="trend-best",
+            content="最佳稿正文" * 1200,
+            status="needs_revision",
+            source="revision:budget",
+        )
+        recovered_trend = ChapterVersion(
+            chapter_id=trend_chapter.id,
+            version_number=2,
+            title="trend-recovered",
+            content="恢复稿正文" * 1200,
+            status="needs_revision",
+            source="revision_recovery:v1",
+        )
+        bad_trend = ChapterVersion(
+            chapter_id=trend_chapter.id,
+            version_number=3,
+            title="trend-bad",
+            content="劣化稿正文" * 1200,
+            status="needs_revision",
+            source="revision:budget",
+        )
+        session.add_all([best_trend, recovered_trend, bad_trend])
+        session.flush()
+        created["chapter_versions"].extend([best_trend, recovered_trend, bad_trend])
+        for version, score, brief_score, hook_score in [(best_trend, 77, 57, 89), (bad_trend, 75, 49, 75)]:
+            quality = QualityReport(
+                chapter_version_id=version.id,
+                score=score,
+                passed=False,
+                report=json.dumps(
+                    {
+                        "status": "FAIL",
+                        "score": score,
+                        "issues": ["brief_coverage_underfulfilled: 49"],
+                        "dimensions": {
+                            "brief_coverage": brief_score,
+                            "hook_strength": hook_score,
+                            "canon_consistency": 55,
+                            "arc_alignment": 50,
+                            "chapter_necessity": 53,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            session.add(quality)
+            session.flush()
+            created["quality_reports"].append(quality)
+        trend_plan = plan_chapters(session, book_id=book.id, start=6, count=1)[0]
+        if trend_plan.next_action != "revision_trend_recovery":
+            failures.append(f"trend_recovery_not_planned:{trend_plan.next_action}")
+        trend_result = run_next_action(session, book_id=book.id, chapter_number=6, dry_run=False)
+        latest_trend_brief = session.scalar(
+            select(ChapterBrief).where(ChapterBrief.chapter_id == trend_chapter.id).order_by(ChapterBrief.id.desc())
+        )
+        trend_text = "\n".join([latest_trend_brief.goal or "", latest_trend_brief.required_beats or "", latest_trend_brief.constraints or ""]) if latest_trend_brief else ""
+        if trend_result.action != "revision_trend_recovery" or "修订模式:rewrite" not in trend_text or "trend_recovery_failed" not in trend_text:
+            failures.append("trend_recovery_failure_did_not_escalate_to_rebuild")
+        trend_after = plan_chapters(session, book_id=book.id, start=6, count=1)[0]
+        if trend_after.next_action != "revise_chapter":
+            failures.append(f"trend_rebuild_not_routed_to_revise:{trend_after.next_action}")
 
         for key in (
             "feedback_adjustments",

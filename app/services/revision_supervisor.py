@@ -83,6 +83,7 @@ def apply_revision_budget_recovery(
     *,
     book_id: int,
     chapter_number: int,
+    force_rebuild_reason: str = "",
 ) -> RevisionBudgetRecovery:
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
@@ -94,6 +95,8 @@ def apply_revision_budget_recovery(
     if not rows:
         return RevisionBudgetRecovery("missing_quality", None, None, latest.id, "缺少失败质检报告，无法自动判断最佳底稿。")
     stalled = _stalled_revision_dimensions(rows)
+    if force_rebuild_reason and not stalled:
+        stalled = [force_rebuild_reason]
     best_version, best_quality, best_report = max(rows, key=lambda row: (int(row[1].score or 0), -int(row[0].id or 0)))
     recovery_version = best_version
     if latest.id != best_version.id:
