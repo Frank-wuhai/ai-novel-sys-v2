@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Book, GenerationTask
 from app.services.llm_queue import QUEUE_TYPES
-from app.services.planning import AUTO_ACTIONS, plan_chapters
+from app.services.planning import plan_chapters
+from app.services.production_decision import decide_chapter_production
 from app.services.readiness import check_production_readiness
 from app.services.status_language import author_next_action_text, author_status_text
 
@@ -28,7 +29,7 @@ def build_author_command_center(
     readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
     plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
     current = next((item for item in plan_items if item.chapter_number == chapter_number), None)
-    auto_item = next((item for item in plan_items if item.next_action in AUTO_ACTIONS), None)
+    auto_item = next((item for item in plan_items if decide_chapter_production(item).can_continue), None)
     tasks = list(session.scalars(select(GenerationTask).where(GenerationTask.book_id == book_id).order_by(GenerationTask.id.desc()).limit(80)))
     counts = Counter(task.status for task in tasks)
     running = counts.get("running", 0)
@@ -96,66 +97,47 @@ def build_author_command_center(
             next_actions=["调整当前章或扩大章节范围后刷新。"],
         )
 
-    action = current.next_action
-    if action in {"approve_chapter", "record_chapter_continuity"}:
+    decision = decide_chapter_production(current)
+    if decision.needs_author:
         return _center(
-            status="needs_author",
-            stage="approve",
-            headline="可读稿等待你的判断",
-            detail="满意就通过；不满意就写修改意见，系统会转成修订任务。",
-            primary_label="阅读并审批当前章",
-            primary_intent="approve",
-            next_actions=["阅读当前章，然后通过、局部改或整章重写。"],
+            status=decision.status,
+            stage=decision.stage,
+            headline=decision.headline,
+            detail=decision.next_step,
+            primary_label=decision.primary_label,
+            primary_intent=decision.primary_intent,
+            next_actions=[decision.next_step],
         )
-    if action == "mark_publish_job":
-        return _center(
-            status="needs_author",
-            stage="publish",
-            headline="章节已到发布准备",
-            detail="当前章已进入待发布状态，到发布区处理平台发布。",
-            primary_label="查看发布任务",
-            primary_intent="open_publish",
-            next_actions=["打开后台发布区，检查预览后确认发布。"],
-        )
-    if action == "done":
-        return _center(
-            status="done",
-            stage="complete",
-            headline="当前章已完成",
-            detail="可以切换到下一章继续生产。",
-            primary_label="切换下一章",
-            primary_intent="next_chapter",
-            next_actions=["选择下一章。"],
-        )
-    if action in AUTO_ACTIONS:
+    if decision.can_continue:
         return _center(
             status="can_produce",
-            stage="produce",
-            headline="可以继续生产当前章",
-            detail=author_status_text(current.reason),
-            primary_label="生产到可读稿",
-            primary_intent="continue",
-            next_actions=[author_next_action_text(current.reason)],
+            stage=decision.stage,
+            headline=decision.headline,
+            detail=decision.next_step,
+            primary_label=decision.primary_label,
+            primary_intent=decision.primary_intent,
+            next_actions=[decision.next_step],
         )
     if auto_item:
+        auto_decision = decide_chapter_production(auto_item)
         return _center(
             status="can_produce",
-            stage="produce",
+            stage=auto_decision.stage,
             headline=f"当前章需人工处理，可先推进第 {auto_item.chapter_number} 章",
-            detail=author_status_text(auto_item.reason),
+            detail=auto_decision.next_step,
             primary_label=f"切到第 {auto_item.chapter_number} 章继续",
             primary_intent="continue_auto_chapter",
             target_chapter_number=auto_item.chapter_number,
-            next_actions=[author_next_action_text(auto_item.reason)],
+            next_actions=[auto_decision.next_step],
         )
     return _center(
-        status="idle",
-        stage="idle",
-        headline="当前范围暂无可自动推进事项",
-        detail=author_status_text(current.reason),
-        primary_label="刷新状态",
-        primary_intent="refresh",
-        next_actions=[author_next_action_text(current.reason)],
+        status=decision.status,
+        stage=decision.stage,
+        headline=decision.headline,
+        detail=decision.next_step,
+        primary_label=decision.primary_label,
+        primary_intent=decision.primary_intent,
+        next_actions=[decision.next_step],
     )
 
 

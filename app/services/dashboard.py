@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.models.entities import Book, GenerationTask
 from app.services.author_command_center import build_author_command_center
 from app.services.llm_queue import QUEUE_TYPES
-from app.services.planning import AUTO_ACTIONS, build_human_decision_package, plan_chapters
+from app.services.planning import build_human_decision_package, plan_chapters
+from app.services.production_decision import decide_chapter_production
 from app.services.production_control import build_production_control_report
 from app.services.readiness import check_production_readiness
 
@@ -213,16 +214,17 @@ def build_project_snapshot(
 
 
 def _chapter_snapshot(item) -> dict:
-    author_state = _author_chapter_state(item)
+    decision = decide_chapter_production(item)
     return {
         "number": item.chapter_number,
         "chapter_id": item.chapter_id,
         "brief_id": item.brief_id,
         "version_id": item.latest_version_id,
         "version_status": item.latest_version_status,
-        "author_status": author_state["status"],
-        "author_status_label": author_state["label"],
-        "author_next_step": author_state["next_step"],
+        "author_status": decision.status,
+        "author_status_label": decision.label,
+        "author_next_step": decision.next_step,
+        "production_decision": decision.to_dict(),
         "quality_passed": item.latest_quality_passed,
         "publish_job_id": item.publish_job_id,
         "publish_status": item.publish_job_status,
@@ -232,75 +234,8 @@ def _chapter_snapshot(item) -> dict:
 
 
 def _author_chapter_state(item) -> dict[str, str]:
-    status = item.latest_version_status or "missing"
-    action = item.next_action or ""
-    quality_passed = item.latest_quality_passed is True
-
-    if action == "wait_generation_task":
-        return {
-            "status": "background_working",
-            "label": "后台处理中",
-            "next_step": "等待后台生成或点击继续生产启动队列。",
-        }
-    if quality_passed and status == "needs_revision":
-        return {
-            "status": "needs_status_review",
-            "label": "质检已过，状态待核对",
-            "next_step": "正文已过质检，但版本仍标记为需修订；先人工检查当前稿，再决定审批或继续修订。",
-        }
-    if action in {"create_chapter_brief", "draft_chapter", "review_chapter", "create_revision_brief", "revise_chapter"}:
-        return {
-            "status": "can_continue",
-            "label": "可自动推进",
-            "next_step": "点击继续生产，让系统推进到可读稿或新的判断点。",
-        }
-    if action == "record_chapter_continuity":
-        return {
-            "status": "quality_passed",
-            "label": "质检通过，待回写",
-            "next_step": "点击继续生产记录连续性，然后进入人工审批。",
-        }
-    if action == "approve_chapter":
-        return {
-            "status": "needs_author",
-            "label": "待你审批",
-            "next_step": "阅读当前章，满意就通过，不满意就写修改意见。",
-        }
-    if action == "mark_publish_job":
-        return {
-            "status": "ready_to_publish",
-            "label": "待发布确认",
-            "next_step": "确认发布信息后执行发布。",
-        }
-    if action in {"create_publish_job", "publish_job_dry_run", "queue_publish_job", "retry_publish_job"}:
-        return {
-            "status": "publish_prepare",
-            "label": "待发布准备",
-            "next_step": "点击继续生产，系统会创建或推进发布准备。",
-        }
-    if action == "done":
-        return {
-            "status": "done",
-            "label": "已完成",
-            "next_step": "可以切换到下一章。",
-        }
-    if status in {"missing", "no_version"}:
-        return {
-            "status": "not_started",
-            "label": "未开始",
-            "next_step": "点击继续生产创建本章内容。",
-        }
-    if action.startswith("inspect"):
-        return {
-            "status": "needs_inspection",
-            "label": "需要检查",
-            "next_step": "查看后台状态和章节内容后再决定下一步。",
-        }
-    return {
-        "status": "in_progress",
-        "label": "处理中",
-        "next_step": "按当前下一步动作继续。",
-    }
+    decision = decide_chapter_production(item)
+    return {"status": decision.status, "label": decision.label, "next_step": decision.next_step}
 
 
 def _recommend_next(*, book_id: int, plan_items, queue_tasks: list[GenerationTask]) -> str:
@@ -310,7 +245,7 @@ def _recommend_next(*, book_id: int, plan_items, queue_tasks: list[GenerationTas
         return f"python -m app.cli run-generation-queue --max-tasks {min(3, len(pending_queue))}"
     if failed_queue:
         return f"python -m app.cli show-generation-task --task-id {failed_queue[0].id}"
-    auto = next((item for item in plan_items if item.next_action in AUTO_ACTIONS), None)
+    auto = next((item for item in plan_items if decide_chapter_production(item).can_continue), None)
     if auto:
         return f"python -m app.cli run-next-action --book-id {book_id} --chapter-number {auto.chapter_number} --dry-run"
     waiting = next((item for item in plan_items if item.next_action == "wait_generation_task"), None)

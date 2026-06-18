@@ -56,6 +56,7 @@ def main() -> int:
             ("story_dna_isolation", ["scripts/story_dna_isolation_regression.py"]),
             ("preflight_brief_repair", ["scripts/preflight_brief_repair_regression.py"]),
             ("production_router", ["scripts/production_router_regression.py"]),
+            ("production_decision", ["scripts/production_decision_regression.py"]),
             ("context_contamination", ["scripts/context_contamination_regression.py"]),
             ("context_generic_power", ["scripts/context_generic_power_regression.py"]),
             ("skeleton_context_reset", ["scripts/skeleton_context_reset_regression.py"]),

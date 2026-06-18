@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.models.entities import Book, Chapter, ChapterBrief
 from app.services.dashboard_production_actions import repair_chapter_brief
 from app.services.llm_queue import build_generation_queue_health
-from app.services.planning import AUTO_ACTIONS, plan_chapters, run_next_action
+from app.services.planning import plan_chapters, run_next_action
 from app.services.production_control import build_production_control_report
+from app.services.production_decision import decide_chapter_production
 from app.services.readiness import check_production_readiness
 from app.services.status_language import author_status_text
 from app.services.story_alignment import build_story_alignment_audit
@@ -154,14 +155,16 @@ def prepare_production(
             control=control,
         )
 
-    if current and current.next_action in {"approve_chapter", "record_chapter_continuity"}:
+    decision = decide_chapter_production(current)
+
+    if decision.needs_author:
         return _result(
-            status="needs_author",
-            headline="当前章可读，等待确认",
-            detail="当前章已有可读稿，下一步是阅读后通过、局部改或整章重写。",
-            author_state="等待作者确认当前章",
-            primary_label="阅读当前章",
-            primary_intent="approve",
+            status=decision.status,
+            headline=decision.headline,
+            detail=decision.next_step,
+            author_state=decision.label,
+            primary_label=decision.primary_label,
+            primary_intent=decision.primary_intent,
             auto_fixed=auto_fixed,
             steps=steps,
             warnings=warnings,
@@ -169,14 +172,14 @@ def prepare_production(
             control=control,
         )
 
-    if current and current.next_action in AUTO_ACTIONS:
+    if decision.can_continue:
         return _result(
             status="repaired_ready" if auto_fixed else "ready",
-            headline="已自动整理，可以生产" if auto_fixed else "可以生产",
-            detail="系统已确认当前设定、作品 DNA、章节说明和后台队列状态，可以进入正文生产。",
-            author_state="可以生产",
-            primary_label="继续写作",
-            primary_intent="continue",
+            headline="已自动整理，可以生产" if auto_fixed else decision.headline,
+            detail=decision.next_step,
+            author_state=decision.label,
+            primary_label=decision.primary_label,
+            primary_intent=decision.primary_intent,
             can_continue=True,
             auto_fixed=auto_fixed,
             steps=steps,
@@ -186,12 +189,12 @@ def prepare_production(
         )
 
     return _result(
-        status="idle",
-        headline="当前没有可自动生产的动作",
-        detail=current.reason if current else "当前章不在加载范围内。",
-        author_state="无需处理",
-        primary_label="刷新状态",
-        primary_intent="refresh",
+        status=decision.status,
+        headline=decision.headline,
+        detail=decision.next_step,
+        author_state=decision.label,
+        primary_label=decision.primary_label,
+        primary_intent=decision.primary_intent,
         auto_fixed=auto_fixed,
         steps=steps,
         warnings=warnings,
