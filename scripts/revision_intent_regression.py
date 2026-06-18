@@ -163,6 +163,11 @@ def main() -> int:
             failures.append(f"approval_reopen_brief_status:{readable_brief.status}")
         if planned.next_action != "revise_chapter":
             failures.append(f"approval_reopen_plan:{planned.next_action}:{planned.latest_version_status}")
+        planned_again = plan_chapters(session, book_id=readable_book.id, start=1, count=1)[0]
+        if planned_again.next_action != "revise_chapter":
+            failures.append(f"approval_reopen_second_plan:{planned_again.next_action}:{planned_again.latest_version_status}")
+        if readable_brief.status != "revision_ready":
+            failures.append(f"approval_reopen_brief_superseded:{readable_brief.status}")
 
     print(json.dumps({"status": "fail" if failures else "pass", "failures": failures}, ensure_ascii=False, indent=2))
     return 1 if failures else 0

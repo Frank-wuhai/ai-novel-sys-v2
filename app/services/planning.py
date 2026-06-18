@@ -628,6 +628,9 @@ def _restore_reconciled_readable_version(session: Session, *, chapter_id: int) -
     latest = _latest_version(session, chapter_id=chapter_id)
     if not latest or latest.status in {"reviewed_pass", "approved", "draft"}:
         return None
+    active_revision_brief = _latest_revision_brief(session, chapter_id=chapter_id)
+    if _revision_brief_blocks_quality_reconcile(active_revision_brief):
+        return None
     from app.services.production_reviewing import reconcile_existing_quality_report
 
     versions = list(
