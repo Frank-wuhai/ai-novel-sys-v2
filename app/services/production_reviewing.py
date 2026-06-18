@@ -268,4 +268,11 @@ def _run_llm_chapter_review(
 
 
 def _latest_brief(session: Session, chapter_id: int) -> ChapterBrief | None:
+    active = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter_id, ChapterBrief.status != "superseded")
+        .order_by(ChapterBrief.id.desc())
+    )
+    if active:
+        return active
     return session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter_id).order_by(ChapterBrief.id.desc()))

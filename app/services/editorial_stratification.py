@@ -545,6 +545,13 @@ def _latest_brief_for_chapter(session: Session, *, book_id: int, chapter_number:
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
         return None
+    active = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status != "superseded")
+        .order_by(ChapterBrief.id.desc())
+    )
+    if active:
+        return active
     return session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
 
 

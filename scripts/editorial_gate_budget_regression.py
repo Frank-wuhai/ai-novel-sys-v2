@@ -138,6 +138,31 @@ def main() -> int:
         if not archived_versions:
             failures.append("old_failed_versions_not_archived_after_readable")
 
+        brief_choice_chapter = Chapter(book_id=book.id, chapter_number=2, title="第2章", status="draft")
+        session.add(brief_choice_chapter)
+        session.flush()
+        active_brief = ChapterBrief(
+            chapter_id=brief_choice_chapter.id,
+            goal="有效章节 brief",
+            required_beats="按有效 brief 生成。",
+            constraints="",
+            status="ready",
+        )
+        session.add(active_brief)
+        session.flush()
+        superseded_brief = ChapterBrief(
+            chapter_id=brief_choice_chapter.id,
+            goal="废弃修订合同",
+            required_beats="不应被生产计划选中。",
+            constraints="system_revision_budget_recovery: stale",
+            status="superseded",
+        )
+        session.add(superseded_brief)
+        session.flush()
+        brief_choice_item = plan_chapters(session, book_id=book.id, start=2, count=1)[0]
+        if brief_choice_item.brief_id != active_brief.id:
+            failures.append(f"plan_selected_superseded_brief:{brief_choice_item.brief_id}:{active_brief.id}")
+
     if failures:
         for failure in failures:
             print(failure)
