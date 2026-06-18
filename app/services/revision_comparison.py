@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import ChapterVersion, GenerationTask, QualityReport
+from app.models.entities import ChapterBrief, ChapterVersion, GenerationTask, QualityReport
 
 
 WATCHED_DIMENSIONS = (
@@ -146,7 +146,10 @@ def _restore_source_version(
     score_delta: int,
     degraded: list[str],
 ) -> ChapterVersion:
-    restored_status = "reviewed_pass" if source_quality.passed else "needs_revision"
+    protected_brief = _latest_protected_revision_brief(session, chapter_id=failed_version.chapter_id)
+    restored_status = "needs_revision" if protected_brief else ("reviewed_pass" if source_quality.passed else "needs_revision")
+    if protected_brief:
+        protected_brief.status = "revision_ready"
     restored = ChapterVersion(
         chapter_id=failed_version.chapter_id,
         version_number=_next_version_number(session, failed_version.chapter_id),
@@ -165,7 +168,12 @@ def _restore_source_version(
         "source_quality_id": source_quality.id,
         "score_delta": score_delta,
         "degraded_dimensions": degraded,
-        "reason": "修订稿低于源稿，自动恢复源稿作为当前最佳版本。",
+        "protected_brief_id": protected_brief.id if protected_brief else None,
+        "reason": (
+            "修订稿低于源稿，但存在未解决的阅读评估/人工修订合同，恢复源稿为待修订底稿。"
+            if protected_brief
+            else "修订稿低于源稿，自动恢复源稿作为当前最佳版本。"
+        ),
     }
     session.add(
         QualityReport(
@@ -187,6 +195,30 @@ def _attach_comparison(quality: QualityReport, result: RevisionComparisonResult)
 def _next_version_number(session: Session, chapter_id: int) -> int:
     latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id).order_by(ChapterVersion.version_number.desc()))
     return (latest.version_number if latest else 0) + 1
+
+
+def _latest_protected_revision_brief(session: Session, *, chapter_id: int) -> ChapterBrief | None:
+    briefs = list(
+        session.scalars(
+            select(ChapterBrief)
+            .where(ChapterBrief.chapter_id == chapter_id)
+            .order_by(ChapterBrief.id.desc())
+            .limit(16)
+        )
+    )
+    for brief in briefs:
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        if any(
+            marker in text
+            for marker in (
+                "reading_assessment_contract",
+                "阅读评估结论",
+                "当前稿不是正式批准稿",
+                "人工意图:",
+            )
+        ):
+            return brief
+    return None
 
 
 def _loads_json(value: str | None) -> dict[str, Any]:

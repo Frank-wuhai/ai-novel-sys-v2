@@ -1910,8 +1910,12 @@
         button.textContent = '继续生成';
         return;
       }
-      if (chapter?.next_action === 'approve_chapter' || chapter?.next_action === 'record_chapter_continuity') {
-        button.textContent = '确认当前章';
+      if (chapter?.next_action === 'approve_chapter') {
+        button.textContent = '阅读并审批当前章';
+        return;
+      }
+      if (chapter?.next_action === 'record_chapter_continuity') {
+        button.textContent = '记录连续性';
         return;
       }
       if (chapter?.next_action === 'mark_publish_job') {
@@ -2531,8 +2535,11 @@
       const counts = visibleQueueCounts(health);
       if (!snapshot.readiness?.passed) return 'setup';
       if ((counts.pending || 0) > 0 || (counts.running || 0) > 0) return 'generate';
+      const decisionStage = chapter?.production_decision?.stage || '';
+      if (decisionStage) return decisionStage;
       const action = chapter?.next_action || '';
-      if (['approve_chapter', 'record_chapter_continuity'].includes(action)) return 'approve';
+      if (['approve_chapter', 'reading_assessment_review'].includes(action)) return 'approve';
+      if (action === 'record_chapter_continuity') return 'review';
       if (['mark_publish_job', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job', 'done'].includes(action)) return 'publish';
       if (['review_chapter', 'create_revision_brief', 'revise_chapter'].includes(action)) return 'review';
       return 'generate';
@@ -2550,7 +2557,7 @@
     function mainlineStepState(key, stage, readinessPassed, chapter) {
       if (key === 'setup') return readinessPassed ? '完成' : '待处理';
       if (key === mainlineStepStage(stage)) return '当前';
-      if (key === 'approve' && ['approve_chapter', 'record_chapter_continuity'].includes(chapter?.next_action || '')) return '等待你';
+      if (key === 'approve' && ['approve_chapter', 'reading_assessment_review'].includes(chapter?.next_action)) return '等待你';
       return mainlineStepClass(key, stage, readinessPassed, chapter) === 'done' ? '已过' : '后续';
     }
 
@@ -2583,17 +2590,18 @@
       if ((queueCounts.pending || 0) > 0) return '已有内容等待继续处理，点击“继续写作”即可。';
       if ((queueCounts.failed || 0) > 0) return '存在失败的生成任务，请在“实时状态”里按处理建议重试或取消。';
       const chapter = selectedChapter(snapshot);
+      if (chapter?.author_next_step) return chapter.author_next_step;
       if (!chapter) return '当前章不在已加载范围内，请调整章节号或扩大章数后刷新。';
       const autoChapter = firstAutoProductionChapter(snapshot);
       if (!AUTO_PRODUCTION_ACTIONS.includes(chapter.next_action) && autoChapter) {
-        if (chapter.next_action === 'approve_chapter' || chapter.next_action === 'record_chapter_continuity') {
+        if (['approve_chapter', 'reading_assessment_review'].includes(chapter.next_action)) {
           return '当前章已到阅读确认点；满意就采用当前章，不满意就写修改意见。';
         }
         return `当前章需要处理；范围内第 ${autoChapter.number} 章可以继续自动生产。`;
       }
       if (chapter.next_action === 'record_chapter_continuity') return '当前章质检已通过，点击“继续写作”会整理连续性摘要。';
       if (chapter.next_action === 'approve_chapter') return '当前章已通过质检，等待你阅读确认。满意就采用，不满意就提修改建议。';
-      if (chapter.author_next_step) return chapter.author_next_step;
+      if (chapter.next_action === 'reading_assessment_review') return '当前章已过基础质检，但仍需阅读评估。满意就通过，不满意就提具体修改建议。';
       if (chapter.next_action === 'mark_publish_job') return '当前章已进入待发布，可在发布区一键发布到平台。';
       if (chapter.next_action === 'done') return '当前章已完成全部流程，可以切换到下一章。';
       return `当前章下一步是：${actionLabel(chapter.next_action)}。点击“继续写作”会执行这一步。`;
@@ -2612,6 +2620,7 @@
     function approvalHint(chapter) {
       if (chapter.next_action === 'record_chapter_continuity') return '点击“继续写作”会自动记录连续性摘要。';
       if (chapter.next_action === 'approve_chapter') return '等待你阅读确认；采用后进入发布准备。';
+      if (chapter.next_action === 'reading_assessment_review') return '等待你阅读评估；通过后进入发布准备，不通过则按意见重修。';
       if (chapter.author_status === 'needs_status_review') return chapter.author_next_step || '质检已通过，但后台版本状态需要核对。';
       if (chapter.quality_passed) return '质检已通过。';
       return '还没到阅读确认阶段。';
@@ -2647,7 +2656,7 @@
     function renderFlowStats(chapters) {
       const total = chapters.length;
       const done = chapters.filter((item) => item.next_action === 'done').length;
-      const waiting = chapters.filter((item) => ['approve_chapter', 'record_chapter_continuity'].includes(item.next_action)).length;
+      const waiting = chapters.filter((item) => item.author_status === 'needs_author' || item.next_action === 'approve_chapter').length;
       const autoReady = chapters.filter((item) => AUTO_PRODUCTION_ACTIONS.includes(item.next_action)).length;
       const publish = chapters.filter((item) => ['mark_publish_job', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job'].includes(item.next_action)).length;
       return `
@@ -2672,7 +2681,7 @@
       const consistencyIssues = qualityConsistencyIssues(chapter, latest, quality);
       const canInspect = Boolean(latest.content);
       const qualityText = quality ? `${quality.passed ? '质检通过' : '质检未通过'}，${quality.score} 分` : '尚未质检';
-      const approveLabel = chapter?.next_action === 'record_chapter_continuity' ? '回写连续性并采用当前章' : '采用当前章';
+      const approveLabel = '采用当前章';
       const approveButton = canApprove ? `<button id="approveFromReader">${approveLabel}</button>` : '';
       const inspectHint = canInspect
         ? (canApprove ? '请阅读全文；满意就采用当前章，不满意就写修改意见。' : '当前版本可以阅读，但还不能采用；先看一致性与质检结论。')
@@ -2707,7 +2716,7 @@
       const review = qualityData.llm_review || {};
       const chief = qualityData.editor_in_chief || {};
       const canApprove = canApproveCurrentChapter(chapter, latest, quality);
-      const approveLabel = chapter?.next_action === 'record_chapter_continuity' ? '回写连续性并采用当前章' : '采用当前章，进入发布准备';
+      const approveLabel = '采用当前章，进入发布准备';
       const title = latest.title || detail.chapter.title || `第${detail.chapter.number}章`;
       if ($('approvalSummary')) $('approvalSummary').innerHTML = renderApprovalStats(chapter, latest, quality, review);
       $('approvalPanel').innerHTML = `
@@ -2804,9 +2813,8 @@
       if (!chapter || !latest) return false;
       if (!quality || quality.passed !== true) return false;
       if (qualityConsistencyIssues(chapter, latest, quality).length) return false;
-      if (chapter.next_action === 'approve_chapter') return true;
-      if (chapter.next_action !== 'record_chapter_continuity') return false;
-      return latest.status === 'reviewed_pass' || latest.status === 'approved' || chapter.quality_passed === true;
+      if (['approve_chapter', 'reading_assessment_review'].includes(chapter.next_action)) return true;
+      return false;
     }
 
     function qualityConsistencyIssues(chapter, latest, quality) {
@@ -2827,7 +2835,7 @@
       if ((latest.status === 'reviewed_pass' || latest.status === 'approved') && quality.passed === false) {
         issues.push('版本状态显示已通过，但最新质检报告未通过。');
       }
-      if (latest.status === 'needs_revision' && quality.passed === true) {
+      if (latest.status === 'needs_revision' && quality.passed === true && chapter?.author_status !== 'needs_revision') {
         issues.push('质检报告已通过，但版本状态仍是需修订。');
       }
       if (chapter && typeof chapter.quality_passed === 'boolean' && chapter.quality_passed !== quality.passed) {
@@ -3798,7 +3806,8 @@
       unversioned: '未版本化'
     };
     const ACTION_LABELS = {
-      approve_chapter: '确认当前章',
+      approve_chapter: '阅读并审批当前章',
+      reading_assessment_review: '阅读评估当前章',
       agent_plan_cycle: 'Agent Plan 增强一轮',
       create_market_research_pack: '生成联网搜索任务包',
       run_market_web_search: 'Tavily 搜索并导入',
@@ -3843,7 +3852,7 @@
       start_author_background: '启动主笔模式',
       start_queue_background: '继续生成',
       record_continuity_dashboard: '记录连续性',
-      approve_current_chapter: '确认当前章',
+      approve_current_chapter: '阅读并审批当前章',
       repair_current_chapter_brief: '修复当前章阻断项',
       repair_readiness_gate: '自动整理准备',
       repair_skeleton: '打开设定修复',
@@ -3965,7 +3974,7 @@
         'latest version needs revision and clean revision brief exists': '当前章已有干净修订说明，可以继续修订',
         'latest version has a feedback/recovery brief and should continue revision': '系统已生成修复/恢复说明，可以继续修订',
         'quality passed but continuity has not been recorded': '质检通过，需要记录连续性',
-        'quality and continuity are complete': '质检和连续性已完成，可以确认当前章',
+        'quality and continuity are complete': '质检和连续性已完成，等待阅读审批',
         'approved version has no publish job': '章节已确认，可以创建发布任务',
         'publish job is pending dry-run': '发布任务待生成预览',
         'publish dry-run is ready': '发布预览已生成，可以进入待发布',
@@ -3977,7 +3986,7 @@
     }
     function decisionSuggestion(item) {
       if (item.type === 'continuity_writeback') return '在上方“当前章一键流程”点“记录连续性”。';
-      if (item.type === 'human_approval') return '确认章节内容无误后，点“确认当前章”。';
+      if (item.type === 'human_approval') return '确认章节内容无误后，点“阅读并审批当前章”。';
       if (item.type === 'final_publish_confirmation') return '在“发布配置与任务”中点击“一键发布到平台”。';
       return '查看章节详情后再处理。';
     }
@@ -4413,7 +4422,7 @@
         setActiveView('skeleton');
       } else if (result.primary_intent === 'approve') {
         setActiveView('production');
-        $('state').textContent = result.headline || '需要你确认当前章';
+        $('state').textContent = result.headline || '需要你判断当前章';
         window.requestAnimationFrame(() => $('currentChapterReader')?.scrollIntoView({block: 'start', behavior: 'smooth'}));
       }
     }
@@ -4446,7 +4455,7 @@
         return;
       }
       const autoChapter = firstAutoProductionChapter(currentSnapshot);
-      if (chapter?.next_action === 'approve_chapter' || chapter?.next_action === 'record_chapter_continuity') {
+      if (['approve_chapter', 'reading_assessment_review'].includes(chapter?.next_action)) {
         if (!window.confirm('确认采用当前章最新版本吗？确认后系统会继续准备发布。')) return;
         await approveCurrentChapter(false);
         return;

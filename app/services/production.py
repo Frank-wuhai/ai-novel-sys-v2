@@ -10,6 +10,7 @@ from app.models.entities import (
     ChapterReview,
     ChapterVersion,
     PromptTemplate,
+    QualityReport,
     StoryFoundation,
 )
 from app.services.chapter_drafting import draft_chapter
@@ -140,6 +141,19 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
     version = session.get(ChapterVersion, version_id)
     if not version:
         raise ValueError(f"chapter version not found: {version_id}")
+    if version.status == "needs_revision":
+        quality = session.scalar(
+            select(QualityReport)
+            .where(QualityReport.chapter_version_id == version.id)
+            .order_by(QualityReport.id.desc())
+        )
+        if not quality or not quality.passed:
+            raise ValueError("当前版本仍未通过质检，不能审批。")
+        version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
+    for brief in session.scalars(
+        select(ChapterBrief).where(ChapterBrief.chapter_id == version.chapter_id, ChapterBrief.status == "revision_ready")
+    ):
+        brief.status = "superseded"
     version.status = move("chapter_version", version.status, "approved", "human_approve")
     session.add(ChapterReview(chapter_version_id=version.id, verdict="approved", reviewer=reviewer, notes="manual approval"))
     session.flush()

@@ -12,7 +12,7 @@ from app.llm.providers import ArkOpenAIProvider
 from app.models.entities import Book, Character, EvidenceSource, MarketSignal, PlatformFeedback, PowerSystem, StoryArc, StoryBible, StoryFoundation, Volume, WorldRule
 from app.services.agent_plan_intelligence import summarize_semantic_memory
 from app.services.evidence import list_market_signals
-from app.services.planning import AUTO_ACTIONS, build_human_decision_package, plan_chapters
+from app.services.planning import build_human_decision_package, plan_chapters
 from app.services.skeleton_governance import audit_story_skeleton_with_agent_evidence
 
 
@@ -259,9 +259,12 @@ def _semantic_memory_check(session: Session, book_id: int) -> ReadinessCheck:
 
 
 def _chapter_queue_check(session: Session, book_id: int, start: int, count: int) -> ReadinessCheck:
+    from app.services.production_decision import decide_chapter_production
+
     items = plan_chapters(session, book_id=book_id, start=start, count=count)
-    runnable = [item for item in items if item.next_action in AUTO_ACTIONS]
-    waiting = [item for item in items if item.next_action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}]
+    decisions = [decide_chapter_production(item) for item in items]
+    runnable = [decision for decision in decisions if decision.can_continue]
+    waiting = [decision for decision in decisions if decision.needs_author]
     done = [item for item in items if item.next_action == "done"]
     if not runnable and not waiting:
         return ReadinessCheck("chapter_queue", False, "no runnable or human-waiting chapters in range", action="扩大章节范围或检查章节状态。")

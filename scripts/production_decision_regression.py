@@ -21,6 +21,17 @@ def main() -> int:
     if protected_revision.primary_intent != "continue":
         failures.append(f"passed_needs_revision_not_continue:{protected_revision.to_dict()}")
 
+    reading_candidate = decide_chapter_production(
+        SimpleNamespace(
+            next_action="reading_assessment_review",
+            latest_version_status="needs_revision",
+            latest_quality_passed=True,
+            reason="基础质检已通过，但阅读评估合同仍未确认，需要阅读判断。",
+        )
+    )
+    if not reading_candidate.needs_author or reading_candidate.can_continue or reading_candidate.stage != "approve":
+        failures.append(f"reading_candidate_not_author_review:{reading_candidate.to_dict()}")
+
     trend_recovery = decide_chapter_production(
         SimpleNamespace(
             next_action="revision_trend_recovery",

@@ -83,6 +83,19 @@ def decide_chapter_production(item: Any | None) -> ProductionDecision:
         )
 
     if version_status == "needs_revision":
+        if action == "reading_assessment_review":
+            return ProductionDecision(
+                status="needs_author",
+                stage="approve",
+                label="待阅读评估",
+                headline="当前稿已过基础质检，等待阅读判断",
+                next_step="阅读当前章；满意就通过，不满意就写具体修改意见，系统会按意见重修。",
+                primary_label="阅读并审批当前章",
+                primary_intent="approve",
+                can_continue=False,
+                needs_author=True,
+                reason=reason,
+            )
         if action in {"revise_chapter", "enqueue_revise_chapter"}:
             return ProductionDecision(
                 status="needs_revision",

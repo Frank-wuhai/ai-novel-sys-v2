@@ -8,7 +8,8 @@ from app.models.entities import Book
 from app.services.data_governance import audit_book_data_governance
 from app.services.llm_queue import build_generation_queue_health
 from app.services.model_strategy import build_model_strategy
-from app.services.planning import AUTO_ACTIONS, build_human_decision_package, plan_chapters
+from app.services.planning import build_human_decision_package, plan_chapters
+from app.services.production_decision import decide_chapter_production
 from app.services.readiness import check_production_readiness
 from app.services.revision_supervisor import supervise_revision_trend
 from app.services.story_alignment import build_story_alignment_audit
@@ -69,8 +70,9 @@ def build_production_control_report(
     model_strategy = build_model_strategy()
     revision_report = supervise_revision_trend(session, book_id=book_id, chapter_number=start)
 
-    auto_ready = [item for item in plan_items if item.next_action in AUTO_ACTIONS]
-    human_waiting = [item for item in plan_items if item.next_action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}]
+    decisions_by_chapter = {item.chapter_number: decide_chapter_production(item) for item in plan_items}
+    auto_ready = [item for item in plan_items if decisions_by_chapter[item.chapter_number].can_continue]
+    human_waiting = [item for item in plan_items if decisions_by_chapter[item.chapter_number].needs_author]
     inspect = [item for item in plan_items if item.next_action == "inspect_manually"]
     missing_versions = [item for item in plan_items if item.latest_version_status in {"missing", "no_version"}]
     approved = [item for item in plan_items if item.latest_version_status == "approved"]
@@ -124,20 +126,14 @@ def build_production_control_report(
         status = "needs_author"
         status_label = "等待作者判断"
         first = human_waiting[0]
-        if first.next_action == "approve_chapter":
-            next_actions.append(f"阅读第 {first.chapter_number} 章，通过、局部改或整章重写。")
-        elif first.next_action == "record_chapter_continuity":
-            next_actions.append(f"记录第 {first.chapter_number} 章连续性，然后进入审批。")
-        else:
-            next_actions.append(f"处理第 {first.chapter_number} 章的人工决策。")
+        first_decision = decisions_by_chapter[first.chapter_number]
+        next_actions.append(f"第 {first.chapter_number} 章：{first_decision.next_step}")
     elif auto_ready:
         status = "can_produce"
         status_label = "可以继续生产"
         first = auto_ready[0]
-        if first.next_action == "revision_trend_recovery":
-            next_actions.append(f"第 {first.chapter_number} 章修订趋势劣化；先自动回退近期最佳稿并换策略修订。")
-        else:
-            next_actions.append(f"生产第 {first.chapter_number} 章到可读稿。")
+        first_decision = decisions_by_chapter[first.chapter_number]
+        next_actions.append(f"第 {first.chapter_number} 章：{first_decision.next_step}")
     else:
         status = "idle"
         status_label = "暂无动作"

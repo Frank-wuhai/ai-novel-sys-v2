@@ -1593,14 +1593,11 @@ def _perform_action(session, payload: dict) -> dict:
         preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
         if preflight.get("blockers"):
             raise ValueError("当前章仍有体检阻断项，不能审批：" + "；".join(preflight["blockers"]))
-        version = latest_version_for_chapter(
-            session,
-            book_id=book_id,
-            chapter_number=chapter_number,
-        )
+        version = latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
         chapter = session.get(Chapter, version.chapter_id)
+        quality = session.query(QualityReport).filter(QualityReport.chapter_version_id == version.id).order_by(QualityReport.id.desc()).first()
         continuity_recorded = False
-        if version.status == "reviewed_pass" and chapter and chapter.status != "continuity_recorded":
+        if version.status in {"reviewed_pass", "needs_revision"} and quality and quality.passed and chapter and chapter.status != "continuity_recorded":
             summary = default_chapter_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
             record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
             continuity_recorded = True

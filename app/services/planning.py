@@ -102,7 +102,7 @@ AUTO_ACTIONS = {
     "retry_publish_job",
 }
 
-MANUAL_ACTIONS = {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}
+MANUAL_ACTIONS = {"record_chapter_continuity", "reading_assessment_review", "approve_chapter", "mark_publish_job"}
 
 
 def create_chapter_plan(
@@ -286,7 +286,7 @@ def run_next_action(
             raise ValueError("publish job is required to retry")
         job = retry_publish_job(session, job_id=item.publish_job_id)
         return RunNextActionResult(chapter_number, action, "executed", "publish job retried", job.id)
-    if action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}:
+    if action in {"record_chapter_continuity", "reading_assessment_review", "approve_chapter", "mark_publish_job"}:
         return RunNextActionResult(chapter_number, action, "blocked", "manual decision required", None)
     if action == "revision_trend_recovery":
         brief = _apply_revision_trend_recovery(
@@ -404,6 +404,17 @@ def _decision_item(item: ChapterPlanItem, *, book_id: int) -> HumanDecisionItem 
             ),
         )
     if item.next_action == "approve_chapter":
+        version_id = item.latest_version_id or 0
+        return HumanDecisionItem(
+            decision_type="human_approval",
+            chapter_number=item.chapter_number,
+            chapter_id=item.chapter_id,
+            version_id=item.latest_version_id,
+            publish_job_id=None,
+            reason=item.reason,
+            command_hint=f"python -m app.cli approve-chapter --version-id {version_id} --reviewer human",
+        )
+    if item.next_action == "reading_assessment_review":
         version_id = item.latest_version_id or 0
         return HumanDecisionItem(
             decision_type="human_approval",
@@ -577,6 +588,8 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         )
         if queue_task:
             action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
+        elif revision_brief and quality and quality.passed and _revision_brief_has_protected_review_marker(revision_brief):
+            action, reason = "reading_assessment_review", "基础质检已通过，但阅读评估合同仍未确认，需要阅读判断。"
         elif trend_blocker:
             action, reason = "revision_trend_recovery", trend_blocker
         elif revision_brief and _revision_brief_has_feedback_marker(revision_brief) and quality is None:

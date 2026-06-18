@@ -8,6 +8,7 @@ from app.db.session import session_scope
 from app.models.entities import ChapterBrief, ChapterVersion
 from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.planning import plan_chapters, run_next_action
+from app.services.production_decision import decide_chapter_production
 from app.services.revision_supervisor import apply_revision_budget_recovery
 
 
@@ -40,12 +41,13 @@ def run_author_mode(
     for _ in range(max_actions):
         with session_scope() as session:
             item = plan_chapters(session, book_id=book_id, start=chapter_number, count=1)[0]
-            if item.next_action == "approve_chapter":
+            decision = decide_chapter_production(item)
+            if decision.needs_author:
                 executed.append(
                     {
-                        "action": "approve_chapter",
+                        "action": item.next_action,
                         "status": "blocked",
-                        "message": "可读稿已完成，等待人工通过。",
+                        "message": decision.next_step,
                         "object_id": item.latest_version_id,
                     }
                 )
@@ -84,15 +86,16 @@ def run_author_mode(
                         revision_count += 1
                     elif not budget_recovery_used:
                         recovery = apply_revision_budget_recovery(session, book_id=book_id, chapter_number=chapter_number)
+                        recovered = recovery.status in {"recovered", "restored_readable", "restored_readable_needs_revision"}
                         executed.append(
                             {
                                 "action": "revision_budget_recovery",
-                                "status": "executed" if recovery.status == "recovered" else "blocked",
+                                "status": "executed" if recovered else "blocked",
                                 "message": recovery.message,
                                 "object_id": recovery.recovery_brief_id or recovery.recovery_version_id,
                             }
                         )
-                        if recovery.status == "recovered":
+                        if recovered:
                             budget_recovery_used = True
                             recovery_revision_used = True
                             revision_count += 1
