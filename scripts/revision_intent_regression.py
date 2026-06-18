@@ -5,6 +5,7 @@ import json
 from app.db.session import session_scope
 from app.models.entities import QualityReport
 from app.services.feedback import create_feedback_adjustment, record_platform_feedback, submit_revision_suggestion
+from app.services.planning import plan_chapters
 from app.services.production import create_book, create_chapter_brief, create_manual_chapter_version
 from app.services.revision_intent import (
     REVISION_MODE_FRESH,
@@ -112,6 +113,56 @@ def main() -> int:
             failures.append("revision_brief_missing_auto_mode")
         if version and version.status != "needs_revision":
             failures.append("latest_version_not_reopened")
+
+        readable_book = create_book(session, title="Approval Reopen Regression", genre="武侠网游", platform="manual")
+        create_chapter_brief(
+            session,
+            book_id=readable_book.id,
+            chapter_number=1,
+            goal="主角获得内测资格并进入万象江湖。",
+            required_beats="进入游戏,触发桥段,获得奖励,留下现实同步钩子",
+            constraints="保持武侠向仙侠升维路线。",
+        )
+        readable_version = create_manual_chapter_version(
+            session,
+            book_id=readable_book.id,
+            chapter_number=1,
+            title="第1章",
+            content="主角进入万象江湖，触发剧情演绎任务，并在结尾察觉现实同步。",
+        )
+        readable_version.status = "reviewed_pass"
+        session.add(
+            QualityReport(
+                chapter_version_id=readable_version.id,
+                score=82,
+                passed=True,
+                report=json.dumps(
+                    {
+                        "passed": True,
+                        "score": 82,
+                        "hard_gate": {"passed": True},
+                        "llm_review": {"status": "completed", "verdict": "pass", "score": 82},
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+        session.flush()
+        _feedback, _adjustment, readable_brief, reopened_version = submit_revision_suggestion(
+            session,
+            book_id=readable_book.id,
+            chapter_number=1,
+            suggestion_text="开头还不够吸引人，增强进入游戏后的第一处具体奇遇。",
+            platform="manual_approval",
+            revision_mode="targeted",
+        )
+        planned = plan_chapters(session, book_id=readable_book.id, start=1, count=1)[0]
+        if reopened_version and reopened_version.status != "needs_revision":
+            failures.append(f"approval_reopen_status:{reopened_version.status}")
+        if readable_brief.status != "revision_ready":
+            failures.append(f"approval_reopen_brief_status:{readable_brief.status}")
+        if planned.next_action != "revise_chapter":
+            failures.append(f"approval_reopen_plan:{planned.next_action}:{planned.latest_version_status}")
 
     print(json.dumps({"status": "fail" if failures else "pass", "failures": failures}, ensure_ascii=False, indent=2))
     return 1 if failures else 0

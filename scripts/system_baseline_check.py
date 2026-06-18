@@ -17,7 +17,7 @@ def main() -> int:
         if book2_ch1:
             plan = plan_chapters(session, book_id=2, start=1, count=1)[0]
             center = build_author_command_center(session, book_id=2, chapter_number=1, start=1, count=5)
-            if plan.next_action not in {"approve_chapter", "record_chapter_continuity", "draft_chapter"}:
+            if plan.next_action not in {"approve_chapter", "record_chapter_continuity", "draft_chapter", "revise_chapter"}:
                 failures.append(f"book2_ch1_unstable_next_action:{plan.next_action}")
             if center.get("status") == "can_produce" and plan.latest_version_status in {"reviewed_pass", "approved"}:
                 failures.append("book2_readable_still_shows_produce")
@@ -27,12 +27,14 @@ def main() -> int:
                 )
             )
             if active_revision:
-                failures.append(f"book2_active_revision_briefs:{[brief.id for brief in active_revision]}")
+                if plan.next_action != "revise_chapter":
+                    failures.append(f"book2_active_revision_not_routed:{[brief.id for brief in active_revision]}:{plan.next_action}")
             latest = session.scalar(
                 select(ChapterVersion).where(ChapterVersion.chapter_id == book2_ch1.id).order_by(ChapterVersion.id.desc())
             )
             if latest and latest.status == "needs_revision" and not str(latest.source or "").startswith("archived:"):
-                failures.append(f"book2_latest_unarchived_needs_revision:{latest.id}:{latest.source}")
+                if plan.next_action != "revise_chapter":
+                    failures.append(f"book2_latest_revision_not_routed:{latest.id}:{latest.source}:{plan.next_action}")
 
     timer = subprocess.run(
         ["systemctl", "--user", "is-enabled", "ai-novel-auto-slim.timer"],

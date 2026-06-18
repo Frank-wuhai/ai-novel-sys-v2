@@ -27,6 +27,7 @@ from app.services.production_state import next_version_number
 from app.services.production_gate import check_production_gate
 from app.services.story import arcs_for_chapter, list_story_arcs
 from app.services.story_dna import chapter_engine_for_number, story_dna_for_book
+from app.workflows.state_machine import move
 
 
 @dataclass(frozen=True)
@@ -530,13 +531,23 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     version = _latest_version(session, chapter_id=chapter.id)
     quality = _latest_quality(session, version_id=version.id) if version else None
     job = _latest_publish_job(session, version_id=version.id) if version else None
-    if version and quality and version.status == "needs_revision":
+    active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if (
+        version
+        and quality
+        and version.status == "needs_revision"
+        and not _revision_brief_blocks_quality_reconcile(active_revision_brief)
+    ):
         from app.services.production_reviewing import reconcile_existing_quality_report
 
         if reconcile_existing_quality_report(session, version=version, quality=quality):
             version = _latest_version(session, chapter_id=chapter.id)
             quality = _latest_quality(session, version_id=version.id) if version else None
-    if version and version.status in {"reviewed_pass", "approved"}:
+    if version and version.status in {"reviewed_pass", "approved"} and _revision_brief_blocks_quality_reconcile(active_revision_brief):
+        version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
+        quality = _latest_quality(session, version_id=version.id)
+        session.flush()
+    elif version and version.status in {"reviewed_pass", "approved"}:
         _supersede_active_revision_briefs(session, chapter_id=chapter.id)
         from app.services.chapter_archive import archive_chapter_history_after_readable
 
@@ -589,6 +600,17 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         publish_job_status=job.status if job else "",
         next_action=action,
         reason=reason,
+    )
+
+
+def _revision_brief_blocks_quality_reconcile(brief: ChapterBrief | None) -> bool:
+    if not brief or brief.status != "revision_ready":
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return (
+        _revision_brief_has_feedback_marker(brief)
+        or "system_revision_trend_recovery" in text
+        or _revision_brief_is_story_clean(brief)
     )
 
 
