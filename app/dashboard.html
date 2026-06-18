@@ -2050,7 +2050,8 @@
               ? '章节小样正在生成。完成后会显示在“方向与小样”。'
               : '系统正在处理。完成后会进入下一步。')))
         : '';
-      const authorText = latestAuthorRun && latestAuthorRun.status !== 'running'
+      const commandCenter = snapshot?.author_command_center || {};
+      const authorText = latestAuthorRun && latestAuthorRun.status !== 'running' && commandCenter.status !== 'can_produce'
         ? authorRunText(latestAuthorRun)
         : '';
       const statusText = backgroundText || authorText || ((counts.running || 0) > 0
