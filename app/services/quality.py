@@ -109,8 +109,9 @@ def evaluate_chapter(
         issues.append(f"dialogue_underdeveloped: {prose_voice.checks.get('dialogue_fullness', 0)}")
     if expression_precision.score < 60:
         issues.append(f"expression_precision_risk: {expression_precision.score}")
-    if naming.score < 60:
-        issues.append(f"naming_governance_risk: {naming.score}")
+    # Naming/aesthetic evaluators are diagnostic by default. They are useful for
+    # editor guidance, but treating them as production blockers made readable
+    # chapters fall into endless revision loops.
     if narrative_logic.score < 60:
         issues.append(f"narrative_logic_risk: {narrative_logic.score}")
     if anti_ai.score < 60:
@@ -121,8 +122,6 @@ def evaluate_chapter(
         issues.append(f"embodied_pov_underdeveloped: {writer_craft['checks'].get('embodied_pov', 0)}")
     if writer_craft["checks"].get("scene_expansion", 100) < 55:
         issues.append(f"scene_expansion_underdeveloped: {writer_craft['checks'].get('scene_expansion', 0)}")
-    if paragraph_aesthetic.score < 55:
-        issues.append(f"paragraph_aesthetic_underdeveloped: {paragraph_aesthetic.score}")
 
     dimensions = {
         "basic_publishability": _basic_publishability_score(count, min_chars, max_chars, text),
@@ -174,7 +173,7 @@ def evaluate_chapter(
         "scene_expansion": writer_craft["checks"].get("scene_expansion", 0),
         "paragraph_aesthetic": paragraph_aesthetic.score,
     }
-    if dimensions["brief_coverage"] < 50:
+    if dimensions["brief_coverage"] < 45:
         issues.append(f"brief_coverage_underfulfilled: {dimensions['brief_coverage']}")
     if dimensions["object_verb_collocation"] < 50:
         issues.append(f"expression_collocation_blocker: {dimensions['object_verb_collocation']}")

@@ -91,6 +91,48 @@ def apply_revision_budget_recovery(
     latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
     if not latest or latest.status != "needs_revision":
         return RevisionBudgetRecovery("not_needed", None, None, latest.id if latest else None, "当前章节不处于待修订状态。")
+    passed = _best_passed_quality_row(session, chapter_id=chapter.id, limit=24)
+    if passed:
+        passed_version, passed_quality, passed_report = passed
+        for brief in session.scalars(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")):
+            brief.status = "superseded"
+        if latest.id == passed_version.id:
+            recovery_version = passed_version
+            recovery_version.status = "reviewed_pass"
+        else:
+            recovery_version = ChapterVersion(
+                chapter_id=chapter.id,
+                version_number=_next_version_number(session, chapter.id),
+                title=passed_version.title,
+                content=passed_version.content,
+                status="reviewed_pass",
+                source=f"revision_budget_readable_restore:v{passed_version.id}",
+            )
+            session.add(recovery_version)
+            session.flush()
+        restored_report = dict(passed_report)
+        restored_report["revision_budget_recovery"] = {
+            "status": "restored_readable",
+            "source_version_id": passed_version.id,
+            "latest_failed_version_id": latest.id,
+            "reason": "自动修订预算耗尽时已有历史通过稿，恢复可读稿并停止继续消耗。",
+        }
+        session.add(
+            QualityReport(
+                chapter_version_id=recovery_version.id,
+                score=int(passed_quality.score or restored_report.get("score") or 75),
+                passed=True,
+                report=json.dumps(restored_report, ensure_ascii=False),
+            )
+        )
+        session.flush()
+        return RevisionBudgetRecovery(
+            "restored_readable",
+            recovery_version.id,
+            None,
+            passed_version.id,
+            f"已恢复历史通过稿 v{passed_version.id}，停止继续自动修订。",
+        )
     rows = _failed_quality_rows(session, chapter_id=chapter.id, limit=8)
     if not rows:
         return RevisionBudgetRecovery("missing_quality", None, None, latest.id, "缺少失败质检报告，无法自动判断最佳底稿。")
@@ -214,6 +256,26 @@ def _failed_quality_rows(session: Session, *, chapter_id: int, limit: int) -> li
         if quality and not quality.passed:
             rows.append((version, quality, _loads_json(quality.report)))
     return rows
+
+
+def _best_passed_quality_row(session: Session, *, chapter_id: int, limit: int) -> tuple[ChapterVersion, QualityReport, dict] | None:
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.id.desc())
+            .limit(limit)
+        )
+    )
+    rows: list[tuple[ChapterVersion, QualityReport, dict]] = []
+    for version in versions:
+        quality = session.scalar(select(QualityReport).where(QualityReport.chapter_version_id == version.id).order_by(QualityReport.id.desc()))
+        if not quality or not quality.passed:
+            continue
+        rows.append((version, quality, _loads_json(quality.report)))
+    if not rows:
+        return None
+    return max(rows, key=lambda row: (int(row[1].score or 0), int(row[0].id or 0)))
 
 
 def _loads_json(value: str) -> dict:

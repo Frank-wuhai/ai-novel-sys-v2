@@ -391,6 +391,95 @@ def main() -> int:
         if "保留最佳稿的主事件" not in budget_text:
             failures.append("budget_recovery_missing_preserve_boundary")
 
+        readable_restore_chapter = Chapter(book_id=book.id, chapter_number=40, title="第40章", status="drafting")
+        session.add(readable_restore_chapter)
+        session.flush()
+        created["chapters"].append(readable_restore_chapter)
+        readable_restore_brief = ChapterBrief(
+            chapter_id=readable_restore_chapter.id,
+            goal="第40章：已有通过稿后预算恢复",
+            required_beats="继续修订但不应覆盖历史可读稿。",
+            constraints="system_revision_budget_recovery: active",
+            status="revision_ready",
+        )
+        session.add(readable_restore_brief)
+        session.flush()
+        created["chapter_briefs"].append(readable_restore_brief)
+        readable_version = ChapterVersion(
+            chapter_id=readable_restore_chapter.id,
+            version_number=1,
+            title="readable",
+            content="历史通过稿正文" * 1200,
+            status="needs_revision",
+            source="regression:previous_pass",
+        )
+        session.add(readable_version)
+        session.flush()
+        created["chapter_versions"].append(readable_version)
+        readable_quality = QualityReport(
+            chapter_version_id=readable_version.id,
+            score=78,
+            passed=True,
+            report=json.dumps(
+                {
+                    "status": "PASS",
+                    "score": 78,
+                    "passed": True,
+                    "issues": [],
+                    "dimensions": {"brief_coverage": 52, "hook_strength": 75},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(readable_quality)
+        session.flush()
+        created["quality_reports"].append(readable_quality)
+        bad_after_pass = ChapterVersion(
+            chapter_id=readable_restore_chapter.id,
+            version_number=2,
+            title="bad-after-pass",
+            content="后续失败稿正文" * 1200,
+            status="needs_revision",
+            source="revision:after_pass",
+        )
+        session.add(bad_after_pass)
+        session.flush()
+        created["chapter_versions"].append(bad_after_pass)
+        bad_after_pass_quality = QualityReport(
+            chapter_version_id=bad_after_pass.id,
+            score=50,
+            passed=False,
+            report=json.dumps(
+                {
+                    "status": "FAIL",
+                    "score": 50,
+                    "passed": False,
+                    "issues": ["brief_coverage_underfulfilled: 40"],
+                    "dimensions": {"brief_coverage": 40, "hook_strength": 55},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(bad_after_pass_quality)
+        session.flush()
+        created["quality_reports"].append(bad_after_pass_quality)
+        readable_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=40)
+        restored_readable = session.get(ChapterVersion, readable_recovery.recovery_version_id) if readable_recovery.recovery_version_id else None
+        if readable_recovery.status != "restored_readable":
+            failures.append(f"budget_recovery_did_not_restore_passed:{readable_recovery.status}")
+        if not restored_readable or restored_readable.status != "reviewed_pass":
+            failures.append("budget_recovery_restored_version_not_readable")
+        active_readable_briefs = list(
+            session.scalars(
+                select(ChapterBrief).where(
+                    ChapterBrief.chapter_id == readable_restore_chapter.id,
+                    ChapterBrief.status == "revision_ready",
+                )
+            )
+        )
+        if active_readable_briefs:
+            failures.append("budget_recovery_left_revision_brief_after_passed_restore")
+
         stalled_chapter = Chapter(book_id=book.id, chapter_number=5, title="第5章", status="drafting")
         session.add(stalled_chapter)
         session.flush()

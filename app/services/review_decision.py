@@ -60,7 +60,7 @@ def apply_review_decision(rule_result: ReviewRuleResult, report_data: dict) -> N
 
 def soft_override_blockers(dimensions: dict) -> list[str]:
     thresholds = {
-        "brief_coverage": 50,
+        "brief_coverage": 46,
         "readability": 60,
         "design_texture": 65,
         "visual_staging": 60,

@@ -128,9 +128,9 @@ def stratify_quality_report(report_data: dict) -> EditorialStratification:
     return EditorialStratification(
         tier=TIER_SOLID_DRAFT,
         label="合格底稿",
-        recommended_mode="targeted_elevation",
-        should_auto_revise=True,
-        summary="方向正确且可读，但还没有达到准定稿；下一步应升华读感，而不是推翻重写。",
+        recommended_mode="author_review",
+        should_auto_revise=False,
+        summary="方向正确且可读，系统停止自动修订；升华建议只进入审稿报告，由作者决定是否继续。",
         preserve=_preserve_from_review(review_strengths),
         elevate=_elevation_targets(dimensions, review_issues, review_suggestions),
         blockers=weak_lows[:6] or review_issues[:4],
@@ -234,9 +234,9 @@ def build_editorial_guidance(stratification: EditorialStratification) -> dict:
     if stratification.tier == TIER_SOLID_DRAFT:
         return {
             "level": "合格底稿",
-            "decision": "不推翻重写，进入升华修订。",
-            "next_step": "系统逐场增强画面、人物反应、对白声线、奖励代价和追读压力。",
-            "revision_depth": "targeted_elevation",
+            "decision": "停止自动修订，进入作者阅读决策。",
+            "next_step": "满意则通过；不满意时再按具体阅读感受触发可选修订。",
+            "revision_depth": "author_review",
             "preserve_policy": "锁定源版本主事件、场景顺序、行动链和章末事实。",
         }
     if stratification.tier == TIER_NEAR_FINAL:
@@ -284,7 +284,7 @@ def _chief_decision(stratification: EditorialStratification) -> str:
     if stratification.tier == TIER_PROBLEM_DRAFT:
         return "定点修阻断，暂不升华。"
     if stratification.tier == TIER_SOLID_DRAFT:
-        return "保留底稿，逐场升华。"
+        return "保留底稿，停止自动修订。"
     if stratification.tier == TIER_NEAR_FINAL:
         return "只做轻润色或等待审批。"
     return "进入最终确认。"

@@ -58,10 +58,10 @@ def main() -> int:
         latest_brief = session.query(ChapterBrief).filter_by(chapter_id=chapter.id).order_by(ChapterBrief.id.desc()).first()
         if stratification.tier != "B_solid_draft":
             failures.append("solid_draft_not_tier_b")
-        if version.status != "needs_revision":
-            failures.append("tier_b_not_reopened")
-        if not latest_brief or "editorial_elevation_quality#" not in (latest_brief.constraints or ""):
-            failures.append("elevation_brief_missing")
+        if version.status != "reviewed_pass":
+            failures.append("tier_b_should_remain_readable")
+        if latest_brief and "editorial_elevation_quality#" in (latest_brief.constraints or ""):
+            failures.append("tier_b_should_not_create_auto_elevation_brief")
         brief_text = "\n".join(
             [
                 latest_brief.goal or "",
@@ -70,13 +70,9 @@ def main() -> int:
             ]
         ) if latest_brief else ""
         for required_text, failure_name in [
-            (f"源版本锁定：v{version.id}", "elevation_source_version_not_locked"),
-            ("以源版本正文为底本逐场增强", "elevation_contract_not_source_based"),
-            ("不新开一版故事", "elevation_contract_allows_new_story"),
-            ("自动回滚到源版本", "elevation_contract_missing_rollback_fuse"),
-            ("self_check 必须写明保留了源版本", "elevation_contract_missing_acceptance_check"),
+            ("editorial_elevation_quality#", "unexpected_elevation_contract"),
         ]:
-            if required_text not in brief_text:
+            if required_text in brief_text:
                 failures.append(failure_name)
         if "editorial_stratification" not in (quality.report or ""):
             failures.append("quality_report_missing_stratification")
@@ -84,14 +80,14 @@ def main() -> int:
         guidance = quality_data.get("editorial_guidance") if isinstance(quality_data.get("editorial_guidance"), dict) else {}
         if guidance.get("level") != "合格底稿":
             failures.append("quality_report_missing_author_guidance_level")
-        if guidance.get("revision_depth") != "targeted_elevation":
+        if guidance.get("revision_depth") != "author_review":
             failures.append("quality_report_missing_revision_depth")
-        if "不推翻重写" not in guidance.get("decision", ""):
+        if "停止自动修订" not in guidance.get("decision", ""):
             failures.append("quality_guidance_does_not_protect_solid_draft")
         chief = quality_data.get("editor_in_chief") if isinstance(quality_data.get("editor_in_chief"), dict) else {}
         if chief.get("draft_level") != "合格底稿":
             failures.append("editor_in_chief_missing_draft_level")
-        if "保留底稿" not in chief.get("decision", ""):
+        if "停止自动修订" not in chief.get("decision", ""):
             failures.append("editor_in_chief_missing_preserve_decision")
         if not chief.get("minimum_effective_revision") or not chief.get("acceptance_checks"):
             failures.append("editor_in_chief_missing_actionable_contract")
@@ -123,6 +119,15 @@ def main() -> int:
             ),
         )
         session.add(failed_quality)
+        session.flush()
+        rollback_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="升华回滚测试",
+            required_beats=f"editorial_elevation_quality#{quality.id}\n源版本锁定：v{version.id}",
+            constraints="升华失败熔断：若修订后跌到问题稿/废稿，自动回滚到源版本。",
+            status="revision_ready",
+        )
+        session.add(rollback_brief)
         session.flush()
         rollback = maybe_rollback_failed_elevation(
             session,
