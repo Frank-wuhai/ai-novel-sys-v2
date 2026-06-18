@@ -12,7 +12,7 @@ pkill -f "$ROOT/scripts/run_local_dashboard.py" >/dev/null 2>&1 || true
 pkill -f "scripts/run_local_dashboard.py --host 127.0.0.1" >/dev/null 2>&1 || true
 sleep 0.5
 
-for port in 8765 8766 8767 8768 8769; do
+for port in 8767 8765 8766 8768 8769; do
   log_file="$LOG_DIR/dashboard-$port.log"
   if command -v setsid >/dev/null 2>&1; then
     setsid nohup "$ROOT/venv/bin/python" "$ROOT/scripts/run_local_dashboard.py" --host 127.0.0.1 --port "$port" >"$log_file" 2>&1 < /dev/null &
