@@ -208,7 +208,7 @@ class ArkOpenAIProvider(BaseLLMProvider):
 def get_provider(dry_run: bool) -> BaseLLMProvider:
     if dry_run:
         return DryRunProvider()
-    return ArkOpenAIProvider()
+    return ArkOpenAIProvider(timeout=settings.llm_request_timeout_seconds)
 
 
 def _is_unsupported_response_format_error(exc: BadRequestError) -> bool:

@@ -1633,6 +1633,7 @@ def main() -> None:
                 print(f"revision_max_tokens={settings.llm_revision_max_tokens}")
                 print(f"review_max_tokens={settings.llm_review_max_tokens}")
                 print(f"smoke_max_tokens={settings.llm_smoke_max_tokens}")
+                print(f"request_timeout_seconds={settings.llm_request_timeout_seconds}")
                 print(f"input_price_per_1m_tokens={settings.llm_input_price_per_1m_tokens}")
                 print(f"output_price_per_1m_tokens={settings.llm_output_price_per_1m_tokens}")
             elif args.cmd == "live-llm-smoke":

@@ -21,6 +21,7 @@ from app.services.production_llm import (
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.services.quality import evaluate_chapter
 from app.services.production_gate import assert_production_gate
+from app.services.reading_assessment import maybe_apply_reading_assessment
 from app.services.revision_comparison import compare_and_restore_if_regressed
 from app.services.review_decision import ReviewRuleResult, apply_review_decision, soft_override_blockers
 from app.workflows.state_machine import move
@@ -90,6 +91,12 @@ def review_chapter(
     version.status = move("chapter_version", version.status, target, action)
     session.flush()
     maybe_apply_editorial_stratification(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        quality=quality,
+    )
+    maybe_apply_reading_assessment(
         session,
         book_id=book_id,
         chapter_number=chapter_number,
