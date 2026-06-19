@@ -72,7 +72,7 @@ class Settings:
     llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 8000)
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
-    llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 150)
+    llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 1800)
     llm_input_price_per_1m_tokens: float = _float_env("LLM_INPUT_PRICE_PER_1M_TOKENS", 0.0)
     llm_output_price_per_1m_tokens: float = _float_env("LLM_OUTPUT_PRICE_PER_1M_TOKENS", 0.0)
     outputs_dir: Path = ROOT_DIR / "outputs"
