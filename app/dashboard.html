@@ -1778,6 +1778,7 @@
       if (activeView !== 'production') return;
       if (autoStartInFlight) return;
       if ((counts.pending || 0) < 1 || (counts.running || 0) > 0) return;
+      if (!currentChapterQueueTasks('pending').length) return;
       if ($('wizardDryRun').value === 'true') return;
       autoStartInFlight = true;
       $('state').textContent = '检测到等待中的内容，正在继续生成';
@@ -2479,6 +2480,12 @@
     }
     function firstAutoProductionChapter(snapshot) {
       return (snapshot.chapters || []).find((item) => AUTO_PRODUCTION_ACTIONS.includes(item.next_action)) || null;
+    }
+    function currentChapterQueueTasks(status = '') {
+      const chapterNumber = Number($('chapter').value || 1);
+      return (currentSnapshot?.generation_queue?.tasks || []).filter((task) =>
+        Number(task.chapter || 0) === chapterNumber && (!status || task.status === status)
+      );
     }
 
     function renderMainlineCockpit(snapshot, health, detail) {
@@ -4162,10 +4169,7 @@
         return;
       }
       const applied = await postAction('bootstrap_book_production', {book_id: bookId, apply: true});
-      if (currentSnapshot?.book?.id === bookId) {
-        const autoChapter = firstAutoProductionChapter(currentSnapshot);
-        if (autoChapter) $('chapter').value = autoChapter.number;
-      } else {
+      if (currentSnapshot?.book?.id !== bookId) {
         $('chapter').value = 1;
       }
       setActiveView('production');
@@ -4320,11 +4324,13 @@
       postAction('start_queue_background', currentProductionPayload()).catch(showError);
     });
     $('runNext').addEventListener('click', () => {
-      const item = (currentSnapshot?.chapters || []).find((chapter) =>
-        AUTO_PRODUCTION_ACTIONS.includes(chapter.next_action)
-      );
+      const item = selectedChapter(currentSnapshot);
       if (!item) {
-        showError(new Error('当前范围内没有可自动执行的安全动作'));
+        showError(new Error('没有找到当前章，请先刷新或调整章节号'));
+        return;
+      }
+      if (!AUTO_PRODUCTION_ACTIONS.includes(item.next_action)) {
+        showError(new Error(`当前章不能自动执行：${actionLabel(item.next_action)}`));
         return;
       }
       postAction('run_next_action', {book_id: currentSnapshot.book.id, chapter_number: item.number, preview_only: true, platform: currentWritingPlatform()}).catch(showError);
@@ -4454,7 +4460,6 @@
         await postAction('start_queue_background', currentProductionPayload());
         return;
       }
-      const autoChapter = firstAutoProductionChapter(currentSnapshot);
       if (['approve_chapter', 'reading_assessment_review'].includes(chapter?.next_action)) {
         if (!window.confirm('确认采用当前章最新版本吗？确认后系统会继续准备发布。')) return;
         await approveCurrentChapter(false);
@@ -4465,10 +4470,9 @@
         $('state').textContent = '当前章已进入待发布；请在发布配置与任务中一键发布到平台。';
         return;
       }
-      if (!AUTO_PRODUCTION_ACTIONS.includes(chapter.next_action) && autoChapter) {
-        $('chapter').value = autoChapter.number;
-        chapter = autoChapter;
-        $('state').textContent = `当前章需要你处理，已切到第 ${autoChapter.number} 章继续写作`;
+      if (!AUTO_PRODUCTION_ACTIONS.includes(chapter.next_action)) {
+        $('state').textContent = chapter.author_next_step || `当前章不能自动继续：${actionLabel(chapter.next_action)}`;
+        return;
       }
       if (!dryRun) {
         await postAction('start_author_background', {
