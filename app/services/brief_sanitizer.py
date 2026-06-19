@@ -19,6 +19,7 @@ STALE_BRIEF_MARKERS = (
     "题材主味：玄幻脑洞",
     "【作品DNA】 - 题材主味: 玄幻脑洞",
 )
+CONTEXTUAL_STALE_MARKERS = {"江湖志", "大江湖", "林默", "陈默"}
 
 
 def sanitize_chapter_brief_fields(
@@ -76,4 +77,12 @@ def _sanitize_text(text: str, *, current_context: str) -> str:
 
 
 def _line_has_wrong_anchor(line: str, *, current_context: str) -> bool:
-    return any(marker in line and marker not in current_context for marker in STALE_BRIEF_MARKERS)
+    has_current_context = bool((current_context or "").strip())
+    for marker in STALE_BRIEF_MARKERS:
+        if marker not in line:
+            continue
+        if marker in CONTEXTUAL_STALE_MARKERS and not has_current_context:
+            continue
+        if marker not in current_context:
+            return True
+    return False

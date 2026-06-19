@@ -1773,6 +1773,35 @@
       return counts;
     }
 
+    function formatDuration(seconds) {
+      const total = Math.max(0, Number(seconds || 0));
+      if (total < 60) return `${total} 秒`;
+      const minutes = Math.floor(total / 60);
+      const rest = total % 60;
+      if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+      const hours = Math.floor(minutes / 60);
+      const minuteRest = minutes % 60;
+      return minuteRest ? `${hours} 小时 ${minuteRest} 分` : `${hours} 小时`;
+    }
+
+    function activeGenerationText(health) {
+      const queueRunning = (health?.running_tasks || [])[0];
+      if (queueRunning) {
+        const chapterText = queueRunning.chapter_number ? `第 ${queueRunning.chapter_number} 章` : '当前章节';
+        const elapsed = formatDuration(queueRunning.running_age_seconds || 0);
+        const timeout = formatDuration(queueRunning.timeout_seconds || 0);
+        return `${chapterText}正在生成，已运行 ${elapsed}，超时阈值 ${timeout}。页面会自动刷新。`;
+      }
+      const backgroundRunning = (health?.background_runs || []).find((run) => run.status === 'running');
+      if (!backgroundRunning) return '';
+      const selected = Number($('chapter')?.value || 0);
+      const chapterText = selected ? `第 ${selected} 章` : '当前章节';
+      const elapsed = formatDuration(backgroundRunning.running_age_seconds || 0);
+      const timeout = formatDuration(backgroundRunning.timeout_seconds || 0);
+      const action = backgroundRunLabel(backgroundRunning);
+      return `${chapterText}${action ? `：${action}` : '正在处理'}，已运行 ${elapsed}，超时阈值 ${timeout}。页面会自动刷新。`;
+    }
+
     async function maybeAutoStartPendingGeneration(health) {
       const counts = health.counts || {};
       if (activeView !== 'production') return;
@@ -2059,7 +2088,8 @@
       const authorText = latestAuthorRun && latestAuthorRun.status !== 'running' && commandCenter.status !== 'can_produce'
         ? authorRunText(latestAuthorRun)
         : '';
-      const statusText = backgroundText || authorText || ((counts.running || 0) > 0
+      const activeText = activeGenerationText(health);
+      const statusText = activeText || backgroundText || authorText || ((counts.running || 0) > 0
           ? '系统正在生成。完成后会进入下一步。'
         : (counts.pending || 0) > 0
           ? '已有内容等待继续处理。点击“继续写作”即可。'
@@ -2095,7 +2125,8 @@
             <div class="timeline">
               <div class="timeline-item"><span>处理状态</span><b>${escapeHtml(statusLabel(chapter?.version_status || 'missing'))}</b></div>
               <div class="timeline-item"><span>质检结果</span><b>${escapeHtml(qualityLabel(chapter?.quality_passed)) || '未质检'}</b></div>
-              <div class="timeline-item"><span>当前耗时</span><b>${escapeHtml(backgroundRunning ? `${backgroundRunning.running_age_seconds || 0} 秒` : (running.length ? `${running[0].running_age_seconds || 0} 秒` : '无运行任务'))}</b></div>
+              <div class="timeline-item"><span>当前耗时</span><b>${escapeHtml(backgroundRunning ? formatDuration(backgroundRunning.running_age_seconds || 0) : (running.length ? formatDuration(running[0].running_age_seconds || 0) : '无运行任务'))}</b></div>
+              <div class="timeline-item"><span>超时阈值</span><b>${escapeHtml(backgroundRunning ? formatDuration(backgroundRunning.timeout_seconds || 0) : (running.length ? formatDuration(running[0].timeout_seconds || 0) : '无运行任务'))}</b></div>
               <div class="timeline-item"><span>主笔结果</span><b>${escapeHtml(latestAuthorRun ? authorRunLabel(latestAuthorRun) : '暂无')}</b></div>
               <div class="timeline-item"><span>最近用量</span><b>${latestTokens ? `${latestTokens} tokens / ${latestElapsed}` : '暂无'}</b></div>
             </div>
@@ -2494,7 +2525,7 @@
       const readinessPassed = !!snapshot.readiness?.passed;
       const command = snapshot.command_center || {};
       const primary = command.primary_action || {};
-      const text = command.detail || nextStepText(snapshot, health);
+      const text = activeGenerationText(health) || command.detail || nextStepText(snapshot, health);
       const stage = command.stage || mainlineStage(snapshot, health, chapter);
       const stageLabel = {
         setup: '准备作品',
