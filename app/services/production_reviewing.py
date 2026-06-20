@@ -58,6 +58,7 @@ def review_chapter(
         canon_context=canon_context,
     )
     report_data = json.loads(result.report)
+    report_data.setdefault("passed", bool(result.passed))
     if llm_review:
         report_data["llm_review"] = _run_llm_chapter_review(
             session,
@@ -102,6 +103,15 @@ def review_chapter(
         chapter_number=chapter_number,
         quality=quality,
     )
+    maybe_apply_editorial_stratification(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        quality=quality,
+    )
+    review.verdict = "pass" if quality.passed else "needs_revision"
+    review.notes = quality.report
+    session.flush()
     maybe_rollback_failed_elevation(
         session,
         book_id=book_id,
@@ -126,6 +136,10 @@ def reconcile_existing_quality_report(
     try:
         report_data = json.loads(quality.report or "{}")
     except json.JSONDecodeError:
+        return False
+    final_verdict = report_data.get("final_verdict") if isinstance(report_data.get("final_verdict"), dict) else {}
+    if final_verdict.get("source") == "unified_quality_verdict@v1" and final_verdict.get("status") == "needs_revision":
+        quality.passed = False
         return False
     if bool(report_data.get("passed")) and quality.passed and version.status == "reviewed_pass":
         return True

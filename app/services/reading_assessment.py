@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, QualityReport
 from app.services.brief_sanitizer import sanitize_existing_chapter_brief
 from app.services.feedback import submit_revision_suggestion
 from app.workflows.state_machine import move
@@ -28,6 +28,8 @@ WATCHED_READING_DIMS = {
     "chapter_unit_flow": 65,
     "imageable_paragraphs": 60,
 }
+REVISION_ACTIONS = {"auto_polish", "auto_revise", "auto_rebuild"}
+APPROVAL_ACTIONS = {"approve_ready", "author_review"}
 
 
 @dataclass(frozen=True)
@@ -67,12 +69,17 @@ def maybe_apply_reading_assessment(
     quality: QualityReport,
 ) -> ReadingAssessment:
     data = _loads_json(quality.report)
-    existing = data.get("reading_assessment") if isinstance(data.get("reading_assessment"), dict) else {}
-    if existing.get("source") == "reading_assessment@v1":
-        return _assessment_from_dict(existing)
-
+    data.setdefault("passed", bool(quality.passed))
+    data.setdefault("base_quality_passed", bool(data.get("passed", quality.passed)))
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     version = session.get(ChapterVersion, quality.chapter_version_id)
+    existing = data.get("reading_assessment") if isinstance(data.get("reading_assessment"), dict) else {}
+    if existing.get("source") == "reading_assessment@v1":
+        assessment = _assessment_from_dict(existing)
+        _apply_final_quality_decision(quality=quality, version=version, data=data, assessment=assessment)
+        session.flush()
+        return assessment
+
     if not chapter or not version:
         assessment = ReadingAssessment(
             "system_error",
@@ -85,10 +92,13 @@ def maybe_apply_reading_assessment(
             ["missing_chapter_or_version"],
             quality_id=quality.id,
         )
-        return _store_assessment(quality, data, assessment)
+        return _store_assessment(quality, data, assessment, version=version)
 
     assessment = assess_reading_quality(data, quality_id=quality.id)
     human_brief = _active_human_revision_brief(session, chapter_id=chapter.id)
+    if human_brief and _revision_brief_produced_version(session, brief_id=human_brief.id, version_id=version.id):
+        human_brief.status = "superseded"
+        human_brief = None
     if human_brief:
         assessment = ReadingAssessment(
             "human_revision_contract",
@@ -104,14 +114,14 @@ def maybe_apply_reading_assessment(
         )
         if version.status == "reviewed_pass":
             version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
-        stored = _store_assessment(quality, data, assessment)
+        stored = _store_assessment(quality, data, assessment, version=version)
         session.flush()
         return stored
-    if assessment.action == "approve_ready":
+    if assessment.action in APPROVAL_ACTIONS:
         _close_revision_briefs(session, chapter_id=chapter.id)
         if version.status == "needs_revision":
             version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
-    elif assessment.action in {"auto_polish", "auto_revise", "auto_rebuild"}:
+    elif assessment.action in REVISION_ACTIONS:
         brief = _ensure_revision_brief(
             session,
             book_id=book_id,
@@ -135,14 +145,14 @@ def maybe_apply_reading_assessment(
         )
         if version.status == "reviewed_pass":
             version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
-    stored = _store_assessment(quality, data, assessment)
+    stored = _store_assessment(quality, data, assessment, version=version)
     session.flush()
     return stored
 
 
 def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) -> ReadingAssessment:
     score = int(report_data.get("score") or 0)
-    passed = bool(report_data.get("passed"))
+    passed = bool(report_data.get("base_quality_passed", report_data.get("passed")))
     dimensions = report_data.get("dimensions") if isinstance(report_data.get("dimensions"), dict) else {}
     review = report_data.get("llm_review") if isinstance(report_data.get("llm_review"), dict) else {}
     editorial = report_data.get("editorial_stratification") if isinstance(report_data.get("editorial_stratification"), dict) else {}
@@ -228,7 +238,7 @@ def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) 
 
 def reading_assessment_requires_revision(report_data: dict) -> bool:
     assessment = report_data.get("reading_assessment") if isinstance(report_data.get("reading_assessment"), dict) else {}
-    return assessment.get("action") in {"auto_polish", "auto_revise", "auto_rebuild"}
+    return assessment.get("action") in REVISION_ACTIONS
 
 
 def reading_assessment_approval_ready(report_data: dict) -> bool:
@@ -381,10 +391,68 @@ def _active_human_revision_brief(session: Session, *, chapter_id: int) -> Chapte
     return None
 
 
-def _store_assessment(quality: QualityReport, data: dict, assessment: ReadingAssessment) -> ReadingAssessment:
+def _revision_brief_produced_version(session: Session, *, brief_id: int, version_id: int) -> bool:
+    tasks = session.scalars(
+        select(GenerationTask)
+        .where(GenerationTask.task_type == "revise_chapter", GenerationTask.status == "completed")
+        .order_by(GenerationTask.id.desc())
+        .limit(40)
+    )
+    for task in tasks:
+        input_data = _loads_json(task.input_json)
+        output_data = _loads_json(task.output_json)
+        if int(input_data.get("revision_brief_id") or 0) != brief_id:
+            continue
+        if int(output_data.get("version_id") or 0) == version_id:
+            return True
+    return False
+
+
+def _store_assessment(
+    quality: QualityReport,
+    data: dict,
+    assessment: ReadingAssessment,
+    *,
+    version: ChapterVersion | None,
+) -> ReadingAssessment:
     data["reading_assessment"] = assessment.to_dict()
-    quality.report = json.dumps(data, ensure_ascii=False)
+    _apply_final_quality_decision(quality=quality, version=version, data=data, assessment=assessment)
     return assessment
+
+
+def _apply_final_quality_decision(
+    *,
+    quality: QualityReport,
+    version: ChapterVersion | None,
+    data: dict,
+    assessment: ReadingAssessment,
+) -> None:
+    base_passed = bool(data.get("base_quality_passed", data.get("passed", quality.passed)))
+    requires_revision = assessment.action in REVISION_ACTIONS
+    approval_ready = assessment.action in APPROVAL_ACTIONS
+    final_passed = bool(base_passed and approval_ready)
+    if assessment.action == "inspect":
+        final_passed = False
+    data["base_quality_passed"] = base_passed
+    data["passed"] = final_passed
+    data["status"] = "PASS" if final_passed else "NEEDS_REVISION"
+    data["final_verdict"] = {
+        "status": "pass" if final_passed else "needs_revision",
+        "label": "综合评估通过" if final_passed else "综合评估需修订",
+        "reason": assessment.summary,
+        "reading_level": assessment.level,
+        "reading_action": assessment.action,
+        "base_quality_passed": base_passed,
+        "source": "unified_quality_verdict@v1",
+    }
+    quality.passed = final_passed
+    quality.report = json.dumps(data, ensure_ascii=False)
+    if not version:
+        return
+    if requires_revision and version.status in {"reviewed_pass", "approved"}:
+        version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
+    elif final_passed and version.status == "needs_revision":
+        version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
 
 
 def _assessment_from_dict(data: dict) -> ReadingAssessment:

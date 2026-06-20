@@ -543,7 +543,12 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     quality = _latest_quality(session, version_id=version.id) if version else None
     job = _latest_publish_job(session, version_id=version.id) if version else None
     active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
-    if version and version.status == "needs_revision" and quality and quality.passed:
+    if (
+        version
+        and version.status == "needs_revision"
+        and quality
+        and (quality.passed or isinstance(_loads_json(quality.report).get("reading_assessment"), dict))
+    ):
         from app.services.reading_assessment import maybe_apply_reading_assessment, reading_assessment_requires_revision
 
         assessment = maybe_apply_reading_assessment(session, book_id=book_id, chapter_number=chapter_number, quality=quality)
@@ -598,7 +603,7 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         )
         if queue_task:
             action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
-        elif revision_brief and quality and quality.passed and _reading_assessment_requires_revision(quality):
+        elif revision_brief and quality and _reading_assessment_requires_revision(quality):
             action, reason = "revise_chapter", "阅读评估已自动生成修订合同，继续修到可读候选稿"
         elif revision_brief and quality and quality.passed and _revision_brief_has_protected_review_marker(revision_brief):
             action, reason = "reading_assessment_review", "基础质检已通过，但阅读评估合同仍未确认，需要阅读判断。"

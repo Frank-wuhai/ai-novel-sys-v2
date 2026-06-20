@@ -60,6 +60,7 @@ def main() -> int:
             ("reading_assessment_state", ["scripts/reading_assessment_state_regression.py"]),
             ("dashboard_current_chapter_guard", ["scripts/dashboard_current_chapter_guard_regression.py"]),
             ("dashboard_generation_status", ["scripts/dashboard_generation_status_regression.py"]),
+            ("dashboard_quality_verdict", ["scripts/dashboard_quality_verdict_regression.py"]),
             ("context_contamination", ["scripts/context_contamination_regression.py"]),
             ("context_generic_power", ["scripts/context_generic_power_regression.py"]),
             ("skeleton_context_reset", ["scripts/skeleton_context_reset_regression.py"]),

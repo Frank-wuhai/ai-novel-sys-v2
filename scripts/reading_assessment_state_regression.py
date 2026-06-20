@@ -51,12 +51,14 @@ def main() -> int:
         decision = decide_chapter_production(item)
         package = build_human_decision_package(session, book_id=book.id, start=1, count=1)
 
-        if item.next_action != "reading_assessment_review":
+        if item.next_action != "record_chapter_continuity":
             failures.append(f"unexpected_next_action:{item.next_action}:{item.reason}")
-        if not decision.needs_author or decision.primary_intent != "approve":
+        if decision.needs_author or decision.primary_intent != "continue":
             failures.append(f"unexpected_decision:{decision.to_dict()}")
-        if package.approval_count != 1:
-            failures.append(f"missing_human_approval_package:{package.to_dict() if hasattr(package, 'to_dict') else package.approval_count}")
+        if package.approval_count != 0:
+            failures.append(f"premature_human_approval_package:{package.to_dict() if hasattr(package, 'to_dict') else package.approval_count}")
+        if not quality.passed or version.status != "reviewed_pass":
+            failures.append(f"author_review_not_reconciled:{quality.passed}:{version.status}")
 
         approve_chapter(session, version_id=version.id, reviewer="regression")
         session.flush()
@@ -95,6 +97,13 @@ def main() -> int:
             failures.append(f"auto_revision_assessment_wrong:{assessment.to_dict()}")
         if version.status != "needs_revision":
             failures.append(f"auto_revision_did_not_reopen_version:{version.status}")
+        report_data = json.loads(quality.report)
+        if quality.passed or report_data.get("passed") is not False:
+            failures.append(f"auto_revision_final_verdict_not_failed:{quality.passed}:{report_data.get('passed')}")
+        if (report_data.get("final_verdict") or {}).get("status") != "needs_revision":
+            failures.append(f"auto_revision_final_verdict_missing:{report_data.get('final_verdict')}")
+        if report_data.get("base_quality_passed") is not True:
+            failures.append(f"base_quality_result_not_preserved:{report_data.get('base_quality_passed')}")
         if item.next_action != "revise_chapter":
             failures.append(f"auto_revision_not_routed_to_revise:{item.next_action}:{item.reason}")
         if not latest_brief or "reading_assessment_auto_quality#" not in "\n".join([latest_brief.goal or "", latest_brief.required_beats or "", latest_brief.constraints or ""]):
@@ -138,6 +147,9 @@ def main() -> int:
             failures.append(f"approve_ready_assessment_wrong:{assessment.to_dict()}")
         if version.status != "reviewed_pass":
             failures.append(f"approve_ready_did_not_restore_reviewed_pass:{version.status}")
+        report_data = json.loads(quality.report)
+        if not quality.passed or (report_data.get("final_verdict") or {}).get("status") != "pass":
+            failures.append(f"approve_ready_final_verdict_wrong:{quality.passed}:{report_data.get('final_verdict')}")
         if brief.status != "superseded":
             failures.append(f"approve_ready_did_not_close_brief:{brief.status}")
         if item.next_action != "record_chapter_continuity":

@@ -2124,7 +2124,7 @@
             <summary>更多状态</summary>
             <div class="timeline">
               <div class="timeline-item"><span>处理状态</span><b>${escapeHtml(statusLabel(chapter?.version_status || 'missing'))}</b></div>
-              <div class="timeline-item"><span>质检结果</span><b>${escapeHtml(qualityLabel(chapter?.quality_passed)) || '未质检'}</b></div>
+              <div class="timeline-item"><span>综合评估</span><b>${escapeHtml(qualityLabel(chapter?.quality_passed)) || '未评估'}</b></div>
               <div class="timeline-item"><span>当前耗时</span><b>${escapeHtml(backgroundRunning ? formatDuration(backgroundRunning.running_age_seconds || 0) : (running.length ? formatDuration(running[0].running_age_seconds || 0) : '无运行任务'))}</b></div>
               <div class="timeline-item"><span>超时阈值</span><b>${escapeHtml(backgroundRunning ? formatDuration(backgroundRunning.timeout_seconds || 0) : (running.length ? formatDuration(running[0].timeout_seconds || 0) : '无运行任务'))}</b></div>
               <div class="timeline-item"><span>主笔结果</span><b>${escapeHtml(latestAuthorRun ? authorRunLabel(latestAuthorRun) : '暂无')}</b></div>
@@ -2176,8 +2176,8 @@
     function sampleOutcomeLabel(value) {
       const labels = {
         human_approved: '人工通过，已验证',
-        quality_passed: '质检通过，待你确认',
-        quality_failed: '质检未过',
+        quality_passed: '综合评估通过，待你确认',
+        quality_failed: '综合评估需修订',
         needs_more_work: '仍需修订',
         pending: '等待结果'
       };
@@ -2612,7 +2612,7 @@
       if ((counts.pending || 0) > 0) return '有待启动任务';
       if (!chapter) return '等待章节';
       if (['review_chapter', 'create_revision_brief', 'revise_chapter'].includes(chapter.next_action)) return actionLabel(chapter.next_action);
-      return chapter.quality_passed ? '质检通过' : '等待质检';
+      return chapter.quality_passed ? '综合评估通过' : '等待综合评估';
     }
 
     function publishStageText(chapter) {
@@ -2718,7 +2718,7 @@
       const canApprove = canApproveCurrentChapter(chapter, latest, quality);
       const consistencyIssues = qualityConsistencyIssues(chapter, latest, quality);
       const canInspect = Boolean(latest.content);
-      const qualityText = quality ? `${quality.passed ? '质检通过' : '质检未通过'}，${quality.score} 分` : '尚未质检';
+      const qualityText = quality ? `${quality.passed ? '综合评估通过' : '综合评估需修订'}，${quality.score} 分` : '尚未评估';
       const approveLabel = '采用当前章';
       const approveButton = canApprove ? `<button id="approveFromReader">${approveLabel}</button>` : '';
       const inspectHint = canInspect
@@ -2764,7 +2764,7 @@
             <div class="body">
               <div class="timeline">
                 <div class="timeline-item"><span>版本</span><b>#${latest.id} / ${statusLabel(latest.status)}</b></div>
-                <div class="timeline-item"><span>质检报告</span><b>${quality ? `#${quality.id} / ${quality.passed ? '通过' : '未通过'} / ${quality.score} 分` : '暂无'}</b></div>
+                <div class="timeline-item"><span>综合报告</span><b>${quality ? `#${quality.id} / ${quality.passed ? '通过' : '需修订'} / ${quality.score} 分` : '暂无'}</b></div>
                 <div class="timeline-item"><span>报告归属</span><b class="${qualityConsistencyIssues(chapter, latest, quality).length ? 'bad' : 'ok'}">${quality ? `版本 #${quality.chapter_version_id || '未知'}` : '暂无'}</b></div>
                 <div class="timeline-item"><span>主编审稿</span><b>${review.status === 'completed' ? `${review.score} 分 / ${verdictLabel(review.verdict || '')}` : '暂无'}</b></div>
                 <div class="timeline-item"><span>推荐</span><b>${escapeHtml(editorRecommendation(review))}</b></div>
@@ -2805,7 +2805,7 @@
         <div class="timeline">
           <div class="timeline-item"><span>当前章</span><b>第 ${escapeHtml($('chapter').value || 1)} 章</b></div>
           <div class="timeline-item"><span>版本</span><b>暂无</b></div>
-          <div class="timeline-item"><span>质检</span><b>暂无</b></div>
+          <div class="timeline-item"><span>综合评估</span><b>暂无</b></div>
           <div class="timeline-item"><span>主编审稿</span><b>暂无</b></div>
           <div class="timeline-item"><span>建议动作</span><b>回写作台</b></div>
         </div>`;
@@ -2839,7 +2839,7 @@
         <div class="timeline">
           <div class="timeline-item"><span>当前章</span><b>第 ${escapeHtml($('chapter').value || 1)} 章</b></div>
           <div class="timeline-item"><span>版本</span><b>${escapeHtml(statusLabel(latest?.status || 'missing'))}</b></div>
-          <div class="timeline-item"><span>质检</span><b class="${quality?.passed ? 'ok' : 'warn'}">${escapeHtml(qualityLabelText)}</b></div>
+          <div class="timeline-item"><span>综合评估</span><b class="${quality?.passed ? 'ok' : 'warn'}">${escapeHtml(qualityLabelText)}</b></div>
           <div class="timeline-item"><span>阻断/提醒</span><b class="${issueCount ? 'bad' : (warningCount ? 'warn' : 'ok')}">${issueCount} / ${warningCount}</b></div>
           <div class="timeline-item"><span>一致性</span><b class="${consistencyCount ? 'bad' : 'ok'}">${consistencyCount ? `${consistencyCount} 项冲突` : '正常'}</b></div>
           <div class="timeline-item"><span>主编审稿</span><b>${escapeHtml(reviewText)}</b></div>
@@ -2858,26 +2858,26 @@
     function qualityConsistencyIssues(chapter, latest, quality) {
       const issues = [];
       if (!latest) {
-        if (quality) issues.push('有质检报告，但当前章没有可对应的正文版本。');
+        if (quality) issues.push('有综合评估报告，但当前章没有可对应的正文版本。');
         return issues;
       }
       if (!quality) {
-        issues.push('当前版本还没有质检报告。');
+        issues.push('当前版本还没有综合评估报告。');
         return issues;
       }
       const versionId = Number(latest.id || 0);
       const reportVersionId = Number(quality.chapter_version_id || quality.data?.chapter_version_id || 0);
       if (versionId && reportVersionId && versionId !== reportVersionId) {
-        issues.push(`质检报告属于版本 #${reportVersionId}，当前正在查看版本 #${versionId}。`);
+        issues.push(`综合评估报告属于版本 #${reportVersionId}，当前正在查看版本 #${versionId}。`);
       }
       if ((latest.status === 'reviewed_pass' || latest.status === 'approved') && quality.passed === false) {
-        issues.push('版本状态显示已通过，但最新质检报告未通过。');
+        issues.push('版本状态显示已通过，但最新综合评估要求修订。');
       }
       if (latest.status === 'needs_revision' && quality.passed === true && chapter?.author_status !== 'needs_revision') {
-        issues.push('质检报告已通过，但版本状态仍是需修订。');
+        issues.push('综合评估已通过，但版本状态仍是需修订。');
       }
       if (chapter && typeof chapter.quality_passed === 'boolean' && chapter.quality_passed !== quality.passed) {
-        issues.push('章节摘要状态与最新质检报告不同步。');
+        issues.push('章节摘要状态与最新综合评估报告不同步。');
       }
       return issues;
     }
@@ -2893,7 +2893,7 @@
         versionTime ? `版本时间 ${versionTime}` : ''
       ].filter(Boolean).join(' / ');
       if (!issues.length) {
-        return `<div class="hint"><strong>版本/报告一致：</strong>${escapeHtml(meta || '当前质检报告属于正在查看的版本。')}</div>`;
+        return `<div class="hint"><strong>版本/报告一致：</strong>${escapeHtml(meta || '当前综合评估报告属于正在查看的版本。')}</div>`;
       }
       return `<div class="hint bad"><strong>版本/报告需同步：</strong>${escapeHtml(meta || '')}<ul>${issues.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul></div>`;
     }
@@ -3210,7 +3210,7 @@
     }
 
     function renderQualityDetail(data) {
-      if (!data) return '<div class="empty">暂无质检报告</div>';
+      if (!data) return '<div class="empty">暂无综合质量报告</div>';
       const dimensions = Object.entries(data.dimensions || {}).sort((a, b) => a[0].localeCompare(b[0]));
       const issues = data.issues || [];
       const warnings = data.warnings || [];
@@ -3234,11 +3234,11 @@
         ? '<div class="hint"><strong>质检结论：可进入作者阅读确认。</strong> 下方“创作提醒”是优化建议，不是必须修完才能继续；只有“规则问题/硬性问题”才是阻断。</div>'
         : '<div class="hint"><strong>质检结论：需要修订。</strong> 先处理规则问题和硬性问题，再看创作提醒。</div>';
       const reportMetaRows = [
-        ['质检报告', data.quality_report_id ? `#${data.quality_report_id}` : ''],
+        ['综合报告', data.quality_report_id ? `#${data.quality_report_id}` : ''],
         ['所属版本', data.chapter_version_id ? `#${data.chapter_version_id}` : ''],
         ['生成时间', data.created_at ? formatDateTime(data.created_at) : '']
       ];
-      return '<h2>质检报告</h2>' +
+      return '<h2>综合质量报告</h2>' +
         passNote +
         table(['字段', '值'], reportMetaRows) +
         table(['总状态', '综合分数', '中文字数'], [[qualityStatusLabel(data.status || ''), data.score ?? '', data.chinese_chars ?? '']]) +
@@ -3825,7 +3825,7 @@
       queued: '待发布',
       ready: '就绪',
       recorded: '已记录',
-      reviewed_pass: '质检通过',
+      reviewed_pass: '综合评估通过',
       restored: '已恢复',
       revision_ready: '修订就绪',
       running: '运行中',
@@ -4006,12 +4006,12 @@
         'chapter exists but brief is missing': '章节存在，但缺少写作说明',
         'brief is ready and no chapter version exists': '写作说明已就绪，可以生成草稿',
         'latest version is draft': '最新版本是草稿，需要质检',
-        'latest version failed quality': '最新版本质检未通过，需要修订',
+        'latest version failed quality': '最新版本综合评估需修订',
         'latest version failed quality and revision brief exists': '修订说明已生成，可以修订',
         'latest version needs revision and revision brief exists': '修订说明已生成，可以继续修订',
         'latest version needs revision and clean revision brief exists': '当前章已有干净修订说明，可以继续修订',
         'latest version has a feedback/recovery brief and should continue revision': '系统已生成修复/恢复说明，可以继续修订',
-        'quality passed but continuity has not been recorded': '质检通过，需要记录连续性',
+        'quality passed but continuity has not been recorded': '综合评估通过，需要记录连续性',
         'quality and continuity are complete': '质检和连续性已完成，等待阅读审批',
         'approved version has no publish job': '章节已确认，可以创建发布任务',
         'publish job is pending dry-run': '发布任务待生成预览',
@@ -4248,10 +4248,10 @@
       $('state').textContent = '已按开书顺序展开完整设定；可继续微调或一键创建。';
     }
     function verdictLabel(value) { return value === 'pass' ? '通过' : value === 'needs_revision' ? '需修订' : value === 'fail' ? '失败' : value; }
-    function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : value === 'FAIL' ? '未通过' : value; }
+    function qualityStatusLabel(value) { return value === 'PASS' ? '通过' : ['FAIL', 'NEEDS_REVISION'].includes(value) ? '需修订' : value; }
     function qualityLabel(value) {
       if (value === true || value === 'True' || value === 'true') return '通过';
-      if (value === false || value === 'False' || value === 'false') return '未通过';
+      if (value === false || value === 'False' || value === 'false') return '需修订';
       if (value === null || value === undefined || value === '') return '';
       return String(value);
     }
