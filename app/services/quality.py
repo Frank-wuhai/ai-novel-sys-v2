@@ -350,7 +350,7 @@ def evaluate_chapter(
 
 
 def split_points(value: str) -> list[str]:
-    normalized = value.replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
+    normalized = value.replace("\r", "\n").replace("\n", ",").replace("，", ",").replace("、", ",").replace("；", ",").replace(";", ",")
     return [item.strip() for item in normalized.split(",") if item.strip()]
 
 
@@ -426,7 +426,7 @@ def _is_diagnostic_point(point: str) -> bool:
         "修订合同",
         "修订模式",
         "定点修订合同",
-        "原始人工意见",
+        "原始机器修订建议",
         "意见理解规则",
         "目标读者体验",
         "必须满足",
@@ -434,7 +434,7 @@ def _is_diagnostic_point(point: str) -> bool:
         "禁止:",
         "验收:",
         "验收清单",
-        "人工意图",
+        "修订方向",
         "范围:",
         "系统修订判定",
         "处理强度",
@@ -473,16 +473,16 @@ def _is_diagnostic_point(point: str) -> bool:
         "不引入",
         "不输出系统元信息",
         "修订后必须",
-        "必须响应人工修改建议",
+        "必须响应修订方向",
         "修复质检问题",
         "采纳二审建议",
         "规避风险",
         "词语或短段落",
         "必须按最小范围处理",
         "保留其余正文",
-        "保留人工明确认可",
+        "保留当前最佳稿已验证",
         "除非它违反最新骨架",
-        "下一版必须能被人工意见逐条验收",
+        "下一版必须能被修订方向逐条验收",
         "质检术语",
         "通用章节生产标准",
         "正文字数",
@@ -519,6 +519,17 @@ def _is_diagnostic_point(point: str) -> bool:
         "利益交换",
         "行动后果",
         "阅读牵引",
+        "reading_assessment_auto_quality",
+        "当前阅读层级",
+        "源版本锁定",
+        "第1章硬性交付",
+        "不得以",
+        "醒来",
+        "睁眼",
+        "摸手机",
+        "宿舍回忆",
+        "系统菜单",
+        "环境确认",
         "利益冲突",
         "逼近风险",
         "个单元",
@@ -557,6 +568,10 @@ def _is_diagnostic_point(point: str) -> bool:
 def _is_constraint_coverage_candidate(point: str) -> bool:
     stripped = point.strip()
     if len(stripped) < 4 or len(stripped) > 60 or _is_diagnostic_point(stripped):
+        return False
+    if "\n" in stripped or "\r" in stripped:
+        return False
+    if any(marker in stripped for marker in ("禁止", "修订说明", "质检术语", "系统信息", "主编验收", "读感目标", "因果链和章末事实")):
         return False
     if stripped.startswith(("-", "【", "当前", "通用", "正文字数", "章节阶段")):
         return False
@@ -688,13 +703,13 @@ def _setting_risk_score(text: str) -> int:
 def _has_blocking_contradiction(text: str, marker: str) -> bool:
     if marker not in text:
         return False
-    allowed_prefixes = ("不得", "不能", "不可", "禁止", "避免", "拒绝")
+    allowed_prefixes = ("不得", "不能", "不可", "禁止", "避免", "拒绝", "不许", "别让", "别把", "不要")
     start = 0
     while True:
         index = text.find(marker, start)
         if index == -1:
             return False
-        prefix = text[max(0, index - 4):index]
+        prefix = text[max(0, index - 8):index]
         if not any(prefix.endswith(item) for item in allowed_prefixes):
             return True
         start = index + len(marker)
@@ -705,16 +720,39 @@ def _has_forbidden_marker(text: str, marker: str) -> bool:
         return False
     if marker != "系统提示":
         return True
-    allowed_prefixes = ("没有", "无", "不是", "不再", "不会", "别写", "不要", "禁止", "避免")
+    if not _has_meta_system_prompt_leak(text):
+        return False
+    allowed_prefixes = ("没有", "无", "不是", "不再", "不会", "别写", "不要", "禁止", "避免", "不得", "不能", "不可", "不许")
     start = 0
     while True:
         index = text.find(marker, start)
         if index == -1:
             return False
-        prefix = text[max(0, index - 6):index]
+        prefix = text[max(0, index - 10):index]
         if not any(prefix.endswith(item) for item in allowed_prefixes):
             return True
         start = index + len(marker)
+
+
+def _has_meta_system_prompt_leak(text: str) -> bool:
+    meta_patterns = (
+        "系统提示词",
+        "系统提示语",
+        "系统提示、作者说明",
+        "系统提示或作者说明",
+        "系统提示进入正文",
+        "输出系统提示",
+        "不要输出系统提示",
+        "禁止系统提示",
+        "避免系统提示",
+    )
+    if any(pattern in text for pattern in meta_patterns):
+        return True
+    for line in (text or "").splitlines():
+        stripped = line.strip(" \t-")
+        if stripped.startswith(("系统提示:", "系统提示：")):
+            return True
+    return False
 
 
 def _platform_risk_score(text: str) -> int:

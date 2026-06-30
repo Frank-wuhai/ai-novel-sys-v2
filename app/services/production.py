@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -141,14 +143,16 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
     version = session.get(ChapterVersion, version_id)
     if not version:
         raise ValueError(f"chapter version not found: {version_id}")
+    quality = session.scalar(
+        select(QualityReport)
+        .where(QualityReport.chapter_version_id == version.id)
+        .order_by(QualityReport.id.desc())
+    )
+    if _quality_has_unresolved_gate_blocker(quality):
+        raise ValueError("当前版本仍有章节类型/硬门禁失败项，不能采用。")
     if version.status == "needs_revision":
-        quality = session.scalar(
-            select(QualityReport)
-            .where(QualityReport.chapter_version_id == version.id)
-            .order_by(QualityReport.id.desc())
-        )
         if not quality or not quality.passed:
-            raise ValueError("当前版本仍未通过质检，不能审批。")
+            raise ValueError("当前版本仍未通过质检，不能采用。")
         version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
     for brief in session.scalars(
         select(ChapterBrief).where(ChapterBrief.chapter_id == version.chapter_id, ChapterBrief.status == "revision_ready")
@@ -158,6 +162,25 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
     session.add(ChapterReview(chapter_version_id=version.id, verdict="approved", reviewer=reviewer, notes="manual approval"))
     session.flush()
     return version
+
+
+def _quality_has_unresolved_gate_blocker(quality: QualityReport | None) -> bool:
+    if not quality:
+        return False
+    try:
+        data = json.loads(quality.report or "{}")
+    except json.JSONDecodeError:
+        return False
+    issues = [str(item) for item in data.get("issues") or []]
+    if any(item.startswith("chapter_type_gate_failed") for item in issues):
+        return True
+    chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
+    if chapter_type_gate and not bool(chapter_type_gate.get("passed")):
+        return True
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+        return True
+    return False
 
 
 def list_books(session: Session) -> list[Book]:

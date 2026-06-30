@@ -34,10 +34,10 @@ def attribute_generation_failure(
         if category == "unknown":
             category = "quality"
         reasons.append(f"质检未通过：{quality.get('score', '')} 分")
-        actions.append("按质检硬问题修订；若只是软维度低，交给作者判断。")
+        actions.append("按质检硬问题修订；若只是软维度低，交给主编准定稿标准判断。")
     if category == "unknown":
         category = "ready_or_manual_judgment"
-        actions.append("当前没有明确系统阻断项，建议作者阅读后决定通过、局部改或重写。")
+        actions.append("当前没有明确系统阻断项，建议按主编准定稿标准决定通过、局部修或结构修订。")
     return {
         "category": category,
         "reasons": _dedupe(reasons),

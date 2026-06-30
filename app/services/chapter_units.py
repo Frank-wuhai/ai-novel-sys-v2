@@ -74,8 +74,13 @@ def evaluate_chapter_units(text: str, *, target_min: int = 300, target_max: int 
 
 def split_chapter_units(text: str, *, target_min: int = 300, target_max: int = 700) -> list[ChapterUnit]:
     paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(text or "")) if part.strip()]
+    line_paragraphs = [part.strip() for part in str(text or "").splitlines() if part.strip()]
     pieces: list[str] = []
-    if paragraphs:
+    if len(paragraphs) >= 3:
+        pieces = paragraphs
+    elif len(line_paragraphs) >= 6:
+        pieces = line_paragraphs
+    elif paragraphs:
         pieces = paragraphs
     else:
         pieces = [part.strip() for part in re.split(r"(?<=[。！？!?])", str(text or "")) if part.strip()]

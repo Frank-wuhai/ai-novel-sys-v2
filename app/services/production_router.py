@@ -31,6 +31,7 @@ class ProductionRouterResult:
     headline: str
     detail: str
     author_state: str
+    team_state: str
     recommended_action: str
     primary_label: str
     primary_intent: str
@@ -49,6 +50,7 @@ class ProductionRouterResult:
             "headline": self.headline,
             "detail": self.detail,
             "author_state": self.author_state,
+            "team_state": self.team_state,
             "recommended_action": self.recommended_action,
             "primary_label": self.primary_label,
             "primary_intent": self.primary_intent,
@@ -272,6 +274,7 @@ def _result(
         headline=headline,
         detail=detail,
         author_state=author_state,
+        team_state=author_state,
         recommended_action=primary_label,
         primary_label=primary_label,
         primary_intent=primary_intent,

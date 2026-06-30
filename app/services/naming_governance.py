@@ -54,8 +54,13 @@ TERM_SUFFIXES = (
 )
 GENERIC_PREFIXES = ("这个", "那个", "这本", "那本", "一座", "一处", "一道", "一块", "两处", "三家", "不是", "所谓")
 CONTEXT_TRIM_MARKERS = (
+    "就当你是",
+    "你就是",
+    "原来是",
+    "前不着",
     "告诉他",
     "给我一个能让",
+    "给",
     "连滚带爬退回",
     "带进",
     "害得我",
@@ -82,6 +87,8 @@ CONTEXT_TRIM_MARKERS = (
     "撑不到",
     "负伤入",
     "三家",
+    "咱们",
+    "而且",
     "一只",
     "一条",
     "最靠",
@@ -270,7 +277,10 @@ def _context_fragment(candidate: str, term: str) -> bool:
     prefix = candidate[: -len(term)]
     if not prefix:
         return False
-    return any(marker in prefix for marker in ("不是", "能让", "只有", "还有", "传来", "退回", "告诉", "害得", "留你", "带进", "不出"))
+    return any(
+        marker in prefix
+        for marker in ("不是", "能让", "只有", "还有", "传来", "退回", "告诉", "害得", "留你", "带进", "不出")
+    )
 
 
 def _ordinary_location_or_object(prefix: str, *, suffix: str) -> bool:

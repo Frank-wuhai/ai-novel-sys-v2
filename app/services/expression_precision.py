@@ -253,7 +253,7 @@ def _recommendations(checks: dict[str, int], findings: list[PrecisionFinding]) -
     if checks.get("wording_specificity", 100) < 70:
         rows.append("把含混词换成具体物、具体动作、具体要求。")
     if findings and not rows:
-        rows.append("存在少量表达精确性风险，人工精修时优先核对物件、动作和观察条件。")
+        rows.append("存在少量表达精确性风险，编辑精修时优先核对物件、动作和观察条件。")
     return rows
 
 

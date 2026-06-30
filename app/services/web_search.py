@@ -65,7 +65,27 @@ def run_market_web_search(
             except httpx.HTTPError as exc:
                 errors.append(f"tavily_network:{exc.__class__.__name__}")
                 continue
-        elif candidate in {"agent_plan", "agent_plan_manual"}:
+        elif candidate == "agent_plan":
+            if not settings.ark_search_api_key:
+                errors.append("agent_plan_missing_key")
+                continue
+            if not settings.ark_search_base_url:
+                errors.append("agent_plan_search_base_url_missing")
+                continue
+            if not _within_monthly_budget("agent_plan", settings.agent_plan_search_monthly_limit, cost=1):
+                errors.append("agent_plan_monthly_limit_reached")
+                continue
+            try:
+                result = _search_agent_plan(query=query, max_results=max_results, search_depth=search_depth)
+                _record_search_usage("agent_plan", result.used_credits)
+                return result
+            except httpx.HTTPStatusError as exc:
+                errors.append(f"agent_plan_http_{exc.response.status_code}")
+                continue
+            except (httpx.HTTPError, ValueError) as exc:
+                errors.append(f"agent_plan_error:{exc.__class__.__name__}")
+                continue
+        elif candidate == "agent_plan_manual":
             errors.append("agent_plan_search_is_manual_pack")
             continue
         elif candidate in {"manual", "pack"}:
@@ -87,6 +107,7 @@ def web_search_status() -> dict[str, Any]:
             },
             "agent_plan_manual": {
                 "configured": bool(settings.ark_search_api_key),
+                "live_configured": bool(settings.ark_search_api_key and settings.ark_search_base_url),
                 "monthly_limit": settings.agent_plan_search_monthly_limit,
                 "used_this_month": _usage_count("agent_plan"),
             },
@@ -142,6 +163,102 @@ def _search_tavily(*, query: str, max_results: int, search_depth: str) -> WebSea
         usage=usage,
         raw={"request_id": raw.get("request_id"), "response_time": raw.get("response_time")},
     )
+
+
+def _search_agent_plan(*, query: str, max_results: int, search_depth: str) -> WebSearchResult:
+    max_results = max(1, min(10, int(max_results or 5)))
+    response = httpx.post(
+        settings.ark_search_base_url,
+        headers={
+            "Authorization": f"Bearer {settings.ark_search_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "query": query,
+            "max_results": max_results,
+            "search_depth": search_depth,
+            "expected_schema": {
+                "results": [
+                    {
+                        "title": "source title",
+                        "url": "https://...",
+                        "snippet": "short evidence excerpt or summary",
+                        "signals": ["market signal derived from this source"],
+                        "reliability": 3,
+                        "confidence": 70,
+                    }
+                ]
+            },
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+    raw = response.json()
+    rows = _extract_agent_plan_search_rows(raw)
+    normalized = {
+        "results": [
+            {
+                "title": str(item.get("title") or item.get("name") or "Agent Plan search source").strip(),
+                "url": str(item.get("url") or item.get("link") or "").strip(),
+                "snippet": str(item.get("snippet") or item.get("summary") or item.get("content") or "").strip(),
+                "signals": _agent_plan_signals(item),
+                "reliability": _bounded_int(item.get("reliability"), default=3, low=1, high=5),
+                "confidence": _bounded_int(item.get("confidence") or item.get("score"), default=70, low=0, high=100),
+            }
+            for item in rows[:max_results]
+            if isinstance(item, dict)
+        ]
+    }
+    return WebSearchResult(
+        provider="agent_plan",
+        status="completed",
+        query=query,
+        result_json=json.dumps(normalized, ensure_ascii=False),
+        used_credits=1,
+        usage=raw.get("usage") if isinstance(raw.get("usage"), dict) else {},
+        raw={"request_id": raw.get("request_id") or raw.get("id") or "", "raw_result_count": len(rows)},
+    )
+
+
+def _extract_agent_plan_search_rows(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[Any] = [
+        raw.get("results"),
+        raw.get("items"),
+        raw.get("data"),
+        raw.get("sources"),
+    ]
+    data = raw.get("data")
+    if isinstance(data, dict):
+        candidates.extend([data.get("results"), data.get("items"), data.get("sources")])
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+    raise ValueError("Agent Plan search response did not contain a results list")
+
+
+def _agent_plan_signals(item: dict[str, Any]) -> list[str]:
+    signals = item.get("signals")
+    if isinstance(signals, str):
+        return [signals]
+    if isinstance(signals, list):
+        return [str(value).strip() for value in signals if str(value).strip()]
+    text = "；".join(
+        part
+        for part in [
+            str(item.get("title") or item.get("name") or "").strip(),
+            str(item.get("snippet") or item.get("summary") or item.get("content") or "").strip()[:300],
+        ]
+        if part
+    )
+    return [text] if text else []
+
+
+def _bounded_int(value: Any, *, default: int, low: int, high: int) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
 
 
 def _signals_from_tavily_item(item: dict[str, Any]) -> list[str]:

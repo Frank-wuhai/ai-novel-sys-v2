@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.llm.providers import ArkOpenAIProvider
 from app.models.entities import Book, Character, EvidenceSource, MarketSignal, PlatformFeedback, PowerSystem, StoryArc, StoryBible, StoryFoundation, Volume, WorldRule
+from app.services.agent_plan_utilization import build_agent_plan_utilization_report
 from app.services.agent_plan_intelligence import summarize_semantic_memory
 from app.services.evidence import list_market_signals
 from app.services.planning import build_human_decision_package, plan_chapters
@@ -55,8 +56,9 @@ def check_production_readiness(
         _evidence_check(session, book_id),
         _canon_check(session, book_id),
         _semantic_memory_check(session, book_id),
+        _agent_plan_utilization_check(session, book_id),
         _chapter_queue_check(session, book_id, start, count),
-        _human_decision_check(session, book_id, start, count),
+        _team_decision_check(session, book_id, start, count),
         _llm_config_check(live_llm=live_llm),
     ]
     return ProductionReadinessReport(passed=not any(check.severity == "blocker" and not check.passed for check in checks), checks=checks)
@@ -142,8 +144,9 @@ def _skeleton_governance_check(session: Session, book_id: int) -> ReadinessCheck
         return ReadinessCheck("skeleton_governance", True, detail, severity="info")
     issue_text = ",".join(issue.code for issue in report.issues[:4])
     action = "先生成修复草案并确认骨架。"
-    if report.human_decisions:
-        action = report.human_decisions[0]
+    team_decisions = report.team_decisions or report.human_decisions
+    if team_decisions:
+        action = team_decisions[0]
     has_blocker = any(issue.severity == "blocker" for issue in report.issues)
     return ReadinessCheck(
         "skeleton_governance",
@@ -196,6 +199,13 @@ def _evidence_check(session: Session, book_id: int) -> ReadinessCheck:
             action="先执行 Agent Plan 增强一轮，让后台搜索并导入市场证据。",
         )
     if recent_count < 3:
+        if settings.production_mode in {"production", "mass", "publish"}:
+            return ReadinessCheck(
+                "evidence",
+                False,
+                f"genre={book.genre} usable_market_signals={len(signals)} recent14d={recent_count} status=insufficient_for_production",
+                action="正式量产模式下必须先执行 Agent Plan 增强，补足近期市场证据。",
+            )
         return ReadinessCheck(
             "evidence",
             True,
@@ -258,29 +268,66 @@ def _semantic_memory_check(session: Session, book_id: int) -> ReadinessCheck:
     )
 
 
+def _agent_plan_utilization_check(session: Session, book_id: int) -> ReadinessCheck:
+    if settings.llm_plan != "agent_plan":
+        return ReadinessCheck("agent_plan_utilization", True, "plan disabled", severity="info")
+    try:
+        report = build_agent_plan_utilization_report(session, book_id=book_id)
+    except (OperationalError, ValueError) as exc:
+        session.rollback()
+        return ReadinessCheck(
+            "agent_plan_utilization",
+            True,
+            f"audit unavailable: {type(exc).__name__}",
+            severity="warning",
+            action="修复 Agent Plan 审计依赖后再检查利用率。",
+        )
+    score = int(report.get("score") or 0)
+    gaps = report.get("gaps") or []
+    actions = report.get("next_actions") or []
+    if score < 65:
+        return ReadinessCheck(
+            "agent_plan_utilization",
+            True,
+            f"score={score} status={report.get('status')} gaps=" + "；".join(str(item) for item in gaps[:3]),
+            severity="warning",
+            action=str(actions[0]) if actions else "执行 agent-plan-utilization 查看细节。",
+        )
+    return ReadinessCheck(
+        "agent_plan_utilization",
+        True,
+        f"score={score} status={report.get('status')}",
+        severity="info",
+    )
+
+
 def _chapter_queue_check(session: Session, book_id: int, start: int, count: int) -> ReadinessCheck:
     from app.services.production_decision import decide_chapter_production
 
-    items = plan_chapters(session, book_id=book_id, start=start, count=count)
+    items = plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
     decisions = [decide_chapter_production(item) for item in items]
     runnable = [decision for decision in decisions if decision.can_continue]
     waiting = [decision for decision in decisions if decision.needs_author]
     done = [item for item in items if item.next_action == "done"]
     if not runnable and not waiting:
-        return ReadinessCheck("chapter_queue", False, "no runnable or human-waiting chapters in range", action="扩大章节范围或检查章节状态。")
-    return ReadinessCheck("chapter_queue", True, f"auto_ready={len(runnable)} human_waiting={len(waiting)} done={len(done)}", severity="info")
+        return ReadinessCheck("chapter_queue", False, "no runnable or confirmation-waiting chapters in range", action="扩大章节范围或检查章节状态。")
+    return ReadinessCheck("chapter_queue", True, f"auto_ready={len(runnable)} confirmation_waiting={len(waiting)} done={len(done)}", severity="info")
+
+
+def _team_decision_check(session: Session, book_id: int, start: int, count: int) -> ReadinessCheck:
+    package = build_human_decision_package(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
+    if package.inspect_count:
+        return ReadinessCheck("team_decisions", False, f"flow inspection required={package.inspect_count}", action="先处理需要流程官检查的章节或发布项。")
+    return ReadinessCheck(
+        "team_decisions",
+        True,
+        f"continuity={package.continuity_count} adoption={package.approval_count} publish={package.publish_count}",
+        severity="info",
+    )
 
 
 def _human_decision_check(session: Session, book_id: int, start: int, count: int) -> ReadinessCheck:
-    package = build_human_decision_package(session, book_id=book_id, start=start, count=count)
-    if package.inspect_count:
-        return ReadinessCheck("human_decisions", False, f"manual inspection required={package.inspect_count}", action="先处理需要人工检查的章节或发布项。")
-    return ReadinessCheck(
-        "human_decisions",
-        True,
-        f"continuity={package.continuity_count} approval={package.approval_count} publish={package.publish_count}",
-        severity="info",
-    )
+    return _team_decision_check(session, book_id, start, count)
 
 
 def _llm_config_check(*, live_llm: bool) -> ReadinessCheck:

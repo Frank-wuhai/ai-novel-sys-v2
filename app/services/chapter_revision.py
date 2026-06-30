@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,25 +12,29 @@ from app.llm.providers import get_provider
 from app.llm.schemas import StructuredOutputError
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, FeedbackAdjustment, GenerationTask, QualityReport
 from app.services.bias import apply_model_drift_local_patch, evaluate_generation_bias
-from app.services.brief_sanitizer import sanitize_chapter_brief_fields
-from app.services.chapter_standards import ensure_chapter_production_standard, extract_min_chars
+from app.services.brief_sanitizer import sanitize_chapter_brief_fields, sanitize_prompt_contract_text
+from app.services.chapter_standards import ensure_chapter_production_standard
 from app.services.chapter_unit_plans import align_chapter_unit_plan
 from app.services.feedback import REVISION_MODE_FRESH, REVISION_MODE_LOCAL_PATCH, build_rewrite_contract
 from app.services.production_llm import (
     expand_short_draft_output,
     llm_parameter_snapshot,
     llm_usage_payload,
+    parse_or_repair_json_object,
     parse_or_repair_draft_output,
     record_generation_llm_log,
     repair_humanized_unit_flow,
 )
 from app.services.production_packet import build_chapter_production_packet
 from app.services.production_gate import assert_production_gate
+from app.services.production_optimization import apply_skeleton_preflight_to_brief
 from app.services.production_run_review import record_production_run_review
 from app.services.production_state import brief_has_revision_artifacts, latest_foundation, latest_story_brief, next_version_number
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.services.quality import chinese_chars
 from app.services.paragraph_aesthetic import format_paragraph_aesthetic_contract
+from app.services.revision_success_boost import apply_revision_success_boost
+from app.services.revision_contract_manager import normalize_active_revision_contract, prepare_new_revision_contract
 from app.services.writer_loop import build_writer_loop_plan, local_revision_brief_lines
 
 
@@ -46,6 +52,7 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
     )
     if not quality:
         raise ValueError("quality report is required before revision brief")
+    prepare_new_revision_contract(session, chapter_id=chapter.id)
     try:
         quality_data = json.loads(quality.report)
     except json.JSONDecodeError:
@@ -53,21 +60,30 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
     dimensions = quality_data.get("dimensions", {}) if isinstance(quality_data, dict) else {}
     issues = quality_data.get("issues", []) if isinstance(quality_data, dict) else []
     llm_review = quality_data.get("llm_review", {}) if isinstance(quality_data, dict) else {}
-    weak_dimensions = [name for name, score in dimensions.items() if isinstance(score, int) and score < 70]
     base_brief = _latest_story_brief_for_revision(session, chapter=chapter)
     goal = _revision_story_goal(chapter_number=chapter_number, base_brief=base_brief)
-    required = "；".join(
-        [
-            _revision_story_intent(chapter_number=chapter_number, base_brief=base_brief),
-            *_revision_dimension_beats(weak_dimensions),
-            *_revision_issue_beats(issues),
-            *_chapter_unit_beats(quality_data),
-            *_llm_review_diagnostic_beats(llm_review),
-            *_editor_in_chief_beats(quality_data),
-            *_paragraph_aesthetic_beats(quality_data),
-            *local_revision_brief_lines(quality_data, chapter_number=chapter_number),
-        ]
-    )
+    failure_class = quality_data.get("production_failure_classification") if isinstance(quality_data.get("production_failure_classification"), dict) else {}
+    if failure_class.get("category") == "structure_rewrite":
+        required = _structural_rewrite_required_beats(
+            chapter_number=chapter_number,
+            base_brief=base_brief,
+            quality_data=quality_data,
+            failure_class=failure_class,
+        )
+    else:
+        weak_dimensions = [name for name, score in dimensions.items() if isinstance(score, int) and score < 70]
+        required = "；".join(
+            [
+                _revision_story_intent(chapter_number=chapter_number, base_brief=base_brief),
+                *_revision_dimension_beats(weak_dimensions),
+                *_revision_issue_beats(issues),
+                *_chapter_unit_beats(quality_data),
+                *_llm_review_diagnostic_beats(llm_review),
+                *_editor_in_chief_beats(quality_data),
+                *_paragraph_aesthetic_beats(quality_data),
+                *local_revision_brief_lines(quality_data, chapter_number=chapter_number),
+            ]
+        )
     feedback_requirements = _latest_feedback_requirements(session, book_id=book_id, chapter_number=chapter_number)
     if feedback_requirements:
         required = "；".join([item for item in [required, *feedback_requirements] if item])
@@ -77,16 +93,26 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
         _revision_story_constraints(base_brief=base_brief),
         chapter_number=chapter_number,
     )
-    writer_loop = build_writer_loop_plan(
-        chapter_number=chapter_number,
-        goal=goal,
-        required_beats=required,
-        constraints=constraints,
-        quality_report=quality_data,
-        previous_content=version.content or "",
-        mode="revision_brief",
-    )
-    required = "；".join([required, *writer_loop.rewrite_directives, *writer_loop.acceptance_checks])
+    if failure_class.get("category") != "structure_rewrite":
+        writer_loop = build_writer_loop_plan(
+            chapter_number=chapter_number,
+            goal=goal,
+            required_beats=required,
+            constraints=constraints,
+            quality_report=quality_data,
+            previous_content=version.content or "",
+            mode="revision_brief",
+        )
+        required = "；".join([required, *writer_loop.rewrite_directives, *writer_loop.acceptance_checks])
+    else:
+        constraints = "；".join(
+            [
+                constraints,
+                "revision_mode:rewrite",
+                "结构性失败必须整章重构：按 6-8 个连续小单元重写，禁止继续局部补丁。",
+                "正文必须控制在3000-4500中文字符；超过4500直接视为失败。",
+            ]
+        )
     goal, required, constraints = sanitize_chapter_brief_fields(
         session,
         book_id=book_id,
@@ -98,6 +124,7 @@ def create_revision_brief(session: Session, *, book_id: int, chapter_number: int
     brief = ChapterBrief(chapter_id=chapter.id, goal=goal, required_beats=required, constraints=constraints, status="revision_ready")
     session.add(brief)
     session.flush()
+    normalize_active_revision_contract(session, chapter_id=chapter.id, quality=quality)
     return brief
 
 
@@ -124,8 +151,18 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     if not revision_brief:
         raise ValueError("revision brief is required before revise")
+    if not quality:
+        quality = _fallback_quality_for_recovery_revision(
+            session,
+            source_version=source_version,
+            revision_brief=revision_brief,
+        )
     if not quality and not _brief_has_feedback_marker(revision_brief) and not _brief_has_actionable_revision_plan(revision_brief):
         raise ValueError("quality report is required before revise")
+    boost = apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
+    if boost.applied:
+        revision_brief = session.get(ChapterBrief, revision_brief.id) or revision_brief
+    apply_skeleton_preflight_to_brief(session, book_id=book_id, chapter_number=chapter_number, brief=revision_brief)
     foundation = latest_foundation(session, book_id)
     if not foundation:
         raise ValueError("story foundation is required before revising")
@@ -133,6 +170,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     fresh_rewrite = _revision_is_fresh_rewrite(revision_brief)
     rewrite_mode = fresh_rewrite or _revision_requires_rewrite(revision_brief)
     revision_required_beats = _revision_required_beats(revision_brief, rewrite_mode=rewrite_mode, fresh_rewrite=fresh_rewrite)
+    revision_prompt_goal = sanitize_prompt_contract_text(revision_brief.goal) or revision_brief.goal
     revision_context_mode = (
         "fresh"
         if fresh_rewrite
@@ -146,7 +184,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         required_beats=revision_brief.required_beats,
         constraints=revision_brief.constraints,
         mode="fresh" if fresh_rewrite else "revision",
-        revision_goal=revision_brief.goal,
+        revision_goal=revision_prompt_goal,
         revision_required_beats=revision_required_beats,
         revision_constraints=revision_brief.constraints,
         quality_report=quality.report if quality else None,
@@ -164,6 +202,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         source_version=source_version,
         revision_brief=revision_brief,
         canon_context=packet.context.canon_context,
+        dry_run=dry_run,
     )
     if local_patch_version:
         return local_patch_version
@@ -175,9 +214,9 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         target_platform=book.target_platform,
         previous_content=packet.context.previous_content,
         quality_report=packet.context.quality_report,
-        revision_goal=revision_brief.goal,
-        revision_required_beats=revision_required_beats,
-        revision_constraints=packet.constraints,
+        revision_goal=packet.blueprint.goal,
+        revision_required_beats=packet.blueprint.required_beats,
+        revision_constraints=packet.blueprint.constraints,
         **packet.prompt_values,
         premise=foundation.premise,
         reader_promise=foundation.reader_promise,
@@ -252,7 +291,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             error_category="structured_output",
         )
         raise
-    min_chars = extract_min_chars(revision_brief.goal, revision_required_beats, packet.constraints)
+    min_chars = packet.blueprint.target_min_chars
     draft, length_repair = expand_short_draft_output(
         provider,
         draft=draft,
@@ -275,6 +314,61 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     unit_report = (unit_flow_repair.get("after") if unit_flow_repair.get("accepted") else None) or unit_flow_repair.get("before")
     unit_plan_alignment = align_chapter_unit_plan(packet.chapter_unit_plan, unit_report)
+    if dry_run and _same_revision_content(source_version.content, draft.content):
+        draft.content = "\n\n".join(
+            [
+                draft.content,
+                "【dry-run修订验证段】主角重新审视刚才的选择，意识到章末线索已经把下一步压力推到眼前；他必须主动承担代价，而不是等待局面自行解决。",
+            ]
+        )
+        draft.self_check = [*draft.self_check, "dry-run detected duplicate output and appended a deterministic revision delta."]
+    if _same_revision_content(source_version.content, draft.content):
+        task = GenerationTask(
+            book_id=book_id,
+            task_type="revise_chapter",
+            status="failed",
+            input_json=json.dumps(
+                {
+                    "chapter_number": chapter_number,
+                    "dry_run": dry_run,
+                    "prompt_template": f"{template.name}@{template.version}",
+                    "llm_parameters": llm_parameters,
+                    "source_version_id": source_version.id,
+                    "quality_report_id": quality.id if quality else None,
+                    "revision_brief_id": revision_brief.id,
+                    "rewrite_mode": rewrite_mode,
+                    "fresh_rewrite": fresh_rewrite,
+                    "min_chars": min_chars,
+                    "max_chars": packet.blueprint.target_max_chars,
+                    **packet.task_payload,
+                },
+                ensure_ascii=False,
+            ),
+            output_json=json.dumps(
+                {
+                    "provider": response.provider,
+                    "model": response.model,
+                    "llm_parameters": llm_parameters,
+                    "error_category": "duplicate_revision_output",
+                    "error": "revision output is identical to source version",
+                    "self_check": draft.self_check,
+                    **llm_usage_payload(response, prompt=prompt),
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(task)
+        session.flush()
+        record_generation_llm_log(
+            session,
+            task=task,
+            response=response,
+            prompt_template=f"{template.name}@{template.version}",
+            prompt=prompt,
+            status="failed",
+            error_category="duplicate_revision_output",
+        )
+        raise ValueError("revision output is identical to source version; blocked duplicate version creation")
     version = ChapterVersion(
         chapter_id=chapter.id,
         version_number=next_version_number(session, chapter.id),
@@ -313,6 +407,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 "rewrite_mode": rewrite_mode,
                 "fresh_rewrite": fresh_rewrite,
                 "min_chars": min_chars,
+                "max_chars": packet.blueprint.target_max_chars,
                 **packet.task_payload,
             },
             ensure_ascii=False,
@@ -414,7 +509,7 @@ def _llm_review_diagnostic_beats(llm_review: dict) -> list[str]:
     if llm_review.get("verdict") in {"needs_revision", "fail"}:
         beats.append("参考主编二审的抽象失败原因修复读者体验，但不得继承二审里的具体旧桥段、旧名词、旧场景要求")
     if llm_review.get("risk_flags"):
-        beats.append("重新检查连续性、平台可读性、爽点节奏和章末钩子风险；具体处理以最新生产骨架和人工意见为准")
+        beats.append("重新检查连续性、平台可读性、爽点节奏和章末钩子风险；具体处理以最新生产骨架和修订方向为准")
     return beats
 
 
@@ -469,6 +564,39 @@ def _revision_story_intent(*, chapter_number: int, base_brief: ChapterBrief | No
     )
 
 
+def _structural_rewrite_required_beats(
+    *,
+    chapter_number: int,
+    base_brief: ChapterBrief | None,
+    quality_data: dict,
+    failure_class: dict,
+) -> str:
+    base_intent = _revision_story_intent(chapter_number=chapter_number, base_brief=base_brief)
+    dimensions = quality_data.get("dimensions") if isinstance(quality_data.get("dimensions"), dict) else {}
+    issues = [str(item) for item in quality_data.get("issues") or []]
+    reasons = [str(item) for item in failure_class.get("structural_reasons") or []]
+    rows = [
+        "revision_mode:rewrite",
+        "本轮不是局部润色；按稳定生产蓝图整章重构。",
+        "正文硬目标：3000-4500中文字符，6-8个连续小单元；不得膨胀成多支线长章。",
+        base_intent,
+        "开头必须承接上一章结尾的具体后果、人物状态或未解决压力。",
+        "每个小单元只完成一个清晰动作：目标、阻碍、反应、信息增量、后果承接必须可见。",
+        "章末只留一个由本章行动自然引发的具体钩子，不再额外开新线。",
+    ]
+    if "length_out_of_range" in reasons or "over_target_max_chars" in reasons or any(item.startswith("too_long") for item in issues):
+        rows.append("压缩策略：删除旁支解释、重复对话和未兑现专名；保留主角行动链、关键交易/冲突和章末物证。")
+    if "unit_count_exploded" in reasons or "unit_flow_structural" in reasons:
+        rows.append("结构策略：合并碎片场景，按承接/试探/受阻/转圜/反压/变局/代价/钩子推进，不要写成14个散片。")
+    if int(dimensions.get("brief_coverage") or 100) < 60:
+        rows.append("覆盖策略：只兑现本章最关键的3-5个承诺；每个承诺必须落到场景、动作、对白或后果。")
+    if int(dimensions.get("dialogue_fullness") or 100) < 60:
+        rows.append("对白策略：对白必须承担试探、遮掩、交易、威胁或情绪变化，不能只解释设定。")
+    if int(dimensions.get("imageable_paragraphs") or 100) < 60:
+        rows.append("画面策略：每个主要场景交代空间边界、关键物件、人物站位和动作轨迹。")
+    return "；".join(list(dict.fromkeys(row for row in rows if row)))[:1800]
+
+
 def _revision_story_constraints(*, base_brief: ChapterBrief | None) -> str:
     base = ""
     if base_brief and base_brief.constraints and not _brief_is_diagnostic(base_brief.constraints):
@@ -521,21 +649,70 @@ def _brief_has_actionable_revision_plan(brief: ChapterBrief) -> bool:
     required_markers = ("第", "核心设定", "主角", "3000-4500")
     if not all(marker in text for marker in required_markers):
         return False
-    stale_markers = ("修订合同:", "原始人工意见:", "验收清单:", "质检报告 #")
+    stale_markers = ("修订合同:", "原始修订方向:", "验收清单:", "质检报告 #")
     return not any(marker in text for marker in stale_markers)
+
+
+def _brief_has_budget_recovery_marker(brief: ChapterBrief) -> bool:
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return (
+        "system_revision_budget_recovery" in text
+        or "persistent_revision_budget:" in text
+        or "自动修订预算触顶" in text
+    )
+
+
+def _source_version_id(source: str | None) -> int | None:
+    prefix, _, raw_id = str(source or "").partition(":v")
+    if prefix not in {"revision_budget_recovery", "revision_budget_readable_restore"} or not raw_id:
+        return None
+    try:
+        return int(raw_id.split(":", 1)[0])
+    except ValueError:
+        return None
+
+
+def _fallback_quality_for_recovery_revision(
+    session: Session,
+    *,
+    source_version: ChapterVersion,
+    revision_brief: ChapterBrief,
+) -> QualityReport | None:
+    source_id = _source_version_id(source_version.source)
+    if not source_id or not _brief_has_budget_recovery_marker(revision_brief):
+        return None
+    quality = session.scalar(
+        select(QualityReport)
+        .where(QualityReport.chapter_version_id == source_id)
+        .order_by(QualityReport.id.desc())
+    )
+    if quality:
+        return quality
+    return session.scalar(
+        select(QualityReport)
+        .join(ChapterVersion, QualityReport.chapter_version_id == ChapterVersion.id)
+        .where(ChapterVersion.chapter_id == source_version.chapter_id, QualityReport.passed.is_(False))
+        .order_by(QualityReport.score.desc(), QualityReport.id.desc())
+    )
 
 
 def _revision_requires_rewrite(brief: ChapterBrief) -> bool:
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-    if (
-        f"修订模式:{REVISION_MODE_LOCAL_PATCH}" in text
-        or "修订模式:targeted" in text
-        or "修订模式:polish" in text
-    ):
+    primary_mode = _primary_revision_mode(text)
+    if primary_mode in {REVISION_MODE_FRESH, "rewrite"}:
+        return True
+    if primary_mode in {REVISION_MODE_LOCAL_PATCH, "polish"}:
+        return False
+    modes = _revision_modes(text)
+    if primary_mode == "targeted" and (REVISION_MODE_FRESH in modes or "rewrite" in modes):
+        return True
+    if primary_mode == "targeted":
         return False
     markers = (
         "修订模式:rewrite",
         "修订模式:fresh",
+        "revision_mode:rewrite",
+        "revision_mode:fresh",
         "重写",
         "重做",
         "重新组织",
@@ -548,12 +725,37 @@ def _revision_requires_rewrite(brief: ChapterBrief) -> bool:
 
 def _revision_is_fresh_rewrite(brief: ChapterBrief) -> bool:
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-    return f"修订模式:{REVISION_MODE_FRESH}" in text
+    return _primary_revision_mode(text) == REVISION_MODE_FRESH
 
 
 def _revision_is_local_patch(brief: ChapterBrief) -> bool:
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-    return f"修订模式:{REVISION_MODE_LOCAL_PATCH}" in text
+    return _primary_revision_mode(text) == REVISION_MODE_LOCAL_PATCH
+
+
+def _revision_modes(text: str) -> set[str]:
+    modes: set[str] = set()
+    normalized = (text or "").replace("：", ":")
+    for match in re.finditer(r"(?:revision_mode|修订模式):\s*([a-zA-Z_]+)", normalized):
+        modes.add(match.group(1).strip().lower())
+    return modes
+
+
+def _primary_revision_mode(text: str) -> str:
+    normalized = (text or "").replace("：", ":")
+    matches = list(re.finditer(r"(?:revision_mode|修订模式):\s*([a-zA-Z_]+)", normalized))
+    return matches[-1].group(1).strip().lower() if matches else ""
+
+
+def _same_revision_content(source: str | None, revised: str | None) -> bool:
+    def normalize(value: str | None) -> str:
+        return "".join(str(value or "").split())
+
+    source_text = normalize(source)
+    revised_text = normalize(revised)
+    if not source_text or not revised_text:
+        return False
+    return hashlib.sha256(source_text.encode("utf-8")).hexdigest() == hashlib.sha256(revised_text.encode("utf-8")).hexdigest()
 
 
 def _try_local_patch_revision(
@@ -564,6 +766,7 @@ def _try_local_patch_revision(
     source_version: ChapterVersion,
     revision_brief: ChapterBrief,
     canon_context: str,
+    dry_run: bool,
 ) -> ChapterVersion | None:
     if not _revision_is_local_patch(revision_brief):
         return None
@@ -575,17 +778,146 @@ def _try_local_patch_revision(
         canon_context=canon_context,
     )
     if not bias.model_bias_hits:
-        return None
+        return _try_llm_local_patch_revision(
+            session,
+            book_id=book_id,
+            chapter=chapter,
+            source_version=source_version,
+            revision_brief=revision_brief,
+            dry_run=dry_run,
+        )
     patched_content, replacements = apply_model_drift_local_patch(source_version.content or "", bias.model_bias_hits)
     if not replacements or patched_content == (source_version.content or ""):
+        return _try_llm_local_patch_revision(
+            session,
+            book_id=book_id,
+            chapter=chapter,
+            source_version=source_version,
+            revision_brief=revision_brief,
+            dry_run=dry_run,
+        )
+    return _store_local_patch_version(
+        session,
+        book_id=book_id,
+        chapter=chapter,
+        source_version=source_version,
+        revision_brief=revision_brief,
+        patched_content=patched_content,
+        strategy="deterministic_local_patch",
+        output_extra={"replacements": replacements, "bias_report": bias.to_dict()},
+        dry_run=dry_run,
+    )
+
+
+def _try_llm_local_patch_revision(
+    session: Session,
+    *,
+    book_id: int,
+    chapter: Chapter,
+    source_version: ChapterVersion,
+    revision_brief: ChapterBrief,
+    dry_run: bool,
+) -> ChapterVersion | None:
+    source_content = source_version.content or ""
+    if chinese_chars(source_content) > 9000:
         return None
+    provider = get_provider(dry_run)
+    model = settings.llm_revision_model
+    temperature = min(settings.llm_revision_temperature, 0.35)
+    prompt = f"""
+你是主笔，只做局部补丁，不重写整章。
+
+请严格输出 JSON：{{"title":"章节标题","content":"局部补丁后的完整章节正文","patch_note":"说明改了哪里"}}
+
+局部补丁要求：
+- 只能修订修订单命中的句子、词语、短段落或轻微承接问题。
+- 不得重排整章结构，不得改变章末事实，不得新增大设定。
+- 保留原文已经有效的场景、动作链、人物关系和信息顺序。
+- content 必须是完整章节正文，不要输出说明、Markdown 或系统信息。
+
+修订单：
+{revision_brief.goal}
+{revision_brief.required_beats}
+{revision_brief.constraints}
+
+原章节：
+{source_content}
+""".strip()
+    try:
+        response = provider.generate(
+            prompt,
+            max_tokens=min(settings.llm_revision_max_tokens, 7600),
+            temperature=temperature,
+            model=model,
+            response_format={"type": "json_object"} if provider.name != "dry_run" else None,
+        )
+        data = parse_or_repair_json_object(
+            provider,
+            response_text=response.text,
+            original_prompt=prompt,
+            expected_schema='{"title":"章节标题","content":"局部补丁后的完整章节正文","patch_note":"说明改了哪里"}',
+            max_tokens=min(settings.llm_revision_max_tokens, 7600),
+            temperature=temperature,
+            model=model,
+            task_label="局部补丁修订",
+        )
+    except Exception:
+        return None
+    patched_content = str(data.get("content") or "").strip()
+    if not patched_content or patched_content == source_content:
+        return None
+    before_chars = chinese_chars(source_content)
+    after_chars = chinese_chars(patched_content)
+    if after_chars < max(800, int(before_chars * 0.75)) or after_chars > min(8000, int(max(before_chars, 1) * 1.18)):
+        return None
+    version = _store_local_patch_version(
+        session,
+        book_id=book_id,
+        chapter=chapter,
+        source_version=source_version,
+        revision_brief=revision_brief,
+        patched_content=patched_content,
+        strategy="llm_local_patch",
+        output_extra={
+            "patch_note": str(data.get("patch_note") or ""),
+            "provider": response.provider,
+            "model": response.model,
+            **llm_usage_payload(response, prompt=prompt),
+        },
+        dry_run=False,
+    )
+    task = session.scalar(select(GenerationTask).where(GenerationTask.book_id == book_id).order_by(GenerationTask.id.desc()))
+    if task and task.task_type == "revise_chapter":
+        record_generation_llm_log(
+            session,
+            task=task,
+            response=response,
+            prompt_template="local_patch@v1",
+            prompt=prompt,
+            status="completed",
+        )
+    return version
+
+
+def _store_local_patch_version(
+    session: Session,
+    *,
+    book_id: int,
+    chapter: Chapter,
+    source_version: ChapterVersion,
+    revision_brief: ChapterBrief,
+    patched_content: str,
+    strategy: str,
+    output_extra: dict,
+    dry_run: bool,
+) -> ChapterVersion:
     version = ChapterVersion(
         chapter_id=chapter.id,
         version_number=next_version_number(session, chapter.id),
         title=source_version.title,
         content=patched_content,
         status="draft",
-        source="revision:local_patch",
+        source=f"revision:{strategy}",
     )
     session.add(version)
     session.flush()
@@ -596,20 +928,19 @@ def _try_local_patch_revision(
         input_json=json.dumps(
             {
                 "chapter_number": chapter.chapter_number,
-                "dry_run": True,
+                "dry_run": dry_run,
                 "source_version_id": source_version.id,
                 "revision_brief_id": revision_brief.id,
                 "revision_mode": REVISION_MODE_LOCAL_PATCH,
-                "bias_report": bias.to_dict(),
             },
             ensure_ascii=False,
         ),
         output_json=json.dumps(
             {
                 "version_id": version.id,
-                "strategy": "deterministic_local_patch",
-                "replacements": replacements,
+                "strategy": strategy,
                 "content_chars": chinese_chars(patched_content),
+                **output_extra,
             },
             ensure_ascii=False,
         ),
@@ -621,7 +952,7 @@ def _try_local_patch_revision(
 
 def _revision_required_beats(brief: ChapterBrief, *, rewrite_mode: bool, fresh_rewrite: bool) -> str:
     if not fresh_rewrite and not rewrite_mode:
-        return brief.required_beats
+        return sanitize_prompt_contract_text(brief.required_beats)
     keep: list[str] = []
     for part in brief.required_beats.replace("\n", "；").split("；"):
         item = part.strip()
@@ -632,4 +963,4 @@ def _revision_required_beats(brief: ChapterBrief, *, rewrite_mode: bool, fresh_r
         keep.append(item)
     if rewrite_mode and not fresh_rewrite:
         keep.append("结构重写时二审建议只作为抽象诊断，不得继承具体旧桥段、旧名词或旧场景要求")
-    return "；".join(keep)
+    return sanitize_prompt_contract_text("；".join(keep))

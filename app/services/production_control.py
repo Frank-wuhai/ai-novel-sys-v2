@@ -62,8 +62,8 @@ def build_production_control_report(
         raise ValueError(f"book not found: {book_id}")
 
     readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
-    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
-    decisions = build_human_decision_package(session, book_id=book_id, start=start, count=count)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
+    decisions = build_human_decision_package(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
     queue = build_generation_queue_health(session)
     alignment = build_story_alignment_audit(session, book_id=book_id, chapter_limit=count)
     governance = audit_book_data_governance(session, book_id=book_id, chapter_limit=count)
@@ -72,7 +72,7 @@ def build_production_control_report(
 
     decisions_by_chapter = {item.chapter_number: decide_chapter_production(item) for item in plan_items}
     auto_ready = [item for item in plan_items if decisions_by_chapter[item.chapter_number].can_continue]
-    human_waiting = [item for item in plan_items if decisions_by_chapter[item.chapter_number].needs_author]
+    confirmation_waiting = [item for item in plan_items if decisions_by_chapter[item.chapter_number].needs_author]
     inspect = [item for item in plan_items if item.next_action == "inspect_manually"]
     missing_versions = [item for item in plan_items if item.latest_version_status in {"missing", "no_version"}]
     approved = [item for item in plan_items if item.latest_version_status == "approved"]
@@ -105,7 +105,7 @@ def build_production_control_report(
     for check in failed_readiness:
         if check.severity == "blocker":
             blockers.append(f"{check.name}: {check.detail}")
-        elif check.name != "human_decisions":
+        elif check.name not in {"human_decisions", "team_decisions"}:
             warnings.append(f"{check.name}: {check.detail}")
     if inspect:
         blockers.append(f"有 {len(inspect)} 章处于未知状态，需要查看后台状态。")
@@ -122,10 +122,10 @@ def build_production_control_report(
         status = "queued"
         status_label = "待启动后台"
         next_actions.append("启动后台生产队列。")
-    elif human_waiting:
-        status = "needs_author"
-        status_label = "等待作者判断"
-        first = human_waiting[0]
+    elif confirmation_waiting:
+        status = "needs_confirmation"
+        status_label = "等待确认"
+        first = confirmation_waiting[0]
         first_decision = decisions_by_chapter[first.chapter_number]
         next_actions.append(f"第 {first.chapter_number} 章：{first_decision.next_step}")
     elif auto_ready:
@@ -145,11 +145,12 @@ def build_production_control_report(
             recommendations = [item for item in recommendations if not _auto_handled_recommendation(item)]
         warnings.extend(recommendations)
     if reviewed_pass:
-        warnings.append(f"有 {len(reviewed_pass)} 章已质检通过但尚未最终审批。")
+        warnings.append(f"有 {len(reviewed_pass)} 章已通过主编准定稿标准，等待连续性、采用确认或发布准备。")
     if missing_versions and not auto_ready:
         warnings.append(f"有 {len(missing_versions)} 章还没有正文版本。")
 
     effective_auto_ready = 0 if blockers else len(auto_ready)
+    planned_auto_ready = len(plan_items) if blockers else len(auto_ready)
     metrics: dict[str, int | bool | str] = {
         "book_id": book.id,
         "range_start": start,
@@ -157,8 +158,9 @@ def build_production_control_report(
         "readiness_passed": readiness.passed,
         "alignment_score": alignment.score,
         "auto_ready": effective_auto_ready,
-        "planned_auto_ready": len(auto_ready),
-        "human_waiting": len(human_waiting),
+        "planned_auto_ready": planned_auto_ready,
+        "confirmation_waiting": len(confirmation_waiting),
+        "human_waiting": len(confirmation_waiting),
         "approval_waiting": decisions.approval_count,
         "inspect_waiting": decisions.inspect_count,
         "approved": len(approved),
@@ -183,8 +185,8 @@ def build_production_control_report(
 
 
 def _summary(*, status: str, metrics: dict[str, int | bool | str]) -> str:
-    if status == "needs_author":
-        return f"系统已把内容推到人工判断点；待审批 {metrics['approval_waiting']} 章。"
+    if status in {"needs_author", "needs_confirmation"}:
+        return f"系统已把内容推到确认点；待确认 {metrics['approval_waiting']} 章。"
     if status == "can_produce":
         return f"当前可自动推进；可生产章节 {metrics['auto_ready']} 章。"
     if status == "running":

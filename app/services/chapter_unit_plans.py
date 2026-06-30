@@ -178,6 +178,8 @@ def align_chapter_unit_plan(plan: ChapterUnitPlan | dict[str, Any] | None, unit_
     issues: list[str] = []
     if expected and actual < max(3, expected - 2):
         issues.append(f"unit_count_low:{actual}<{expected}")
+    if expected and actual > expected + 2:
+        issues.append(f"unit_count_high:{actual}>{expected}")
     if score < 70:
         issues.append(f"unit_flow_low:{score}<70")
     if weak_units:

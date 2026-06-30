@@ -43,7 +43,7 @@ def apply_review_decision(rule_result: ReviewRuleResult, report_data: dict) -> N
         "soft_override_blockers": soft_blockers,
         "blocking_issues": blocking_issues,
         "override_reason": (
-            "硬门禁通过且主编审稿通过；软维度不足交给人工审批判断。"
+            "硬门禁通过且主编审稿通过；软维度不足交给采用确认判断。"
             if soft_rule_override and not rule_result.passed
             else ""
         ),

@@ -8,7 +8,6 @@ from app.core.config import settings
 from app.llm.providers import get_provider
 from app.llm.schemas import StructuredOutputError
 from app.models.entities import Book, ChapterVersion, GenerationTask
-from app.services.chapter_standards import extract_min_chars
 from app.services.chapter_unit_plans import align_chapter_unit_plan
 from app.services.production_llm import (
     expand_short_draft_output,
@@ -20,6 +19,7 @@ from app.services.production_llm import (
 )
 from app.services.production_packet import build_chapter_production_packet
 from app.services.production_gate import assert_production_gate
+from app.services.production_optimization import apply_skeleton_preflight_to_brief
 from app.services.production_run_review import record_production_run_review
 from app.services.production_state import get_or_create_chapter, latest_brief, latest_foundation, next_version_number
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
@@ -38,6 +38,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
     if not brief:
         raise ValueError("chapter brief is required before drafting")
     seed_prompt_templates(session)
+    apply_skeleton_preflight_to_brief(session, book_id=book_id, chapter_number=chapter_number, brief=brief)
     template = get_prompt_template(session, name="draft_chapter", version="v4")
     packet = build_chapter_production_packet(
         session,
@@ -59,9 +60,9 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
         premise=foundation.premise,
         reader_promise=foundation.reader_promise,
         chapter_number=chapter_number,
-        goal=brief.goal,
-        required_beats=brief.required_beats,
-        constraints=packet.constraints,
+        goal=packet.blueprint.goal,
+        required_beats=packet.blueprint.required_beats,
+        constraints=packet.blueprint.constraints,
     )
     provider = get_provider(dry_run)
     model = settings.llm_draft_model
@@ -128,7 +129,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
             error_category="structured_output",
         )
         raise
-    min_chars = extract_min_chars(brief.goal, brief.required_beats, packet.constraints)
+    min_chars = packet.blueprint.target_min_chars
     draft, length_repair = expand_short_draft_output(
         provider,
         draft=draft,
@@ -184,6 +185,7 @@ def draft_chapter(session: Session, *, book_id: int, chapter_number: int, dry_ru
                 "prompt_template": f"{template.name}@{template.version}",
                 "llm_parameters": llm_parameters,
                 "min_chars": min_chars,
+                "max_chars": packet.blueprint.target_max_chars,
                 **packet.task_payload,
             },
             ensure_ascii=False,

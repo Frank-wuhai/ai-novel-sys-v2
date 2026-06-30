@@ -53,9 +53,9 @@ class RevisionIntentDecision:
                 f"- 置信度:{self.confidence}",
                 f"- 判定理由:{self.reason}",
                 f"- 保留:{'；'.join(self.preserve) if self.preserve else '以最新骨架为准'}",
-                f"- 替换:{'；'.join(self.replace) if self.replace else '按人工意见命中范围处理'}",
+                f"- 替换:{'；'.join(self.replace) if self.replace else '按修订方向命中范围处理'}",
                 f"- 升级规则:{self.escalation_rule}",
-                "原始意见:",
+                "修订方向:",
             ]
         )
 
@@ -295,7 +295,7 @@ def _preserve_items(*, mode: str, latest_version: ChapterVersion | None) -> list
     if mode == REVISION_MODE_FRESH:
         return ["最新 Story Bible", "最新 Canon", "最新章节 brief"]
     if mode == REVISION_MODE_REWRITE:
-        return ["最新 Story Bible", "已登记 Canon", "人工明确认可的事实"]
+        return ["最新 Story Bible", "已登记 Canon", "当前最佳稿已验证的事实"]
     if mode == REVISION_MODE_TARGETED:
         return ["可用开篇", "已成立 Canon", "有效场景顺序", "章末事实除非意见要求改变"]
     if mode == REVISION_MODE_POLISH:
@@ -322,7 +322,7 @@ def _replace_items(*, mode: str, text: str, quality_data: dict) -> list[str]:
         items.append("未兑现的章节目标")
     if not items:
         if mode == REVISION_MODE_LOCAL_PATCH:
-            items.append("人工意见命中的句子或短段落")
+            items.append("修订方向命中的句子或短段落")
         elif mode == REVISION_MODE_POLISH:
             items.append("表达、节奏和自然分段")
         elif mode == REVISION_MODE_TARGETED:

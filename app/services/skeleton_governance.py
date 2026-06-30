@@ -36,6 +36,7 @@ class SkeletonGovernanceReport:
     source_hits: dict[str, list[str]]
     dimensions: dict[str, dict] = field(default_factory=dict)
     evidence_summary: list[str] = field(default_factory=list)
+    team_decisions: list[str] = field(default_factory=list)
     human_decisions: list[str] = field(default_factory=list)
 
     @property
@@ -52,6 +53,7 @@ class SkeletonGovernanceReport:
             "source_hits": self.source_hits,
             "dimensions": self.dimensions,
             "evidence_summary": self.evidence_summary,
+            "team_decisions": self.team_decisions or self.human_decisions,
             "human_decisions": self.human_decisions,
         }
 
@@ -296,7 +298,7 @@ def audit_story_skeleton(session: Session, *, book_id: int) -> SkeletonGovernanc
 
 def audit_story_skeleton_with_agent_evidence(session: Session, *, book_id: int) -> SkeletonGovernanceReport:
     sources = _skeleton_sources(session, book_id=book_id)
-    evidence_sources, evidence_summary, human_decisions = _agent_plan_skeleton_evidence(session, book_id=book_id, skeleton_sources=sources)
+    evidence_sources, evidence_summary, team_decisions = _agent_plan_skeleton_evidence(session, book_id=book_id, skeleton_sources=sources)
     if evidence_sources:
         sources.update(evidence_sources)
     report = audit_skeleton_sources(sources)
@@ -311,7 +313,8 @@ def audit_story_skeleton_with_agent_evidence(session: Session, *, book_id: int) 
         source_hits=source_hits,
         dimensions=report.dimensions,
         evidence_summary=[*report.evidence_summary, *evidence_summary],
-        human_decisions=[*report.human_decisions, *human_decisions],
+        team_decisions=[*report.team_decisions, *team_decisions],
+        human_decisions=[*report.human_decisions, *team_decisions],
     )
 
 
@@ -422,7 +425,7 @@ def audit_skeleton_sources(sources: dict[str, str]) -> SkeletonGovernanceReport:
     status = "pass" if score >= 70 and not any(issue.severity == "blocker" for issue in issues) else "attention"
     recommendations = [issue.recommendation for issue in issues]
     evidence_summary = _evidence_summary(sources, source_hits=source_hits, dimensions=dimensions)
-    human_decisions = _human_decisions(dimensions, issues)
+    team_decisions = _team_decisions(dimensions, issues)
     return SkeletonGovernanceReport(
         status=status,
         score=score,
@@ -431,7 +434,8 @@ def audit_skeleton_sources(sources: dict[str, str]) -> SkeletonGovernanceReport:
         source_hits=source_hits,
         dimensions=dimensions,
         evidence_summary=evidence_summary,
-        human_decisions=human_decisions,
+        team_decisions=team_decisions,
+        human_decisions=team_decisions,
     )
 
 
@@ -616,15 +620,19 @@ def _evidence_summary(sources: dict[str, str], *, source_hits: dict[str, list[st
     ]
 
 
-def _human_decisions(dimensions: dict[str, dict], issues: list[SkeletonIssue]) -> list[str]:
+def _team_decisions(dimensions: dict[str, dict], issues: list[SkeletonIssue]) -> list[str]:
     decisions: list[str] = []
     if dimensions.get("reader_promise", {}).get("status") != "pass":
-        decisions.append("需要作者确认：这本书最核心的读者承诺到底是什么。")
+        decisions.append("需要主编确认：这本书最核心的读者承诺到底是什么。")
     if dimensions.get("longform_capacity", {}).get("status") != "pass":
-        decisions.append("需要作者确认：第一卷是否有足够多的章节发动机，而不是只靠一个桥段。")
+        decisions.append("需要主编确认：第一卷是否有足够多的章节发动机，而不是只靠一个桥段。")
     if any(issue.severity == "blocker" for issue in issues):
-        decisions.append("需要作者复核：自动修复会降低结构风险，但可能削弱原始卖点刺激度。")
+        decisions.append("需要主编复核：自动修复会降低结构风险，但可能削弱原始卖点刺激度。")
     return decisions
+
+
+def _human_decisions(dimensions: dict[str, dict], issues: list[SkeletonIssue]) -> list[str]:
+    return _team_decisions(dimensions, issues)
 
 
 def _joined_sources(sources: dict[str, str], markers: tuple[str, ...]) -> str:

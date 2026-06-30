@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.brief_sanitizer import sanitize_prompt_contract_text
+
 
 def build_chapter_director_sheet(
     *,
@@ -159,7 +161,7 @@ def _previous_focus(value: str) -> str:
 
 
 def _compact_points(value: str, *, limit: int) -> list[str]:
-    normalized = str(value or "").replace("\n", "；").replace("，", "；").replace(",", "；")
+    normalized = sanitize_prompt_contract_text(value).replace("\n", "；").replace("，", "；").replace(",", "；")
     items = [
         _one_line(item)
         for item in normalized.split("；")

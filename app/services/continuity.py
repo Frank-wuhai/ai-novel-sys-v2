@@ -101,5 +101,6 @@ def latest_version_for_chapter(session: Session, *, book_id: int, chapter_number
 
 def default_chapter_continuity_summary(session: Session, *, book_id: int, chapter_number: int) -> str:
     version = latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
-    excerpt = " ".join(version.content.split())[:160]
-    return f"第{chapter_number}章已通过质检，最新版本《{version.title}》进入连续性记录。{excerpt}"
+    compact = " ".join(version.content.split())
+    ending = compact[-260:] if len(compact) > 260 else compact
+    return f"第{chapter_number}章已通过质检，最新版本《{version.title}》进入连续性记录。章末后果/下一章承接：{ending}"

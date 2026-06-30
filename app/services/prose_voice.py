@@ -173,7 +173,7 @@ def _recommendations(checks: dict[str, int], *, hits: list[str], terse_examples:
     if checks.get("sentence_texture", 100) < 60:
         rows.append("调整长短句节奏，避免连续短断句或连续解释长句，让叙述更像自然中文正文。")
     if hits and not rows:
-        rows.append("存在少量翻译腔/分析腔痕迹，人工精修时优先改成动作、感官或人物即时反应。")
+        rows.append("存在少量翻译腔/分析腔痕迹，编辑精修时优先改成动作、感官或人物即时反应。")
     return rows
 
 

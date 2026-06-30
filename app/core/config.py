@@ -73,6 +73,10 @@ class Settings:
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
     llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 1800)
+    revision_persistent_max_full_revisions: int = _int_env("REVISION_PERSISTENT_MAX_FULL_REVISIONS", 2)
+    production_auto_revision_loop_max_rounds: int = _int_env("PRODUCTION_AUTO_REVISION_LOOP_MAX_ROUNDS", 2)
+    production_profile: str = os.getenv("PRODUCTION_PROFILE", "standard").strip().lower() or "standard"
+    production_mode: str = os.getenv("PRODUCTION_MODE", "trial").strip().lower() or "trial"
     llm_input_price_per_1m_tokens: float = _float_env("LLM_INPUT_PRICE_PER_1M_TOKENS", 0.0)
     llm_output_price_per_1m_tokens: float = _float_env("LLM_OUTPUT_PRICE_PER_1M_TOKENS", 0.0)
     outputs_dir: Path = ROOT_DIR / "outputs"

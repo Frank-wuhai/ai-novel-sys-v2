@@ -10,8 +10,12 @@ from app.models.entities import PlatformFeedback, StoryArc, StoryBible, StoryFou
 
 WRITE_ACTIONS = {
     "draft_chapter",
+    "generate_chapter_samples",
+    "adopt_recommended_chapter_sample",
+    "repair_chapter_brief",
     "enqueue_draft_chapter",
     "review_chapter",
+    "generate_rebuild_candidates",
     "revise_chapter",
     "enqueue_revise_chapter",
     "create_publish_job",

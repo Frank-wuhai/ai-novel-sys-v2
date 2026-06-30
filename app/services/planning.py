@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PublishJob, QualityReport, StoryArc
 from app.services.chapter_standards import ensure_chapter_production_standard
 from app.services.brief_sanitizer import sanitize_existing_chapter_brief
+from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.context_contamination import audit_context_contamination, context_anchor_lines
-from app.services.feedback import submit_revision_suggestion
+from app.services.feedback import format_chapter_sample_adoption_context, submit_revision_suggestion
 from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REVISE, enqueue_draft_chapter, enqueue_revise_chapter
+from app.services.legacy_trace_cleanup import cleanup_active_production_traces
+from app.services.pre_draft_inputs import evaluate_pre_draft_inputs, latest_sample_task_id
+from app.services.production_actions import AUTO_ACTIONS, MANUAL_ACTIONS
+from app.services.production_orchestrator import ProductionSituation, decide_production_route
+from app.services.production_strategy import assess_production_strategy
 from app.services.production import (
     create_chapter_brief,
     create_publish_job,
@@ -23,8 +31,13 @@ from app.services.production import (
     revise_chapter,
     review_chapter,
 )
+from app.services.chapter_samples import adopt_chapter_sample, generate_chapter_samples
+from app.services.dashboard_production_actions import repair_chapter_brief
 from app.services.production_state import next_version_number
 from app.services.production_gate import check_production_gate
+from app.services.rebuild_candidates import generate_rebuild_candidates
+from app.services.revision_supervisor import apply_revision_budget_recovery, persistent_revision_budget
+from app.services.revision_success_boost import apply_revision_success_boost
 from app.services.story import arcs_for_chapter, list_story_arcs
 from app.services.story_dna import chapter_engine_for_number, story_dna_for_book
 from app.workflows.state_machine import move
@@ -80,29 +93,15 @@ class HumanDecisionPackage:
     inspect_count: int
 
 
+TeamDecisionItem = HumanDecisionItem
+TeamDecisionPackage = HumanDecisionPackage
+
+
 @dataclass(frozen=True)
 class ChapterBriefFields:
     goal: str
     required_beats: str
     constraints: str
-
-
-AUTO_ACTIONS = {
-    "create_chapter_brief",
-    "draft_chapter",
-    "enqueue_draft_chapter",
-    "review_chapter",
-    "create_revision_brief",
-    "revision_trend_recovery",
-    "revise_chapter",
-    "enqueue_revise_chapter",
-    "create_publish_job",
-    "publish_job_dry_run",
-    "queue_publish_job",
-    "retry_publish_job",
-}
-
-MANUAL_ACTIONS = {"record_chapter_continuity", "reading_assessment_review", "approve_chapter", "mark_publish_job"}
 
 
 def create_chapter_plan(
@@ -189,12 +188,34 @@ def upgrade_chapter_briefs_production_standards(session: Session, *, book_id: in
     return updated
 
 
-def plan_chapters(session: Session, *, book_id: int, start: int = 1, count: int = 10) -> list[ChapterPlanItem]:
+def plan_chapters(
+    session: Session,
+    *,
+    book_id: int,
+    start: int = 1,
+    count: int = 10,
+    apply_state_repairs: bool = True,
+) -> list[ChapterPlanItem]:
     if start < 1:
         raise ValueError("start must be >= 1")
     if count < 1:
         raise ValueError("count must be >= 1")
-    return [_plan_one(session, book_id=book_id, chapter_number=number) for number in range(start, start + count)]
+    return [
+        _plan_one(session, book_id=book_id, chapter_number=number, apply_state_repairs=apply_state_repairs)
+        for number in range(start, start + count)
+    ]
+
+
+def _should_apply_reading_assessment(quality: QualityReport) -> bool:
+    report = _loads_json(quality.report)
+    if isinstance(report.get("reading_assessment"), dict):
+        return True
+    if quality.passed:
+        return True
+    score = int(quality.score or report.get("score") or 0)
+    hard_gate = report.get("hard_gate") if isinstance(report.get("hard_gate"), dict) else {}
+    hard_gate_passed = bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS")
+    return score >= 70 and hard_gate_passed
 
 
 def run_next_action(
@@ -216,6 +237,8 @@ def run_next_action(
     if gate_message:
         return RunNextActionResult(chapter_number, action, "blocked", gate_message, None)
     if preview_only:
+        return RunNextActionResult(chapter_number, action, "preview", item.reason, item.latest_version_id or item.brief_id or item.publish_job_id)
+    if dry_run:
         return RunNextActionResult(chapter_number, action, "preview", item.reason, item.latest_version_id or item.brief_id or item.publish_job_id)
     if action == "create_chapter_brief":
         fields = _chapter_brief_fields(
@@ -241,6 +264,41 @@ def run_next_action(
             return RunNextActionResult(chapter_number, "enqueue_draft_chapter", "executed", "queued draft generation task", task.id)
         version = draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
         return RunNextActionResult(chapter_number, action, "executed", "created draft version", version.id)
+    if action == "generate_chapter_samples":
+        task = generate_chapter_samples(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            sample_count=3,
+            dry_run=dry_run,
+        )
+        return RunNextActionResult(chapter_number, action, "executed", "generated chapter samples for pre-draft direction", task.id)
+    if action == "adopt_recommended_chapter_sample":
+        chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+        brief = _latest_brief(session, chapter_id=chapter.id) if chapter else None
+        permit = evaluate_pre_draft_inputs(session, book_id=book_id, chapter_number=chapter_number, brief=brief)
+        task_id = permit.sample_task_id or latest_sample_task_id(session, book_id=book_id, chapter_number=chapter_number)
+        if not task_id or not permit.recommended_sample_index:
+            return RunNextActionResult(chapter_number, action, "blocked", "no recommended chapter sample is available", None)
+        adopted = adopt_chapter_sample(
+            session,
+            task_id=task_id,
+            sample_index=permit.recommended_sample_index,
+        )
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "executed",
+            f"adopted recommended chapter sample #{permit.recommended_sample_index}",
+            adopted.brief_id,
+        )
+    if action == "repair_chapter_brief":
+        brief = repair_chapter_brief(session, book_id=book_id, chapter_number=chapter_number)
+        return RunNextActionResult(chapter_number, action, "executed", "repaired current chapter brief before drafting", brief.id)
+    if action == "wait_previous_chapter_readable":
+        return RunNextActionResult(chapter_number, action, "blocked", item.reason, item.latest_version_id)
+    if action == "resolve_deferred_backlog":
+        return RunNextActionResult(chapter_number, action, "blocked", item.reason, item.latest_version_id)
     if action == "review_chapter":
         report = review_chapter(
             session,
@@ -254,17 +312,55 @@ def run_next_action(
         brief = create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
         return RunNextActionResult(chapter_number, action, "executed", "created revision brief", brief.id)
     if action == "revise_chapter":
+        if not dry_run:
+            chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+            latest_version = _latest_version(session, chapter_id=chapter.id) if chapter else None
+            revision_brief = _latest_revision_brief(session, chapter_id=chapter.id) if chapter else None
+            if not _revision_budget_guard_should_defer(latest_version, revision_brief):
+                budget = persistent_revision_budget(
+                    session,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    max_full_revisions=settings.revision_persistent_max_full_revisions,
+                )
+                if budget.exceeded:
+                    recovery = apply_revision_budget_recovery(
+                        session,
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        force_rebuild_reason=budget.reason,
+                    )
+                    status = "executed" if recovery.status in {"recovered", "restored_readable", "restored_readable_needs_revision"} else "blocked"
+                    return RunNextActionResult(
+                        chapter_number,
+                        "revision_budget_recovery",
+                        status,
+                        f"{recovery.message} ({budget.reason})",
+                        recovery.recovery_brief_id or recovery.recovery_version_id,
+                    )
         guard_brief = _maybe_apply_revision_loop_guard(session, book_id=book_id, chapter_number=chapter_number)
+        boost = apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
         if queue_generation:
             task = enqueue_revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
             message = "queued revision generation task"
             if guard_brief:
                 message = f"revision safety guard applied; queued light revision task with brief {guard_brief.id}"
+            elif boost.applied:
+                message = f"revision focus boost applied; queued revision task with brief {boost.brief_id}"
             return RunNextActionResult(chapter_number, "enqueue_revise_chapter", "executed", message, task.id)
-        version = revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+        version, loop_message = _run_bounded_revision_quality_loop(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            dry_run=dry_run,
+        )
         message = "created revised draft version"
         if guard_brief:
             message = f"revision safety guard applied; created light revised draft version with brief {guard_brief.id}"
+        elif boost.applied:
+            message = f"revision focus boost applied; created revised draft version with brief {boost.brief_id}"
+        if loop_message:
+            message = f"{message}; {loop_message}"
         return RunNextActionResult(chapter_number, action, "executed", message, version.id)
     if action == "create_publish_job":
         if not item.latest_version_id:
@@ -286,8 +382,27 @@ def run_next_action(
             raise ValueError("publish job is required to retry")
         job = retry_publish_job(session, job_id=item.publish_job_id)
         return RunNextActionResult(chapter_number, action, "executed", "publish job retried", job.id)
-    if action in {"record_chapter_continuity", "reading_assessment_review", "approve_chapter", "mark_publish_job"}:
-        return RunNextActionResult(chapter_number, action, "blocked", "manual decision required", None)
+    if action == "record_chapter_continuity":
+        summary = default_chapter_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
+        result = record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
+        return RunNextActionResult(chapter_number, action, "executed", "recorded chapter continuity", result.chapter_id)
+    if action in MANUAL_ACTIONS:
+        return RunNextActionResult(chapter_number, action, "blocked", "confirmation required", None)
+    if action == "revision_budget_recovery":
+        recovery = apply_revision_budget_recovery(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            force_rebuild_reason=item.reason,
+        )
+        status = "executed" if recovery.status in {"recovered", "restored_readable", "restored_readable_needs_revision"} else "blocked"
+        return RunNextActionResult(
+            chapter_number,
+            "revision_budget_recovery",
+            status,
+            recovery.message,
+            recovery.recovery_brief_id or recovery.recovery_version_id,
+        )
     if action == "revision_trend_recovery":
         brief = _apply_revision_trend_recovery(
             session,
@@ -304,6 +419,29 @@ def run_next_action(
             "修订趋势劣化，已自动回退到近期最佳稿并生成换策略修订单。",
             brief.id,
         )
+    if action == "generate_rebuild_candidates":
+        result = generate_rebuild_candidates(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            candidate_count=3,
+            dry_run=dry_run,
+        )
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "executed",
+            f"已生成 {result.candidate_count} 个重建候选并选择最高分版本 score={result.selected_score}",
+            result.selected_version_id,
+        )
+    if action == "defer_chapter_for_later":
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "blocked",
+            "当前策略已禁止未通过章节暂存后切下一章；请继续回炉修订或多候选重建，直到正式通过。",
+            item.latest_version_id,
+        )
     if action == "done":
         return RunNextActionResult(chapter_number, action, "noop", "chapter is complete", None)
     return RunNextActionResult(chapter_number, action, "blocked", item.reason, None)
@@ -311,6 +449,9 @@ def run_next_action(
 
 _PRODUCTION_GATED_ACTIONS = {
     "draft_chapter",
+    "generate_chapter_samples",
+    "adopt_recommended_chapter_sample",
+    "repair_chapter_brief",
     "enqueue_draft_chapter",
     "review_chapter",
     "revise_chapter",
@@ -325,6 +466,35 @@ _PRODUCTION_GATED_ACTIONS = {
 def _production_gate_blocker(session: Session, *, book_id: int, action: str) -> str:
     result = check_production_gate(session, book_id=book_id, action=action)
     return "" if result.passed else result.message
+
+
+def _run_bounded_revision_quality_loop(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    dry_run: bool,
+) -> tuple[ChapterVersion, str]:
+    max_rounds = max(1, min(3, settings.production_auto_revision_loop_max_rounds))
+    version = revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+    if dry_run or max_rounds <= 1:
+        return version, ""
+    stages: list[str] = [f"round1:revision_v{version.id}"]
+    for round_number in range(1, max_rounds + 1):
+        quality = review_chapter(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            llm_review=True,
+            review_dry_run=dry_run,
+        )
+        stages.append(f"round{round_number}:review_{quality.score}_{'pass' if quality.passed else 'fail'}")
+        if quality.passed or round_number >= max_rounds:
+            break
+        apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
+        version = revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+        stages.append(f"round{round_number + 1}:revision_v{version.id}")
+    return version, "auto loop " + " -> ".join(stages)
 
 
 def run_book_cycle(
@@ -374,9 +544,16 @@ def run_book_cycle(
     return BookCycleResult(executed=executed, blocked=blocked, done=done)
 
 
-def build_human_decision_package(session: Session, *, book_id: int, start: int = 1, count: int = 10) -> HumanDecisionPackage:
+def build_human_decision_package(
+    session: Session,
+    *,
+    book_id: int,
+    start: int = 1,
+    count: int = 10,
+    apply_state_repairs: bool = True,
+) -> HumanDecisionPackage:
     items: list[HumanDecisionItem] = []
-    for item in plan_chapters(session, book_id=book_id, start=start, count=count):
+    for item in plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=apply_state_repairs):
         decision = _decision_item(item, book_id=book_id)
         if decision:
             items.append(decision)
@@ -389,32 +566,25 @@ def build_human_decision_package(session: Session, *, book_id: int, start: int =
     )
 
 
+def build_team_decision_package(
+    session: Session,
+    *,
+    book_id: int,
+    start: int = 1,
+    count: int = 10,
+    apply_state_repairs: bool = True,
+) -> TeamDecisionPackage:
+    return build_human_decision_package(
+        session,
+        book_id=book_id,
+        start=start,
+        count=count,
+        apply_state_repairs=apply_state_repairs,
+    )
+
+
 def _decision_item(item: ChapterPlanItem, *, book_id: int) -> HumanDecisionItem | None:
-    if item.next_action == "record_chapter_continuity":
-        return HumanDecisionItem(
-            decision_type="continuity_writeback",
-            chapter_number=item.chapter_number,
-            chapter_id=item.chapter_id,
-            version_id=item.latest_version_id,
-            publish_job_id=None,
-            reason=item.reason,
-            command_hint=(
-                f"python -m app.cli record-chapter-continuity --book-id {book_id} --chapter-number {item.chapter_number} "
-                "--summary \"...\" --character-state \"CHARACTER_ID:...\" --new-foreshadow \"...\" --payoff \"FORESHADOW_ID:...\""
-            ),
-        )
     if item.next_action == "approve_chapter":
-        version_id = item.latest_version_id or 0
-        return HumanDecisionItem(
-            decision_type="human_approval",
-            chapter_number=item.chapter_number,
-            chapter_id=item.chapter_id,
-            version_id=item.latest_version_id,
-            publish_job_id=None,
-            reason=item.reason,
-            command_hint=f"python -m app.cli approve-chapter --version-id {version_id} --reviewer human",
-        )
-    if item.next_action == "reading_assessment_review":
         version_id = item.latest_version_id or 0
         return HumanDecisionItem(
             decision_type="human_approval",
@@ -490,6 +660,9 @@ def _maybe_apply_revision_loop_guard(
         suggestion_text=suggestion,
         revision_mode="local_patch",
     )
+    if "修订模式:local_patch" not in (guard_brief.required_beats or ""):
+        guard_brief.required_beats = "\n".join([guard_brief.required_beats or "", "修订模式:local_patch"]).strip()
+        session.flush()
     return guard_brief
 
 
@@ -521,9 +694,33 @@ def _quality_needs_broader_revision(quality: QualityReport) -> bool:
     return any(marker in review_text for marker in broader_markers)
 
 
-def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> ChapterPlanItem:
+def _plan_one(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    apply_state_repairs: bool = True,
+) -> ChapterPlanItem:
     chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
     if not chapter:
+        blocker_action, blocker_reason = _pre_chapter_creation_blocker(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+        )
+        if blocker_action:
+            return ChapterPlanItem(
+                chapter_number=chapter_number,
+                chapter_id=None,
+                brief_id=None,
+                latest_version_id=None,
+                latest_version_status="missing",
+                latest_quality_passed=None,
+                publish_job_id=None,
+                publish_job_status="",
+                next_action=blocker_action,
+                reason=blocker_reason,
+            )
         return ChapterPlanItem(
             chapter_number=chapter_number,
             chapter_id=None,
@@ -537,17 +734,67 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
             reason="chapter and brief are missing",
         )
 
-    _restore_reconciled_readable_version(session, chapter_id=chapter.id)
+    if apply_state_repairs:
+        cleanup_active_production_traces(session, book_id=book_id)
+        _restore_reconciled_readable_version(session, chapter_id=chapter.id)
     brief = _latest_brief(session, chapter_id=chapter.id)
     version = _latest_version(session, chapter_id=chapter.id)
     quality = _latest_quality(session, version_id=version.id) if version else None
     job = _latest_publish_job(session, version_id=version.id) if version else None
     active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if apply_state_repairs and _accept_passed_budget_recovery_version(
+        session,
+        version=version,
+        quality=quality,
+        active_revision_brief=active_revision_brief,
+    ):
+        version = _latest_version(session, chapter_id=chapter.id)
+        quality = _latest_quality(session, version_id=version.id) if version else None
+        active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if apply_state_repairs and _close_stale_passed_revision_contract(
+        session,
+        version=version,
+        quality=quality,
+        active_revision_brief=active_revision_brief,
+    ):
+        version = _latest_version(session, chapter_id=chapter.id)
+        quality = _latest_quality(session, version_id=version.id) if version else None
+        active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
     if (
+        apply_state_repairs
+        and version
+        and quality
+        and version.status in {"reviewed_pass", "approved"}
+        and _quality_report_has_unresolved_gate_blocker(quality)
+    ):
+        from app.services.reading_assessment import maybe_apply_reading_assessment
+
+        maybe_apply_reading_assessment(session, book_id=book_id, chapter_number=chapter_number, quality=quality)
+        version = _latest_version(session, chapter_id=chapter.id)
+        quality = _latest_quality(session, version_id=version.id) if version else None
+        active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if (
+        apply_state_repairs
+        and version
+        and quality
+        and version.status in {"reviewed_pass", "approved"}
+        and _should_apply_reading_assessment(quality)
+        and not _quality_has_formal_reading_approval(quality)
+    ):
+        from app.services.reading_assessment import maybe_apply_reading_assessment
+
+        maybe_apply_reading_assessment(session, book_id=book_id, chapter_number=chapter_number, quality=quality)
+        version = _latest_version(session, chapter_id=chapter.id)
+        quality = _latest_quality(session, version_id=version.id) if version else None
+        active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if (
+        apply_state_repairs
+        and
         version
         and version.status == "needs_revision"
         and quality
-        and (quality.passed or isinstance(_loads_json(quality.report).get("reading_assessment"), dict))
+        and _should_apply_reading_assessment(quality)
+        and not _revision_brief_blocks_reading_assessment_takeover(active_revision_brief)
     ):
         from app.services.reading_assessment import maybe_apply_reading_assessment, reading_assessment_requires_revision
 
@@ -559,6 +806,8 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         elif reading_assessment_requires_revision(_loads_json(quality.report)):
             active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
     if (
+        apply_state_repairs
+        and
         version
         and quality
         and version.status == "needs_revision"
@@ -569,63 +818,118 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
         if reconcile_existing_quality_report(session, version=version, quality=quality):
             version = _latest_version(session, chapter_id=chapter.id)
             quality = _latest_quality(session, version_id=version.id) if version else None
-    if version and version.status in {"reviewed_pass", "approved"} and _revision_brief_blocks_quality_reconcile(active_revision_brief):
+            active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    if (
+        apply_state_repairs
+        and version
+        and version.status in {"reviewed_pass", "approved"}
+        and _revision_brief_blocks_quality_reconcile(active_revision_brief)
+    ):
         version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
         quality = _latest_quality(session, version_id=version.id)
         session.flush()
-    elif version and version.status in {"reviewed_pass", "approved"}:
+    elif apply_state_repairs and version and version.status in {"reviewed_pass", "approved"}:
         _supersede_active_revision_briefs(session, chapter_id=chapter.id)
         from app.services.chapter_archive import archive_chapter_history_after_readable
 
         archive_chapter_history_after_readable(session, chapter_id=chapter.id, readable_version_id=version.id)
+    if apply_state_repairs:
+        _inherit_protected_inputs_into_active_revision_brief(session, book_id=book_id, chapter_number=chapter_number, chapter_id=chapter.id)
 
-    if not brief:
-        action, reason = "create_chapter_brief", "chapter exists but brief is missing"
-    elif not version:
-        queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
-        if queue_task:
-            action, reason = "wait_generation_task", f"draft generation task {queue_task.id} is {queue_task.status}"
-        else:
-            action, reason = "draft_chapter", "brief is ready and no chapter version exists"
-    elif version.status == "draft":
-        action, reason = "review_chapter", "latest version is draft"
+    draft_queue_task = None
+    revision_queue_task = None
+    revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    budget_blocker = ""
+    trend_blocker = ""
+    should_generate_rebuild_candidates = False
+    reading_assessment_requires_revision = False
+    protected_review_contract_passed = False
+    feedback_marker_without_quality = False
+    revision_matches_quality_or_feedback = False
+    story_clean_revision_brief = False
+    production_strategy = None
+    has_sample_adoption = bool(format_chapter_sample_adoption_context(session, book_id=book_id, chapter_number=chapter_number))
+    has_continuity_context = _has_previous_chapter_context(session, book_id=book_id, chapter_number=chapter_number)
+    if not version:
+        draft_queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
     elif version.status == "needs_revision":
-        revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
-        queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
+        revision_queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
         trend_blocker = (
             ""
-            if (
-                _active_revision_trend_recovery(version, revision_brief)
-                or _revision_brief_is_rebuild_recovery(revision_brief)
-                or _revision_brief_has_protected_review_marker(revision_brief)
-            )
+            if _revision_brief_defers_trend_recovery(version, revision_brief, quality)
             else _revision_quality_trend_blocker(session, chapter_id=chapter.id)
         )
-        if queue_task:
-            action, reason = "wait_generation_task", f"revision generation task {queue_task.id} is {queue_task.status}"
-        elif revision_brief and quality and _reading_assessment_requires_revision(quality):
-            action, reason = "revise_chapter", "阅读评估已自动生成修订合同，继续修到可读候选稿"
-        elif revision_brief and quality and quality.passed and _revision_brief_has_protected_review_marker(revision_brief):
-            action, reason = "reading_assessment_review", "基础质检已通过，但阅读评估合同仍未确认，需要阅读判断。"
-        elif trend_blocker:
-            action, reason = "revision_trend_recovery", trend_blocker
-        elif revision_brief and _revision_brief_has_feedback_marker(revision_brief) and quality is None:
-            action, reason = "revise_chapter", "latest version has a feedback/recovery brief and should continue revision"
-        elif revision_brief and quality and (_revision_brief_matches_quality(revision_brief, quality) or _revision_brief_matches_feedback_reopen(revision_brief, quality)):
-            action, reason = "revise_chapter", "latest version needs revision and revision brief exists"
-        elif revision_brief and _revision_brief_is_story_clean(revision_brief):
-            action, reason = "revise_chapter", "latest version needs revision and clean revision brief exists"
-        else:
-            action, reason = "create_revision_brief", "latest version failed quality needs fresh revision brief"
-    elif version.status == "reviewed_pass":
-        if chapter.status != "continuity_recorded":
-            action, reason = "record_chapter_continuity", "quality passed but continuity has not been recorded"
-        else:
-            action, reason = "approve_chapter", "quality and continuity are complete"
-    elif version.status == "approved":
-        action, reason = _publish_action(job)
-    else:
-        action, reason = "inspect_manually", f"unhandled latest version status: {version.status}"
+        if revision_brief:
+            budget_blocker = _revision_budget_blocker(
+                session,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                version=version,
+                brief=revision_brief,
+            )
+            should_generate_rebuild_candidates = _should_generate_rebuild_candidates(
+                session,
+                chapter_id=chapter.id,
+                revision_brief=revision_brief,
+                latest_version=version,
+            )
+            reading_assessment_requires_revision = bool(quality and _reading_assessment_requires_revision(quality))
+            protected_review_contract_passed = bool(quality and quality.passed and _revision_brief_has_protected_review_marker(revision_brief))
+            feedback_marker_without_quality = bool(_revision_brief_has_feedback_marker(revision_brief) and quality is None)
+            revision_matches_quality_or_feedback = bool(
+                quality
+                and (_revision_brief_matches_quality(revision_brief, quality) or _revision_brief_matches_feedback_reopen(revision_brief, quality))
+            )
+            story_clean_revision_brief = _revision_brief_is_story_clean(revision_brief)
+        production_strategy = assess_production_strategy(
+            session,
+            chapter_id=chapter.id,
+            latest_version=version,
+            latest_quality=quality,
+            revision_brief=revision_brief,
+            has_sample_adoption=has_sample_adoption,
+            has_continuity_context=has_continuity_context,
+        )
+    publish_action, publish_reason = _publish_action(job) if version and version.status == "approved" else ("", "")
+    route = decide_production_route(
+        ProductionSituation(
+            chapter_number=chapter_number,
+            chapter_status=chapter.status,
+            has_brief=bool(brief),
+            latest_version_status=version.status if version else "missing",
+            latest_quality_passed=quality.passed if quality else None,
+            publish_action=publish_action,
+            publish_reason=publish_reason,
+            draft_queue_status=draft_queue_task.status if draft_queue_task else "",
+            draft_queue_id=draft_queue_task.id if draft_queue_task else None,
+            revision_queue_status=revision_queue_task.status if revision_queue_task else "",
+            revision_queue_id=revision_queue_task.id if revision_queue_task else None,
+            has_revision_brief=bool(revision_brief),
+            has_sample_adoption=has_sample_adoption,
+            has_continuity_context=has_continuity_context,
+            budget_blocker=budget_blocker,
+            trend_blocker=trend_blocker,
+            should_generate_rebuild_candidates=should_generate_rebuild_candidates,
+            reading_assessment_requires_revision=reading_assessment_requires_revision,
+            protected_review_contract_passed=protected_review_contract_passed,
+            feedback_marker_without_quality=feedback_marker_without_quality,
+            revision_matches_quality_or_feedback=revision_matches_quality_or_feedback,
+            story_clean_revision_brief=story_clean_revision_brief,
+            strategy_action=production_strategy.action if production_strategy else "",
+            strategy_intent=production_strategy.intent if production_strategy else "",
+            strategy_reason=production_strategy.reason if production_strategy else "",
+            strategy_category=production_strategy.category if production_strategy else "",
+            strategy_confidence=production_strategy.confidence if production_strategy else 0,
+            strategy_evidence=production_strategy.evidence if production_strategy else (),
+        )
+    )
+    action, reason = route.action, route.reason
+    if apply_state_repairs and action == "draft_chapter":
+        permit = evaluate_pre_draft_inputs(session, book_id=book_id, chapter_number=chapter_number, brief=brief)
+        if not permit.passed:
+            action, reason = permit.action, permit.reason
+    if apply_state_repairs and action == "revise_chapter":
+        apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
 
     return ChapterPlanItem(
         chapter_number=chapter_number,
@@ -641,6 +945,52 @@ def _plan_one(session: Session, *, book_id: int, chapter_number: int) -> Chapter
     )
 
 
+def _pre_chapter_creation_blocker(session: Session, *, book_id: int, chapter_number: int) -> tuple[str, str]:
+    if chapter_number <= 1:
+        return "", ""
+    segment_size = 5
+    previous_closed_segment_end = ((chapter_number - 1) // segment_size) * segment_size
+    if previous_closed_segment_end > 0:
+        for chapter in session.scalars(
+            select(Chapter)
+            .where(
+                Chapter.book_id == book_id,
+                Chapter.chapter_number <= previous_closed_segment_end,
+                Chapter.status == "continuity_deferred",
+            )
+            .order_by(Chapter.chapter_number)
+        ):
+            latest = _latest_version(session, chapter_id=chapter.id)
+            if latest and latest.status == "needs_revision":
+                return (
+                    "resolve_deferred_backlog",
+                    f"第{chapter_number}章暂停生产：第{chapter.chapter_number}章仍未通过，不能创建下一生产段的新章节。",
+                )
+
+    previous_number = chapter_number - 1
+    previous = _chapter(session, book_id=book_id, chapter_number=previous_number)
+    if not previous:
+        return (
+            "wait_previous_chapter_readable",
+            f"第{chapter_number}章不能先生产：第{previous_number}章还不存在，无法建立读者连续性。",
+        )
+    latest = _latest_version(session, chapter_id=previous.id)
+    if not latest:
+        return (
+            "wait_previous_chapter_readable",
+            f"第{chapter_number}章不能先生产：第{previous_number}章还没有可承接正文。",
+        )
+    quality = _latest_quality(session, version_id=latest.id)
+    if latest.status in {"reviewed_pass", "approved"} and not (quality and quality.passed is False):
+        return "", ""
+    score = f"，评分 {quality.score}" if quality and quality.score is not None else ""
+    verdict = "未通过" if quality and quality.passed is False else "未定稿"
+    return (
+        "wait_previous_chapter_readable",
+        f"第{chapter_number}章暂停生产：第{previous_number}章最新版本 v{latest.version_number} 状态为 {latest.status}{score}，{verdict}。先让上一章进入 reviewed_pass/approved。",
+    )
+
+
 def _revision_brief_blocks_quality_reconcile(brief: ChapterBrief | None) -> bool:
     if not brief or brief.status != "revision_ready":
         return False
@@ -650,6 +1000,145 @@ def _revision_brief_blocks_quality_reconcile(brief: ChapterBrief | None) -> bool
         or _revision_brief_has_protected_review_marker(brief)
         or "system_revision_trend_recovery" in text
         or _revision_brief_is_story_clean(brief)
+    )
+
+
+def _quality_report_has_unresolved_gate_blocker(quality: QualityReport | None) -> bool:
+    if not quality:
+        return False
+    data = _loads_json(quality.report)
+    issues = [str(item) for item in data.get("issues") or []]
+    if any(item.startswith("chapter_type_gate_failed") for item in issues):
+        return True
+    chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
+    if chapter_type_gate and not bool(chapter_type_gate.get("passed")):
+        return True
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+        return True
+    return False
+
+
+def _quality_has_formal_reading_approval(quality: QualityReport | None) -> bool:
+    if not quality:
+        return False
+    from app.services.reading_assessment import reading_assessment_approval_ready
+
+    return reading_assessment_approval_ready(_loads_json(quality.report))
+
+
+def _defer_chapter_for_later(session: Session, *, book_id: int, chapter_number: int, reason: str) -> int:
+    chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+    if not chapter:
+        raise ValueError("chapter not found")
+    version = _latest_version(session, chapter_id=chapter.id)
+    if not version or version.status != "needs_revision":
+        raise ValueError("only a needs_revision chapter can be deferred")
+    quality = _latest_quality(session, version_id=version.id)
+    if not quality or int(quality.score or 0) < 70:
+        raise ValueError("当前章还没有达到可读承接线，不能暂存推进后续章节。")
+    compact = " ".join((version.content or "").split())
+    ending = compact[-360:] if len(compact) > 360 else compact
+    chapter.summary = (
+        f"PROVISIONAL_CONTINUITY: 第{chapter_number}章暂存回炉，当前稿 score={quality.score}，"
+        f"未达发布标准但可供后续章节临时承接。暂存原因：{reason}。"
+        f"章末后果/下一章临时承接：{ending}"
+    )
+    chapter.status = "continuity_deferred"
+    for brief in session.scalars(
+        select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")
+    ):
+        text = _revision_brief_text(brief)
+        if "deferred_revision_backlog" not in text:
+            brief.constraints = "\n".join(
+                item
+                for item in [
+                    brief.constraints or "",
+                    "deferred_revision_backlog: 当前章已暂存供后续承接；发布前必须回炉修到正式通过，不得直接发布。",
+                ]
+                if item
+            )
+    session.flush()
+    return version.id
+
+
+def _accept_passed_budget_recovery_version(
+    session: Session,
+    *,
+    version: ChapterVersion | None,
+    quality: QualityReport | None,
+    active_revision_brief: ChapterBrief | None,
+) -> bool:
+    if not version or not quality or not active_revision_brief:
+        return False
+    if version.status != "needs_revision" or not quality.passed:
+        return False
+    if not _active_revision_budget_recovery(version, active_revision_brief):
+        return False
+    if not _ensure_formal_quality_approval(session, version=version, quality=quality):
+        return False
+    version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
+    _supersede_active_revision_briefs(session, chapter_id=version.chapter_id)
+    session.flush()
+    return True
+
+
+def _close_stale_passed_revision_contract(
+    session: Session,
+    *,
+    version: ChapterVersion | None,
+    quality: QualityReport | None,
+    active_revision_brief: ChapterBrief | None,
+) -> bool:
+    if not version or not quality or not active_revision_brief:
+        return False
+    if version.status != "needs_revision" or not quality.passed:
+        return False
+    if not _ensure_formal_quality_approval(session, version=version, quality=quality):
+        return False
+    if not _revision_brief_blocks_quality_reconcile(active_revision_brief):
+        return False
+    if not _revision_brief_mentions_any_version(active_revision_brief):
+        return False
+    if _revision_brief_targets_version(active_revision_brief, version):
+        return False
+    active_revision_brief.status = "superseded"
+    version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
+    session.flush()
+    return True
+
+
+def _ensure_formal_quality_approval(
+    session: Session,
+    *,
+    version: ChapterVersion,
+    quality: QualityReport,
+) -> bool:
+    chapter = session.get(Chapter, version.chapter_id)
+    if not chapter:
+        return False
+    from app.services.reading_assessment import maybe_apply_reading_assessment, reading_assessment_approval_ready
+
+    assessment = maybe_apply_reading_assessment(
+        session,
+        book_id=chapter.book_id,
+        chapter_number=chapter.chapter_number,
+        quality=quality,
+    )
+    if assessment.action != "approve_ready":
+        return False
+    return reading_assessment_approval_ready(_loads_json(quality.report)) and bool(quality.passed)
+
+
+def _revision_brief_blocks_reading_assessment_takeover(brief: ChapterBrief | None) -> bool:
+    if not brief or brief.status != "revision_ready":
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return (
+        _revision_brief_has_feedback_marker(brief)
+        or "system_revision_trend_recovery" in text
+        or _revision_brief_is_budget_recovery(brief)
+        or "clean_rebuild_contract" in text
     )
 
 
@@ -726,11 +1215,156 @@ def _active_revision_trend_recovery(version: ChapterVersion, brief: ChapterBrief
     return "system_revision_trend_recovery" in text
 
 
+def _revision_brief_defers_trend_recovery(
+    version: ChapterVersion | None,
+    brief: ChapterBrief | None,
+    quality: QualityReport | None,
+) -> bool:
+    if not version or not brief or brief.status != "revision_ready":
+        return False
+    if _active_revision_trend_recovery(version, brief) or _revision_brief_is_rebuild_recovery(brief):
+        return True
+    if _revision_brief_has_protected_review_marker(brief):
+        return True
+    if _active_revision_budget_recovery(version, brief):
+        return True
+    return bool(quality and _reading_assessment_requires_revision(quality) and _revision_brief_has_protected_review_marker(brief))
+
+
 def _revision_brief_is_rebuild_recovery(brief: ChapterBrief | None) -> bool:
     if not brief:
         return False
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
     return "system_revision_budget_recovery" in text and ("修订模式:rewrite" in text or "coverage_rebuild:" in text)
+
+
+def _revision_brief_is_budget_recovery(brief: ChapterBrief | None) -> bool:
+    if not brief:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return (
+        "system_revision_budget_recovery" in text
+        or "persistent_revision_budget:" in text
+        or "自动修订预算触顶" in text
+    )
+
+
+def _active_revision_budget_recovery(version: ChapterVersion | None, brief: ChapterBrief | None) -> bool:
+    if not version:
+        return False
+    source = str(version.source or "")
+    if not source.startswith(("revision_budget_recovery:", "revision_budget_readable_restore:")):
+        return False
+    if not brief:
+        return True
+    return True
+
+
+def _revision_budget_guard_should_defer(version: ChapterVersion | None, brief: ChapterBrief | None) -> bool:
+    if _active_revision_budget_recovery(version, brief):
+        return True
+    if _revision_brief_targets_version(brief, version):
+        return True
+    if version and brief and str(version.source or "").startswith("revision_budget_readable_restore:"):
+        return True
+    if version and str(version.source or "").startswith("rebuild_candidate_selected:") and _revision_brief_has_protected_review_marker(brief):
+        return True
+    return False
+
+
+def _revision_brief_targets_version(brief: ChapterBrief | None, version: ChapterVersion | None) -> bool:
+    if not brief or not version:
+        return False
+    text = _revision_brief_text(brief)
+    version_label = rf"v{int(version.id)}(?!\d)"
+    current_markers = (
+        rf"合同当前底稿\s*[：:]\s*{version_label}",
+        rf"源版本锁定\s*[：:]\s*{version_label}",
+        rf"当前待修底稿\s*[：:]\s*{version_label}",
+        rf"以\s*{version_label}\s*为底稿",
+        rf"source_version_id\s*[=:]\s*{int(version.id)}(?!\d)",
+    )
+    return any(re.search(pattern, text) for pattern in current_markers)
+
+
+def _revision_brief_mentions_any_version(brief: ChapterBrief | None) -> bool:
+    if not brief:
+        return False
+    return bool(re.search(r"v\d+(?!\d)|source_version_id\s*[=:]\s*\d+", _revision_brief_text(brief)))
+
+
+def _revision_brief_text(brief: ChapterBrief) -> str:
+    return "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+
+
+def _revision_budget_blocker(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    version: ChapterVersion | None,
+    brief: ChapterBrief | None,
+) -> str:
+    if _revision_budget_guard_should_defer(version, brief):
+        return ""
+    budget = persistent_revision_budget(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        max_full_revisions=settings.revision_persistent_max_full_revisions,
+    )
+    return budget.reason if budget.exceeded else ""
+
+
+def _should_generate_rebuild_candidates(
+    session: Session,
+    *,
+    chapter_id: int,
+    revision_brief: ChapterBrief | None,
+    latest_version: ChapterVersion | None = None,
+) -> bool:
+    if not revision_brief or revision_brief.status != "revision_ready":
+        return False
+    if latest_version and str(latest_version.source or "").startswith("rebuild_candidate_selected:"):
+        return False
+    text = "\n".join([revision_brief.goal or "", revision_brief.required_beats or "", revision_brief.constraints or ""])
+    if "system_revision_budget_recovery" in text and _recent_budget_recovery_failed_revision_count(session, chapter_id=chapter_id, limit=8) >= 2:
+        return True
+    if "reading_assessment_auto_quality#" not in text and "clean_rebuild_contract@" not in text:
+        return False
+    if not any(marker in text for marker in ("revision_mode:fresh", "revision_mode:rewrite", "需重建", "失败结构不得沿用")):
+        return False
+    rows = _recent_failed_quality_rows(session, chapter_id=chapter_id, limit=5)
+    rebuild_failures = 0
+    for _version, quality, report in rows:
+        assessment = report.get("reading_assessment") if isinstance(report.get("reading_assessment"), dict) else {}
+        if assessment.get("action") == "auto_rebuild" or int(quality.score or 0) < 70:
+            rebuild_failures += 1
+    return rebuild_failures >= 3
+
+
+def _recent_budget_recovery_failed_revision_count(session: Session, *, chapter_id: int, limit: int) -> int:
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .order_by(ChapterVersion.id.desc())
+            .limit(limit)
+        )
+    )
+    failed = 0
+    seen_recovery = False
+    for version in versions:
+        source = str(version.source or "")
+        if source.startswith("revision_budget_recovery:"):
+            seen_recovery = True
+            continue
+        if not seen_recovery or not source.startswith("revision:"):
+            continue
+        quality = _latest_quality(session, version_id=version.id)
+        if quality and not quality.passed and int(quality.score or 0) < 60:
+            failed += 1
+    return failed
 
 
 def _revision_brief_is_heavy(text: str) -> bool:
@@ -1053,6 +1687,65 @@ def _publish_action(job: PublishJob | None) -> tuple[str, str]:
     return "inspect_publish_job", f"unhandled publish job status: {job.status}"
 
 
+def _has_previous_chapter_context(session: Session, *, book_id: int, chapter_number: int) -> bool:
+    if chapter_number <= 1:
+        return False
+    previous = session.scalar(
+        select(Chapter)
+        .where(Chapter.book_id == book_id, Chapter.chapter_number < chapter_number)
+        .order_by(Chapter.chapter_number.desc())
+    )
+    if not previous:
+        return False
+    if (previous.summary or "").strip():
+        return True
+    return bool(
+        session.scalar(
+            select(ChapterVersion)
+            .where(
+                ChapterVersion.chapter_id == previous.id,
+                ChapterVersion.status.in_(["approved", "reviewed_pass"]),
+            )
+            .order_by(ChapterVersion.id.desc())
+        )
+    )
+
+
+def _inherit_protected_inputs_into_active_revision_brief(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    chapter_id: int,
+) -> bool:
+    brief = _latest_revision_brief(session, chapter_id=chapter_id)
+    if not brief or brief.status != "revision_ready":
+        return False
+    sample_context = format_chapter_sample_adoption_context(session, book_id=book_id, chapter_number=chapter_number)
+    if not sample_context:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    if _revision_brief_already_has_sample_context(text):
+        return False
+    new_constraints = "\n".join(item for item in [brief.constraints or "", sample_context] if item)
+    if new_constraints == (brief.constraints or ""):
+        return False
+    brief.constraints = new_constraints
+    session.flush()
+    return True
+
+
+def _revision_brief_already_has_sample_context(text: str) -> bool:
+    markers = (
+        "本章已采用小样方向",
+        "小样气质参考",
+        "chapter_sample_lab",
+        "已采用小样",
+        "采用小样",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _chapter_brief_fields(
     session: Session,
     *,
@@ -1210,8 +1903,8 @@ def _revision_brief_matches_feedback_reopen(brief: ChapterBrief, quality: Qualit
 
 
 def _revision_brief_has_feedback_marker(brief: ChapterBrief) -> bool:
-    marker = "反馈调整#"
-    return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return "反馈调整#" in text or "修订方向#" in text or "机器修订建议#" in text
 
 
 def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> bool:
@@ -1222,8 +1915,10 @@ def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> b
         marker in text
         for marker in (
             "reading_assessment_contract",
+            "reading_assessment_auto_quality#",
             "阅读评估结论",
             "当前稿不是正式批准稿",
+            "clean_rebuild_contract@v1",
         )
     )
 
@@ -1241,7 +1936,8 @@ def _revision_brief_is_story_clean(brief: ChapterBrief) -> bool:
         "上次质检分数",
         "质量门禁",
         "修订合同:",
-        "原始人工意见",
+        "原始机器修订建议",
+        "原始机器修订建议",
         "验收清单:",
     )
     return brief.status == "revision_ready" and not any(marker in text for marker in stale_markers)

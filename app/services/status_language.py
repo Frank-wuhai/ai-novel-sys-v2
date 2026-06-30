@@ -35,6 +35,45 @@ def author_next_action_text(value: str) -> str:
     return "点击主按钮继续。"
 
 
+DIMENSION_LABELS = {
+    "score": "整体完成度",
+    "author_intent": "章节承诺没有落到具体行动和后果里",
+    "brief_coverage": "章节说明里的关键承诺没有写足",
+    "reader_momentum": "读者继续往下读的推力不够",
+    "hook_strength": "章末钩子还不够具体",
+    "payoff_grounding": "回报和代价没有充分落地",
+    "chapter_necessity": "本章不可替代的变化不够清楚",
+    "chapter_unit_flow": "段落之间的目标、阻碍、后果衔接不够顺",
+    "readability": "阅读顺滑度还不够",
+    "scene_atmosphere": "场景氛围没有真正改变人物判断或行动",
+    "dialogue_fullness": "对白承担的信息、试探或情绪变化不够",
+    "character_voice": "人物说话和反应的辨识度不够",
+    "prose_voice": "句子质感还不够自然",
+    "imageable_paragraphs": "画面不够具体，读者看不见场景",
+    "paragraph_aesthetic": "段落动作、视角或情绪释放不足",
+    "opening_grip": "开篇没有尽快抓住读者",
+}
+
+
+def editorial_blocker_text(value: str) -> str:
+    text = str(value or "")
+    name = text.split("=", 1)[0].strip()
+    return DIMENSION_LABELS.get(name, text if text and not _looks_internal(text) else "读感门槛还有未解决的问题")
+
+
+def editorial_summary_text(summary: str, blockers: list[str] | None = None) -> str:
+    human_blockers = [editorial_blocker_text(item) for item in (blockers or [])]
+    human_blockers = list(dict.fromkeys(item for item in human_blockers if item))[:3]
+    if human_blockers:
+        return "主编判断：" + "；".join(human_blockers) + "。主笔会按这些问题继续修。"
+    text = str(summary or "").strip()
+    if not text:
+        return "主编判断：当前章可以进入下一步。"
+    if _looks_internal(text):
+        return author_status_text(text)
+    return text
+
+
 def _looks_internal(text: str) -> bool:
     markers = ("#", ":", "_", "Chapter", "Story", "brief", "canon", "quality", "version", "task")
     return any(marker in text for marker in markers)

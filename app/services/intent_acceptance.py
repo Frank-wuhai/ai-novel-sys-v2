@@ -128,6 +128,16 @@ def evaluate_author_intent(
     if revision_mode in LOCAL_REVISION_MODES:
         return _evaluate_local_revision_intent(content=content, revision_mode=revision_mode, bias=bias)
     points = _intent_points(goal, required_beats)
+    if not points:
+        blockers = list(bias.blockers)
+        return IntentAcceptanceReport(
+            score=100 if not blockers else 45,
+            passed=not blockers,
+            covered_points=["当前 brief 没有独立剧情承诺，不用后台修订术语扣减作者意图分。"],
+            missing_points=[],
+            blockers=blockers,
+            recommendations=["下一份章节 brief 应显式写入“本章剧情承诺”。"],
+        )
     covered = [point for point in points if _point_covered(content, point)]
     missing = [point for point in points if point not in covered]
     total = len(points) or 1
@@ -141,7 +151,7 @@ def evaluate_author_intent(
     if bias.model_bias_hits:
         recommendations.append("发现模型默认套路偏差，优先用 local_patch 或 targeted_revision 清除。")
     if score < 65 and not bias.model_bias_hits:
-        recommendations.append("正文可读但与 brief 兑现不足，建议重做章节导演单或 fresh 重写。")
+        recommendations.append("正文可读但与 brief 兑现不足，建议重做章节导演单或结构重修。")
     return IntentAcceptanceReport(
         score=score,
         passed=not blockers and score >= 60,
@@ -154,6 +164,9 @@ def evaluate_author_intent(
 
 def _intent_points(goal: str, required_beats: str) -> list[str]:
     raw = "\n".join([goal or "", required_beats or ""])
+    marked = _marked_story_points(raw)
+    if marked:
+        return marked[:18]
     pieces = raw.replace("\n", "；").replace("，", "；").replace(",", "；").split("；")
     result: list[str] = []
     diagnostic_markers = (
@@ -161,7 +174,7 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
         "上次质检分数",
         "质量门禁",
         "修订合同:",
-        "原始人工意见",
+        "原始机器修订建议",
         "意见理解规则",
         "按本次修订要求验收",
         "不扩大修改范围",
@@ -187,6 +200,30 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
         "先判断用户真正不满意",
         "读者体验、人物动机",
         "场景选择、节奏",
+        "阅读评估自动修订",
+        "reading_assessment_auto_quality#",
+        "当前阅读层级",
+        "源版本锁定",
+        "自动修订预算",
+        "system_revision_",
+        "换策略修订",
+        "恢复底稿",
+        "当前版本层级",
+        "升华修订",
+        "必须保留",
+        "本轮只解决",
+        "把作者承诺写进",
+        "把氛围从概括词",
+        "补齐章节 brief",
+        "强化本章不可替代",
+        "补足可画面化",
+        "压缩说明性内心独白",
+        "让对白承担",
+        "章末钩子要具体",
+        "前300字",
+        "删除开篇重复",
+        "不得换开场",
+        "不得新开故事线",
     )
     for piece in pieces:
         text = " ".join(piece.split())
@@ -203,6 +240,22 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
         if text not in result:
             result.append(text[:120])
     return result[:18]
+
+
+def _marked_story_points(raw: str) -> list[str]:
+    markers = ("本章剧情承诺:", "本章剧情承诺：", "剧情基线:", "剧情基线：")
+    points: list[str] = []
+    for line in (raw or "").splitlines():
+        text = " ".join(line.split())
+        marker = next((item for item in markers if item in text), "")
+        if not marker:
+            continue
+        payload = text.split(marker, 1)[1].strip()
+        for piece in payload.replace("，", "；").replace(",", "；").split("；"):
+            point = piece.strip(" -")
+            if len(point) >= 4 and point not in points:
+                points.append(point[:120])
+    return points
 
 
 def _point_covered(content: str, point: str) -> bool:

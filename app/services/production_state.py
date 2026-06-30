@@ -17,11 +17,24 @@ REVISION_ARTIFACT_BRIEF_MARKERS = (
     *QUALITY_DIAGNOSTIC_BRIEF_MARKERS,
     "修订合同:",
     "执行修订合同",
-    "原始人工意见",
+    "原始机器修订建议",
     "验收清单",
     "反馈调整#",
     "按本次修订要求验收",
     "不扩大修改范围",
+    "reading_assessment_auto_quality#",
+    "阅读评估",
+    "阅读评估自动修订",
+    "当前阅读层级",
+    "源版本锁定",
+    "本轮只解决",
+    "system_revision_",
+    "自动修订预算",
+    "换策略修订",
+    "恢复底稿",
+    "editorial_elevation_quality#",
+    "升华修订",
+    "当前版本层级",
 )
 LOCAL_REVISION_MODES = {"local_patch", "polish"}
 STORY_INTENT_MARKERS = (
@@ -66,16 +79,13 @@ def latest_story_brief(session: Session, chapter_id: int, *, search_limit: int =
             .limit(search_limit)
         )
     )
-    story_fallback: ChapterBrief | None = None
     for brief in rows:
         text = brief_text(brief)
         if brief_is_local_revision(text) or not brief_has_story_intent(text):
             continue
         if not brief_has_revision_artifacts(text):
             return brief
-        if story_fallback is None:
-            story_fallback = brief
-    return story_fallback or (rows[0] if rows else None)
+    return None
 
 
 def brief_text(brief: ChapterBrief) -> str:

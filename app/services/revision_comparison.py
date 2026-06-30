@@ -66,8 +66,11 @@ def compare_and_restore_if_regressed(
     current_data = _loads_json(current_quality.report)
     score_delta = int(current_quality.score or 0) - int(source_quality.score or 0)
     degraded = _degraded_dimensions(source_data, current_data)
+    source_base_passed = bool(source_data.get("base_quality_passed", source_data.get("passed", source_quality.passed)))
+    current_base_passed = bool(current_data.get("base_quality_passed", current_data.get("passed", current_quality.passed)))
     should_restore = (
         (not current_quality.passed and bool(source_quality.passed))
+        or (source_base_passed and not current_base_passed)
         or score_delta <= -5
         or len(degraded) >= 3
     )
@@ -160,7 +163,16 @@ def _restore_source_version(
     )
     session.add(restored)
     session.flush()
+    if protected_brief:
+        from app.services.reading_assessment import downgrade_rebound_brief_to_targeted, rebind_revision_brief_source
+
+        rebind_revision_brief_source(protected_brief, version_id=restored.id)
+        source_report = _loads_json(source_quality.report)
+        source_base_passed = bool(source_report.get("base_quality_passed", source_report.get("passed", source_quality.passed)))
+        if source_base_passed:
+            downgrade_rebound_brief_to_targeted(protected_brief, version_id=restored.id, quality=source_quality)
     source_report = _loads_json(source_quality.report)
+    source_report.pop("reading_assessment", None)
     source_report["revision_comparison_restore"] = {
         "failed_version_id": failed_version.id,
         "failed_quality_id": failed_quality.id,
@@ -170,7 +182,7 @@ def _restore_source_version(
         "degraded_dimensions": degraded,
         "protected_brief_id": protected_brief.id if protected_brief else None,
         "reason": (
-            "修订稿低于源稿，但存在未解决的阅读评估/人工修订合同，恢复源稿为待修订底稿。"
+            "修订稿低于源稿，但存在未解决的阅读评估/修订合同，恢复源稿为待修订底稿。"
             if protected_brief
             else "修订稿低于源稿，自动恢复源稿作为当前最佳版本。"
         ),
@@ -214,7 +226,8 @@ def _latest_protected_revision_brief(session: Session, *, chapter_id: int) -> Ch
                 "reading_assessment_contract",
                 "阅读评估结论",
                 "当前稿不是正式批准稿",
-                "人工意图:",
+                "修订方向:",
+                "clean_rebuild_contract@v1",
             )
         ):
             return brief

@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.entities import Book, Chapter, ChapterVersion
 from app.models.entities import StoryBible
 from app.services.aesthetic_profile import profile_from_story_text
 from app.services.agent_plan_intelligence import format_semantic_memory_context
 from app.services.author_workbench import build_author_workbench_report
 from app.services.bias import build_bias_guard_block
+from app.services.brief_sanitizer import sanitize_prompt_contract_text
 from app.services.book_aesthetic_standard import build_book_aesthetic_standard
 from app.services.canon import format_canon_context
 from app.services.chapter_unit_plans import ensure_chapter_unit_plan, format_chapter_unit_plan
@@ -20,9 +22,12 @@ from app.services.context_contamination import assert_context_not_contaminated, 
 from app.services.dashboard_production_actions import repair_chapter_brief
 from app.services.director import build_chapter_director_sheet
 from app.services.evidence import format_market_evidence_context
-from app.services.feedback import format_author_preference_context
+from app.services.feedback import format_author_preference_context, format_chapter_sample_adoption_context
 from app.services.naming_governance import build_naming_governance_block
 from app.services.production_context import ProductionContext, build_production_context
+from app.services.production_cache import cached_production_value
+from app.services.production_blueprint import ProductionBlueprint, build_production_blueprint
+from app.services.production_optimization import optimization_prompt_block
 from app.services.production_run_review import build_production_pattern_memory, format_production_pattern_memory
 from app.services.story_dna import chapter_engine_for_number, story_dna_for_book
 from app.services.writing_intelligence import WritingIntelligenceContext, build_writing_intelligence_context
@@ -37,6 +42,8 @@ class ChapterProductionPacket:
     constraints: str
     effective_required_beats: str
     director_sheet: str
+    full_director_sheet: str
+    blueprint: ProductionBlueprint
     bias_guard: str
     writing_intelligence: WritingIntelligenceContext
     writer_craft: WriterCraftContext
@@ -53,12 +60,12 @@ class ChapterProductionPacket:
     @property
     def prompt_values(self) -> dict:
         return {
-            "market_evidence": self.context.market_evidence,
-            "canon_context": self.context.canon_context,
-            "author_preferences": self.context.author_preferences,
-            "previous_chapter_context": self.context.previous_chapter_context,
-            "director_sheet": self.director_sheet,
-            "bias_guard": self.bias_guard,
+            "market_evidence": _prompt_clip(self.context.market_evidence, _prompt_budget("market_evidence")),
+            "canon_context": _prompt_clip(self.context.canon_context, _prompt_budget("canon_context")),
+            "author_preferences": _prompt_clip(self.context.author_preferences, _prompt_budget("author_preferences")),
+            "previous_chapter_context": _prompt_clip(self.context.previous_chapter_context, _prompt_budget("previous_chapter_context"), tail=True),
+            "director_sheet": _prompt_clip(self.director_sheet, _prompt_budget("director_sheet")),
+            "bias_guard": _prompt_clip(self.bias_guard, _prompt_budget("bias_guard")),
         }
 
     @property
@@ -68,7 +75,8 @@ class ChapterProductionPacket:
             "market_evidence_count": len(self.market_signal_ids),
             "canon_refs": self.canon_refs,
             "semantic_memory_ids": self.semantic_memory_ids,
-            "director_sheet": self.director_sheet,
+            "director_sheet": self.full_director_sheet,
+            "production_blueprint": self.blueprint.to_dict(),
             "writing_intelligence": self.writing_intelligence.to_dict(),
             "writer_craft": self.writer_craft.to_dict(),
             "writer_loop": self.writer_loop.to_dict(),
@@ -108,7 +116,10 @@ def build_chapter_production_packet(
     )
     story_dna = story_dna_for_book(session, book_id=book.id)
     chapter_engine = chapter_engine_for_number(story_dna, chapter_number)
-    market_evidence, market_signal_ids = format_market_evidence_context(session, genre=book.genre)
+    market_evidence, market_signal_ids = cached_production_value(
+        ("market_evidence", book.genre or "", settings.production_profile),
+        lambda: format_market_evidence_context(session, genre=book.genre),
+    )
     canon_context, canon_refs = format_canon_context(
         session,
         book_id=book.id,
@@ -118,7 +129,9 @@ def build_chapter_production_packet(
         session,
         book_id=book.id,
         chapter_number=chapter_number,
-        query="\n".join([goal, required_beats, constraints, revision_goal, revision_required_beats, revision_constraints]),
+        query=sanitize_prompt_contract_text(
+            "\n".join([goal, required_beats, constraints, revision_goal, revision_required_beats, revision_constraints])
+        ),
     )
     if semantic_memory_context:
         canon_context = "\n\n".join([canon_context, semantic_memory_context])
@@ -168,7 +181,9 @@ def build_chapter_production_packet(
             session,
             book_id=book.id,
             chapter_number=chapter_number,
-            query="\n".join([goal, required_beats, constraints, revision_goal, revision_required_beats, revision_constraints]),
+            query=sanitize_prompt_contract_text(
+                "\n".join([goal, required_beats, constraints, revision_goal, revision_required_beats, revision_constraints])
+            ),
         )
         canon_context, canon_refs = format_canon_context(
             session,
@@ -188,7 +203,19 @@ def build_chapter_production_packet(
             fresh_rewrite=fresh_rewrite,
         )
     assert_context_not_contaminated(contamination)
-    author_preferences = format_author_preference_context(session, book_id=book.id)
+    prompt_goal = sanitize_prompt_contract_text(revision_goal or goal) or (revision_goal or goal)
+    prompt_required_beats = sanitize_prompt_contract_text(revision_required_beats or required_beats)
+    prompt_constraints = sanitize_prompt_contract_text(revision_constraints or constraints)
+    base_goal = sanitize_prompt_contract_text(goal) or goal
+    base_required_beats = sanitize_prompt_contract_text(required_beats)
+    sample_adoption_context = format_chapter_sample_adoption_context(session, book_id=book.id, chapter_number=chapter_number)
+    base_constraints_source = sanitize_prompt_contract_text(
+        _merge_author_direction_blocks(revision_constraints or constraints, sample_adoption_context)
+    ) or _merge_author_direction_blocks(revision_constraints or constraints, sample_adoption_context)
+    author_preferences = _merge_author_direction_blocks(
+        sample_adoption_context,
+        format_author_preference_context(session, book_id=book.id),
+    )
     previous_chapter_context = build_previous_chapter_context(
         session,
         book_id=book.id,
@@ -207,12 +234,20 @@ def build_chapter_production_packet(
         chapter_number=chapter_number,
     )
     base_constraints = ensure_chapter_production_standard(
-        revision_constraints or constraints,
+        base_constraints_source,
         chapter_number=chapter_number,
     )
     dna_block = _chapter_dna_block(story_dna=story_dna, chapter_engine=chapter_engine, chapter_number=chapter_number)
     profiled_constraints = "\n\n".join(item for item in [base_constraints, dna_block] if item)
-    effective_required_beats = revision_required_beats or required_beats
+    effective_required_beats = prompt_required_beats or sanitize_prompt_contract_text(required_beats)
+    optimization_block = optimization_prompt_block(
+        session,
+        book_id=book.id,
+        chapter_number=chapter_number,
+        goal=prompt_goal,
+        required_beats=effective_required_beats,
+        constraints=profiled_constraints,
+    )
     context = build_production_context(
         market_evidence=market_evidence,
         canon_context=canon_context,
@@ -226,14 +261,14 @@ def build_chapter_production_packet(
     )
     director_sheet = build_chapter_director_sheet(
         chapter_number=chapter_number,
-        goal=goal,
-        required_beats=required_beats,
+        goal=base_goal,
+        required_beats=base_required_beats,
         constraints=base_constraints,
         previous_chapter_context=context.previous_chapter_context,
         canon_context=context.canon_context,
         author_preferences=context.author_preferences,
-        revision_goal=revision_goal,
-        revision_required_beats=revision_required_beats,
+        revision_goal=prompt_goal if revision_goal else "",
+        revision_required_beats=prompt_required_beats,
         revision_constraints=base_constraints if revision_constraints else "",
         mode=mode,
     )
@@ -241,7 +276,7 @@ def build_chapter_production_packet(
         session,
         book_id=book.id,
         chapter_number=chapter_number,
-        goal=revision_goal or goal,
+        goal=prompt_goal,
         required_beats=effective_required_beats,
         constraints=profiled_constraints,
         previous_chapter_context=context.previous_chapter_context,
@@ -251,7 +286,7 @@ def build_chapter_production_packet(
         session,
         book=book,
         chapter_number=chapter_number,
-        goal=revision_goal or goal,
+        goal=prompt_goal,
         required_beats=effective_required_beats,
         constraints=profiled_constraints,
         previous_chapter_context=context.previous_chapter_context,
@@ -259,7 +294,7 @@ def build_chapter_production_packet(
     )
     writer_loop = build_writer_loop_plan(
         chapter_number=chapter_number,
-        goal=revision_goal or goal,
+        goal=prompt_goal,
         required_beats=effective_required_beats,
         constraints=profiled_constraints,
         quality_report=quality_report,
@@ -275,7 +310,7 @@ def build_chapter_production_packet(
             chapter_id=chapter_id,
             chapter_brief_id=chapter_brief_id,
             chapter_number=chapter_number,
-            goal=revision_goal or goal,
+            goal=prompt_goal,
             required_beats=effective_required_beats,
             constraints=profiled_constraints,
             previous_chapter_context=context.previous_chapter_context,
@@ -300,6 +335,7 @@ def build_chapter_production_packet(
             dna_block,
             chapter_unit_plan_block,
             format_production_pattern_memory(production_pattern_memory),
+            optimization_block,
             naming_governance_block,
             writer_loop.prompt_block,
             writer_craft.prompt_block,
@@ -307,13 +343,38 @@ def build_chapter_production_packet(
         ]
         if item
     )
+    full_director_sheet = director_sheet
     bias_guard = build_bias_guard_block(
         constraints=profiled_constraints,
         author_preferences=context.author_preferences,
         story_context="\n".join([context.canon_context, context.previous_chapter_context]),
     )
+    blueprint = build_production_blueprint(
+        chapter_number=chapter_number,
+        mode=mode,
+        goal=prompt_goal,
+        required_beats=effective_required_beats,
+        constraints=profiled_constraints,
+        previous_chapter_context=context.previous_chapter_context,
+        canon_context=context.canon_context,
+        author_preferences=context.author_preferences,
+        chapter_unit_plan=chapter_unit_plan_payload,
+        book_aesthetic_standard=book_aesthetic_standard.to_dict(),
+        style_contract={
+            "aesthetic_profile": aesthetic_profile,
+            "book_aesthetic_standard": book_aesthetic_standard.to_dict(),
+            "story_dna": story_dna,
+            "chapter_engine": chapter_engine,
+            "naming_governance": naming_governance_block,
+        },
+        quality_report=quality_report,
+        previous_content=previous_content,
+        fresh_rewrite=fresh_rewrite,
+        rewrite_mode=rewrite_mode,
+    )
+    director_sheet = blueprint.prompt_block
     audit = {
-        "packet_version": "chapter_production_packet_v3_writer_loop",
+        "packet_version": "chapter_production_packet_v4_blueprint",
         "mode": mode,
         "revision_context_mode": revision_context_mode,
         "chapter_number": chapter_number,
@@ -321,26 +382,33 @@ def build_chapter_production_packet(
         "effective_constraints_chars": len(base_constraints or ""),
         "profiled_constraints_chars": len(profiled_constraints or ""),
         "director_sheet_chars": len(director_sheet or ""),
+        "full_director_sheet_chars": len(full_director_sheet or ""),
+        "production_blueprint": blueprint.to_dict(),
         "semantic_memory_count": len(semantic_memory_ids),
         "chapter_unit_plan_id": chapter_unit_plan_id,
         "chapter_unit_plan_units": len(chapter_unit_plan_payload.get("units") or []),
         "production_pattern_memory_reviews": production_pattern_memory.get("source_review_count", 0),
         "book_aesthetic_standard": book_aesthetic_standard.status,
         "book_taste_memory_count": len(book_aesthetic_standard.taste_memory),
+        "production_optimization": bool(optimization_block),
         "aesthetic_profile": bool(aesthetic_profile),
         "story_dna": bool(story_dna),
         "chapter_engine": chapter_engine,
         "fresh_rewrite": fresh_rewrite,
         "rewrite_mode": rewrite_mode,
         "policy": "single_packet_for_prompt_context",
+        "prompt_policy": "compressed_blueprint_for_generation",
         "context_contamination": contamination.to_dict(),
     }
+    clipped_constraints = _prompt_clip(base_constraints, _prompt_budget("constraints"))
     return ChapterProductionPacket(
         mode=mode,
         context=context,
-        constraints=base_constraints,
-        effective_required_beats=effective_required_beats,
+        constraints=clipped_constraints,
+        effective_required_beats=_prompt_clip(effective_required_beats, _prompt_budget("required_beats")),
         director_sheet=director_sheet,
+        full_director_sheet=full_director_sheet,
+        blueprint=blueprint,
         bias_guard=bias_guard,
         writing_intelligence=writing_intelligence,
         writer_craft=writer_craft,
@@ -354,6 +422,56 @@ def build_chapter_production_packet(
         semantic_memory_ids=semantic_memory_ids,
         audit=audit,
     )
+
+
+def _prompt_budget(name: str) -> int:
+    standard = {
+        "market_evidence": 600,
+        "canon_context": 900,
+        "author_preferences": 500,
+        "previous_chapter_context": 700,
+        "director_sheet": 3600,
+        "bias_guard": 650,
+        "constraints": 900,
+        "required_beats": 900,
+    }
+    fast = {
+        "market_evidence": 400,
+        "canon_context": 700,
+        "author_preferences": 400,
+        "previous_chapter_context": 600,
+        "director_sheet": 3000,
+        "bias_guard": 500,
+        "constraints": 700,
+        "required_beats": 700,
+    }
+    deep = {
+        "market_evidence": 900,
+        "canon_context": 1200,
+        "author_preferences": 700,
+        "previous_chapter_context": 900,
+        "director_sheet": 4200,
+        "bias_guard": 800,
+        "constraints": 1200,
+        "required_beats": 1200,
+    }
+    profile = settings.production_profile
+    table = fast if profile == "fast" else (deep if profile == "deep" else standard)
+    return table.get(name, standard.get(name, 1600))
+
+
+def _merge_author_direction_blocks(*blocks: str) -> str:
+    parts = [str(block or "").strip() for block in blocks if str(block or "").strip()]
+    return "\n\n".join(parts)
+
+
+def _prompt_clip(value: str, limit: int, *, tail: bool = False) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    if tail:
+        return "…\n" + text[-limit:]
+    return text[:limit] + "\n…"
 
 
 def _chapter_dna_block(*, story_dna: str, chapter_engine: str, chapter_number: int) -> str:

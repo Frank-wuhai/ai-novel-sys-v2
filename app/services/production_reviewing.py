@@ -10,7 +10,7 @@ from app.llm.providers import get_provider
 from app.llm.schemas import parse_review_output
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterReview, ChapterVersion, GenerationTask, QualityReport
 from app.services.canon import format_canon_context
-from app.services.chapter_standards import extract_min_chars
+from app.services.chapter_standards import extract_max_chars, extract_min_chars
 from app.services.llm_errors import classify_exception
 from app.services.editorial_stratification import maybe_apply_editorial_stratification, maybe_rollback_failed_elevation
 from app.services.production_llm import (
@@ -19,7 +19,9 @@ from app.services.production_llm import (
     record_generation_llm_log,
 )
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
+from app.services.production_optimization import enrich_quality_report_with_optimization
 from app.services.quality import evaluate_chapter
+from app.services.production_blueprint import classify_quality_failure
 from app.services.production_gate import assert_production_gate
 from app.services.reading_assessment import maybe_apply_reading_assessment
 from app.services.revision_comparison import compare_and_restore_if_regressed
@@ -51,6 +53,13 @@ def review_chapter(
             brief.goal if brief else "",
             brief.required_beats if brief else "",
             brief.constraints if brief else "",
+            default=3000,
+        ),
+        max_chars=extract_max_chars(
+            brief.goal if brief else "",
+            brief.required_beats if brief else "",
+            brief.constraints if brief else "",
+            default=4500,
         ),
         goal=brief.goal if brief else "",
         required_beats=brief.required_beats if brief else "",
@@ -59,7 +68,17 @@ def review_chapter(
     )
     report_data = json.loads(result.report)
     report_data.setdefault("passed", bool(result.passed))
-    if llm_review:
+    report_data["production_failure_classification"] = classify_quality_failure(report_data)
+    report_data = enrich_quality_report_with_optimization(
+        report_data,
+        chapter_number=chapter_number,
+        goal=brief.goal if brief else "",
+        required_beats=brief.required_beats if brief else "",
+        constraints=brief.constraints if brief else "",
+        enforce_gate=not _is_dry_run_version(version),
+    )
+    should_llm_review, llm_skip_reason = _should_run_llm_review(result, report_data)
+    if llm_review and should_llm_review:
         report_data["llm_review"] = _run_llm_chapter_review(
             session,
             book=session.get(Book, book_id),
@@ -73,6 +92,12 @@ def review_chapter(
             dry_run=review_dry_run,
         )
         _apply_editorial_gate(result, report_data)
+    elif llm_review:
+        report_data["llm_review"] = {
+            "status": "skipped",
+            "reason": llm_skip_reason,
+            "source": "rule_precondition",
+        }
     quality = QualityReport(
         chapter_version_id=version.id,
         score=int(report_data.get("score") or result.score),
@@ -97,18 +122,13 @@ def review_chapter(
         chapter_number=chapter_number,
         quality=quality,
     )
-    maybe_apply_reading_assessment(
-        session,
-        book_id=book_id,
-        chapter_number=chapter_number,
-        quality=quality,
-    )
-    maybe_apply_editorial_stratification(
-        session,
-        book_id=book_id,
-        chapter_number=chapter_number,
-        quality=quality,
-    )
+    if not (quality.passed and _is_dry_run_version(version)):
+        maybe_apply_reading_assessment(
+            session,
+            book_id=book_id,
+            chapter_number=chapter_number,
+            quality=quality,
+        )
     review.verdict = "pass" if quality.passed else "needs_revision"
     review.notes = quality.report
     session.flush()
@@ -120,11 +140,51 @@ def review_chapter(
         quality=quality,
     )
     compare_and_restore_if_regressed(session, current_version=version, current_quality=quality)
-    if auto_revision_brief and not quality.passed:
+    if auto_revision_brief and not quality.passed and not _has_protected_revision_brief(session, chapter_id=chapter.id):
         from app.services.production import create_revision_brief
 
         create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
     return quality
+
+
+def _has_protected_revision_brief(session: Session, *, chapter_id: int) -> bool:
+    markers = (
+        "reading_assessment_contract",
+        "reading_assessment_auto_quality#",
+        "clean_rebuild_contract@",
+        "当前稿不是正式批准稿",
+        "阅读评估结论",
+    )
+    for brief in session.scalars(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter_id, ChapterBrief.status == "revision_ready")
+        .order_by(ChapterBrief.id.desc())
+        .limit(12)
+    ):
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        if any(marker in text for marker in markers):
+            return True
+    return False
+
+
+def _should_run_llm_review(rule_result, report_data: dict) -> tuple[bool, str]:
+    if settings.production_profile == "fast":
+        return False, "production_profile_fast"
+    score = int(report_data.get("score") or getattr(rule_result, "score", 0) or 0)
+    passed = bool(report_data.get("passed", getattr(rule_result, "passed", False)))
+    hard_gate = report_data.get("hard_gate") if isinstance(report_data.get("hard_gate"), dict) else {}
+    hard_passed = bool(hard_gate.get("passed", passed))
+    blockers = report_data.get("blockers") if isinstance(report_data.get("blockers"), list) else []
+    severe_blockers = [str(item) for item in blockers if any(marker in str(item) for marker in ("contamination", "canon", "length", "min_chars"))]
+    if passed:
+        return True, "base_quality_passed"
+    if score >= 72 and hard_passed:
+        return True, "near_pass_needs_editorial_judgment"
+    if score >= 78:
+        return True, "high_score_rule_disagreement"
+    if severe_blockers:
+        return False, "hard_rule_blockers:" + ",".join(severe_blockers[:3])
+    return False, f"rule_score_too_low:{score}"
 
 
 def reconcile_existing_quality_report(
@@ -297,3 +357,8 @@ def _latest_brief(session: Session, chapter_id: int) -> ChapterBrief | None:
     if active:
         return active
     return session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter_id).order_by(ChapterBrief.id.desc()))
+
+
+def _is_dry_run_version(version: ChapterVersion) -> bool:
+    source = str(version.source or "")
+    return source == "dry_run" or source.startswith("revision:dry_run")

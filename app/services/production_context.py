@@ -89,11 +89,11 @@ def select_previous_content(content: str, *, fresh_rewrite: bool = False, rewrit
     if not content:
         return ""
     if not rewrite_mode:
-        return _clip(content, 6200, tail=True)
+        return _clip(content, 3200, tail=True)
     excerpt = "\n".join(content.splitlines()[:80])
     return (
         "以下旧稿只用于保留必要 Canon 和避免断裂；禁止照抄旧稿句子，禁止沿用旧稿段落顺序。\n\n"
-        + _clip(excerpt, 4200)
+        + _clip(excerpt, 2600)
     )
 
 

@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, QualityReport
 from app.services.brief_sanitizer import sanitize_existing_chapter_brief
-from app.services.feedback import submit_revision_suggestion
+from app.services.feedback import format_chapter_sample_adoption_context, submit_revision_suggestion
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,73 @@ class RevisionBudgetRecovery:
             "source_version_id": self.source_version_id,
             "message": self.message,
         }
+
+
+@dataclass(frozen=True)
+class PersistentRevisionBudget:
+    exceeded: bool
+    full_revision_count: int
+    max_full_revisions: int
+    total_elapsed_ms: int
+    latest_task_id: int | None
+    reason: str
+
+    def to_dict(self) -> dict:
+        return {
+            "exceeded": self.exceeded,
+            "full_revision_count": self.full_revision_count,
+            "max_full_revisions": self.max_full_revisions,
+            "total_elapsed_ms": self.total_elapsed_ms,
+            "latest_task_id": self.latest_task_id,
+            "reason": self.reason,
+        }
+
+
+def persistent_revision_budget(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    max_full_revisions: int,
+) -> PersistentRevisionBudget:
+    if max_full_revisions < 1:
+        max_full_revisions = 1
+    rows = list(
+        session.scalars(
+            select(GenerationTask)
+            .where(GenerationTask.book_id == book_id, GenerationTask.task_type == "revise_chapter", GenerationTask.status == "completed")
+            .order_by(GenerationTask.id.desc())
+            .limit(80)
+        )
+    )
+    full_count = 0
+    total_elapsed = 0
+    latest_task_id: int | None = None
+    for task in rows:
+        try:
+            input_data = json.loads(task.input_json or "{}")
+            output_data = json.loads(task.output_json or "{}")
+        except json.JSONDecodeError:
+            continue
+        if int(input_data.get("chapter_number") or 0) != chapter_number:
+            continue
+        if input_data.get("dry_run") is True or output_data.get("dry_run") is True:
+            continue
+        strategy = str(output_data.get("strategy") or "")
+        revision_mode = str(input_data.get("revision_mode") or "")
+        source = str(output_data.get("source") or "")
+        if strategy == "deterministic_local_patch" or revision_mode == "local_patch" or "revision_budget" in source:
+            continue
+        full_count += 1
+        latest_task_id = latest_task_id or task.id
+        total_elapsed += int(output_data.get("elapsed_ms") or 0)
+    exceeded = full_count >= max_full_revisions
+    reason = (
+        f"persistent_revision_budget:{full_count}>={max_full_revisions}"
+        if exceeded
+        else f"persistent_revision_budget:{full_count}<{max_full_revisions}"
+    )
+    return PersistentRevisionBudget(exceeded, full_count, max_full_revisions, total_elapsed, latest_task_id, reason)
 
 
 def supervise_revision_trend(session: Session, *, book_id: int, chapter_number: int) -> RevisionSupervisionReport:
@@ -91,6 +158,16 @@ def apply_revision_budget_recovery(
     latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
     if not latest or latest.status != "needs_revision":
         return RevisionBudgetRecovery("not_needed", None, None, latest.id if latest else None, "当前章节不处于待修订状态。")
+    active_recovery = _active_budget_recovery(session, chapter_id=chapter.id, latest=latest)
+    if active_recovery:
+        brief, source_version_id = active_recovery
+        return RevisionBudgetRecovery(
+            "recovered",
+            latest.id,
+            brief.id,
+            source_version_id,
+            f"当前已有预算恢复稿 v{latest.id} 和恢复 brief #{brief.id}，继续执行该修订，不重复复制底稿。",
+        )
     passed = _best_passed_quality_row(session, chapter_id=chapter.id, limit=24)
     if passed:
         passed_version, passed_quality, passed_report = passed
@@ -116,6 +193,20 @@ def apply_revision_budget_recovery(
             )
             session.add(recovery_version)
             session.flush()
+        if protected_brief:
+            from app.services.reading_assessment import create_clean_rebuild_brief, rebind_revision_brief_source
+
+            if _recent_restore_count(session, chapter_id=chapter.id, limit=8) >= 3:
+                protected_brief = create_clean_rebuild_brief(
+                    session,
+                    book_id=book_id,
+                    chapter_number=chapter_number,
+                    version=recovery_version,
+                    quality=passed_quality,
+                    reason="同一章节连续修订失败并回退，系统已切断旧合同循环。",
+                )
+            else:
+                rebind_revision_brief_source(protected_brief, version_id=recovery_version.id)
         restored_report = dict(passed_report)
         restored_report["revision_budget_recovery"] = {
             "status": "restored_readable_needs_revision" if protected_brief else "restored_readable",
@@ -123,7 +214,7 @@ def apply_revision_budget_recovery(
             "latest_failed_version_id": latest.id,
             "protected_brief_id": protected_brief.id if protected_brief else None,
             "reason": (
-                "自动修订预算耗尽时已有历史通过稿，但存在未解决的阅读评估/人工修订合同，恢复为待修订底稿而非待审批稿。"
+                "自动修订预算耗尽时已有历史通过稿，但存在未解决的阅读评估/修订合同，恢复为待修订底稿而非待采用确认稿。"
                 if protected_brief
                 else "自动修订预算耗尽时已有历史通过稿，恢复可读稿并停止继续消耗。"
             ),
@@ -143,7 +234,7 @@ def apply_revision_budget_recovery(
             protected_brief.id if protected_brief else None,
             passed_version.id,
             (
-                f"已恢复历史通过稿 v{passed_version.id}，但保留阅读评估/人工修订合同 #{protected_brief.id}，不能进入审批。"
+                f"已恢复历史通过稿 v{passed_version.id}，但保留阅读评估/修订合同 #{protected_brief.id}，不能进入采用确认。"
                 if protected_brief
                 else f"已恢复历史通过稿 v{passed_version.id}，停止继续自动修订。"
             ),
@@ -218,6 +309,7 @@ def apply_revision_budget_recovery(
         [
             brief.constraints or "",
             "system_revision_budget_recovery: 系统自行换策略，不向作者索要抽象方向。",
+            format_chapter_sample_adoption_context(session, book_id=book_id, chapter_number=chapter_number),
             "coverage_rebuild: " + ("；".join(stalled) if stalled else "none"),
             "禁止：追杀模板、现实机构关注、门派通缉、系统面板直接解题、冷硬装酷式精炼。",
             "禁止只换形容词或压缩句子；必须把抽象判断写成可见动作、空间、对白和后果。",
@@ -234,7 +326,7 @@ def apply_revision_budget_recovery(
         (
             f"连续低分项停滞（{','.join(stalled)}），系统已自动重建 brief 并改用结构修订。"
             if stalled
-            else f"自动选择最佳稿 v{best_version.id} 并换策略修订，不再要求人工给方向。"
+            else f"自动选择最佳稿 v{best_version.id} 并换策略修订，不再要求额外给方向。"
         ),
     )
 
@@ -310,7 +402,8 @@ def _latest_protected_revision_brief(session: Session, *, chapter_id: int) -> Ch
                 "reading_assessment_contract",
                 "阅读评估结论",
                 "当前稿不是正式批准稿",
-                "人工意图:",
+                "修订方向:",
+                "clean_rebuild_contract@v1",
             )
         ):
             return brief
@@ -361,3 +454,43 @@ def _budget_recovery_suggestion(
 def _next_version_number(session: Session, chapter_id: int) -> int:
     latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id).order_by(ChapterVersion.version_number.desc()))
     return (latest.version_number if latest else 0) + 1
+
+
+def _active_budget_recovery(
+    session: Session,
+    *,
+    chapter_id: int,
+    latest: ChapterVersion,
+) -> tuple[ChapterBrief, int | None] | None:
+    source = str(latest.source or "")
+    if not source.startswith(("revision_budget_recovery:", "revision_budget_readable_restore:")):
+        return None
+    brief = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter_id, ChapterBrief.status == "revision_ready")
+        .order_by(ChapterBrief.id.desc())
+    )
+    if not brief:
+        return None
+    return brief, _source_version_id(source)
+
+
+def _source_version_id(source: str) -> int | None:
+    _prefix, _sep, raw = source.partition(":v")
+    if not raw:
+        return None
+    try:
+        return int(raw.split(":", 1)[0])
+    except ValueError:
+        return None
+
+
+def _recent_restore_count(session: Session, *, chapter_id: int, limit: int) -> int:
+    versions = session.scalars(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter_id)
+        .order_by(ChapterVersion.id.desc())
+        .limit(limit)
+    )
+    prefixes = ("revision_compare_restore:", "revision_budget_readable_restore:", "revision_budget_recovery:")
+    return sum(1 for version in versions if str(version.source or "").startswith(prefixes))

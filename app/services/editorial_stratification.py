@@ -106,7 +106,7 @@ def stratify_quality_report(report_data: dict) -> EditorialStratification:
             label="发布级",
             recommended_mode="approve",
             should_auto_revise=False,
-            summary="质量与主编判断都已稳定，可以交给人工最终确认。",
+            summary="质量与主编判断都已稳定，可以进入主编准定稿后续流程。",
             preserve=_preserve_from_review(review_strengths),
             elevate=[],
             blockers=[],
@@ -118,7 +118,7 @@ def stratify_quality_report(report_data: dict) -> EditorialStratification:
             label="准定稿",
             recommended_mode="polish",
             should_auto_revise=False,
-            summary="整体已经接近定稿，只建议人工决定是否做轻润色。",
+            summary="整体已经接近定稿，只允许主笔做低风险轻润色或直接进入准定稿流程。",
             preserve=_preserve_from_review(review_strengths),
             elevate=_elevation_targets(dimensions, review_issues, review_suggestions)[:3],
             blockers=weak_lows[:3],
@@ -128,9 +128,9 @@ def stratify_quality_report(report_data: dict) -> EditorialStratification:
     return EditorialStratification(
         tier=TIER_SOLID_DRAFT,
         label="合格底稿",
-        recommended_mode="author_review",
+        recommended_mode="editorial_polish",
         should_auto_revise=False,
-        summary="方向正确且可读，系统停止自动修订；升华建议只进入审稿报告，由作者决定是否继续。",
+        summary="方向正确且可读，但未达主编准定稿门槛；升华建议进入主笔低风险润色策略。",
         preserve=_preserve_from_review(review_strengths),
         elevate=_elevation_targets(dimensions, review_issues, review_suggestions),
         blockers=weak_lows[:6] or review_issues[:4],
@@ -234,23 +234,23 @@ def build_editorial_guidance(stratification: EditorialStratification) -> dict:
     if stratification.tier == TIER_SOLID_DRAFT:
         return {
             "level": "合格底稿",
-            "decision": "停止自动修订，进入作者阅读决策。",
-            "next_step": "满意则通过；不满意时再按具体阅读感受触发可选修订。",
-            "revision_depth": "author_review",
+            "decision": "不进入旁路确认，按主编准定稿标准决定轻润色或继续定点修订。",
+            "next_step": "系统保留主事件和场景顺序，只补足最低读感维度。",
+            "revision_depth": "machine_polish",
             "preserve_policy": "锁定源版本主事件、场景顺序、行动链和章末事实。",
         }
     if stratification.tier == TIER_NEAR_FINAL:
         return {
             "level": "准定稿",
-            "decision": "只做轻润色或等待作者审批。",
+            "decision": "只做主笔轻润色或进入准定稿流程。",
             "next_step": "系统不主动大修，避免把可读稿改坏。",
             "revision_depth": "polish",
             "preserve_policy": "保留全部结构，只允许句段级优化。",
         }
     return {
         "level": "发布级",
-        "decision": "进入人工最终确认。",
-        "next_step": "满意则通过，不满意再给具体修改意见。",
+        "decision": "进入主编准定稿后续流程。",
+        "next_step": "关闭阅读修订合同，继续连续性和发布准备。",
         "revision_depth": "approve",
         "preserve_policy": "不自动修订。",
     }
@@ -284,10 +284,10 @@ def _chief_decision(stratification: EditorialStratification) -> str:
     if stratification.tier == TIER_PROBLEM_DRAFT:
         return "定点修阻断，暂不升华。"
     if stratification.tier == TIER_SOLID_DRAFT:
-        return "保留底稿，停止自动修订。"
+        return "保留底稿，不进入旁路确认，只按主编准定稿标准轻润色。"
     if stratification.tier == TIER_NEAR_FINAL:
-        return "只做轻润色或等待审批。"
-    return "进入最终确认。"
+        return "只做主笔轻润色或进入准定稿流程。"
+    return "进入主编准定稿后续流程。"
 
 
 def _weakest_dimensions(dimensions: dict) -> list[dict]:
@@ -526,7 +526,18 @@ def _preserve_from_review(strengths: list[str]) -> list[str]:
 
 
 def _contamination_blockers(issues: list[str], warnings: list[str]) -> list[str]:
-    markers = ("forbidden_marker", "context_contamination", "旧设定", "反方向词", "系统字段", "brief")
+    markers = (
+        "forbidden_marker",
+        "context_contamination",
+        "旧设定",
+        "反方向词",
+        "系统字段",
+        "系统提示",
+        "质检术语",
+        "修订合同",
+        "brief_leak",
+        "prompt_leak",
+    )
     return [item for item in [*issues, *warnings] if any(marker in item for marker in markers)]
 
 

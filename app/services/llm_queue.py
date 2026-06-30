@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -9,15 +10,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import GenerationTask
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask
 from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
 from app.services.production_gate import assert_production_gate
+from app.services.revision_supervisor import persistent_revision_budget
 
 
 QUEUE_DRAFT = "queue_draft_chapter"
 QUEUE_REVISE = "queue_revise_chapter"
+QUEUE_REBUILD_CANDIDATES = "rebuild_chapter_candidates"
 QUEUE_TYPES = {QUEUE_DRAFT, QUEUE_REVISE}
+VISIBLE_QUEUE_TYPES = set(QUEUE_TYPES) | {QUEUE_REBUILD_CANDIDATES}
 ACTIVE_STATUSES = {"pending", "running", "paused"}
 
 
@@ -92,7 +96,7 @@ def enqueue_draft_chapter(
     timeout_seconds: int = 3600,
 ) -> GenerationTask:
     assert_production_gate(session, book_id=book_id, action="enqueue_draft_chapter")
-    _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
+    _guard_active_chapter_queue_task(session, book_id=book_id, chapter_number=chapter_number)
     return _enqueue(
         session,
         book_id=book_id,
@@ -114,7 +118,8 @@ def enqueue_revise_chapter(
     timeout_seconds: int = 3600,
 ) -> GenerationTask:
     assert_production_gate(session, book_id=book_id, action="enqueue_revise_chapter")
-    _guard_active_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
+    _guard_revision_enqueue_policy(session, book_id=book_id, chapter_number=chapter_number)
+    _guard_active_chapter_queue_task(session, book_id=book_id, chapter_number=chapter_number)
     return _enqueue(
         session,
         book_id=book_id,
@@ -132,7 +137,7 @@ def list_generation_queue(
     status: str = "",
     limit: int = 20,
 ) -> list[GenerationTask]:
-    stmt = select(GenerationTask).where(GenerationTask.task_type.in_(QUEUE_TYPES)).order_by(GenerationTask.id.desc()).limit(limit)
+    stmt = select(GenerationTask).where(GenerationTask.task_type.in_(VISIBLE_QUEUE_TYPES)).order_by(GenerationTask.id.desc()).limit(limit)
     if status:
         stmt = stmt.where(GenerationTask.status == status)
     return list(session.scalars(stmt))
@@ -144,7 +149,7 @@ def build_generation_queue_health(session: Session, *, failure_limit: int = 5, s
     tasks = list(
         session.scalars(
             select(GenerationTask)
-            .where(GenerationTask.task_type.in_(QUEUE_TYPES))
+            .where(GenerationTask.task_type.in_(VISIBLE_QUEUE_TYPES))
             .order_by(GenerationTask.id)
         )
     )
@@ -277,7 +282,7 @@ def recover_stale_generation_tasks(
     tasks = list(
         session.scalars(
             select(GenerationTask)
-            .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "running")
+            .where(GenerationTask.task_type.in_(VISIBLE_QUEUE_TYPES), GenerationTask.status == "running")
             .order_by(GenerationTask.id)
             .limit(limit)
         )
@@ -412,6 +417,57 @@ def _enqueue(
     return task
 
 
+def _guard_revision_enqueue_policy(session: Session, *, book_id: int, chapter_number: int) -> None:
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        raise ValueError("chapter not found")
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    if not version or version.status != "needs_revision":
+        raise ValueError("revision queue requires latest chapter version to be needs_revision")
+    brief = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")
+        .order_by(ChapterBrief.id.desc())
+    )
+    if not brief:
+        raise ValueError("revision queue requires active revision brief")
+    if _active_budget_recovery_revision(version, brief) or _revision_brief_targets_version(brief, version):
+        return
+    budget = persistent_revision_budget(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        max_full_revisions=settings.revision_persistent_max_full_revisions,
+    )
+    if budget.exceeded:
+        raise ValueError(f"revision queue blocked by {budget.reason}; run next action first to apply recovery strategy")
+
+
+def _active_budget_recovery_revision(version: ChapterVersion, brief: ChapterBrief) -> bool:
+    source = str(version.source or "")
+    if not source.startswith(("revision_budget_recovery:", "revision_budget_readable_restore:")):
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return (
+        "system_revision_budget_recovery" in text
+        or "persistent_revision_budget:" in text
+        or "自动修订预算触顶" in text
+    )
+
+
+def _revision_brief_targets_version(brief: ChapterBrief, version: ChapterVersion) -> bool:
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    version_label = rf"v{int(version.id)}(?!\d)"
+    current_markers = (
+        rf"合同当前底稿\s*[：:]\s*{version_label}",
+        rf"源版本锁定\s*[：:]\s*{version_label}",
+        rf"当前待修底稿\s*[：:]\s*{version_label}",
+        rf"以\s*{version_label}\s*为底稿",
+        rf"source_version_id\s*[=:]\s*{int(version.id)}(?!\d)",
+    )
+    return any(re.search(pattern, text) for pattern in current_markers)
+
+
 def _get_queue_task(session: Session, *, task_id: int) -> GenerationTask:
     task = session.get(GenerationTask, task_id)
     if not task:
@@ -432,6 +488,19 @@ def _guard_active_queue_task(session: Session, *, book_id: int, chapter_number: 
         input_data = _loads_json(task.input_json)
         if input_data.get("chapter_number") == chapter_number:
             raise ValueError(f"active generation queue task already exists: {task.id} ({task.status})")
+
+
+def _guard_active_chapter_queue_task(session: Session, *, book_id: int, chapter_number: int) -> None:
+    for task in session.scalars(
+        select(GenerationTask).where(
+            GenerationTask.book_id == book_id,
+            GenerationTask.task_type.in_(QUEUE_TYPES),
+            GenerationTask.status.in_(ACTIVE_STATUSES),
+        )
+    ):
+        input_data = _loads_json(task.input_json)
+        if input_data.get("chapter_number") == chapter_number:
+            raise ValueError(f"active generation queue task already exists for chapter {chapter_number}: {task.id} ({task.task_type}/{task.status})")
 
 
 def _next_pending_task(session: Session, *, exclude_task_ids: set[int] | None = None) -> GenerationTask | None:

@@ -54,6 +54,18 @@ def extract_min_chars(*values: str, default: int = 1200) -> int:
     return max(default, int(match.group(1)))
 
 
+def extract_max_chars(*values: str, default: int = 8000) -> int:
+    text = "\n".join(value or "" for value in values)
+    match = re.search(r"正文字数[:：]\s*(\d+)\s*[-~－—到至]\s*(\d+)\s*中文字符", text)
+    if not match:
+        return default
+    lower = int(match.group(1))
+    upper = int(match.group(2))
+    if upper < lower:
+        return default
+    return max(lower, upper)
+
+
 def _upgrade_standard_text(text: str) -> str:
     upgraded = re.sub(
         r"正文字数[:：]\s*2200\s*[-~－—到至]\s*3500\s*中文字符；低于2200",

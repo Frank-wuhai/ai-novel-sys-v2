@@ -306,6 +306,17 @@ def repair_humanized_unit_flow(
     )
     if local_repair.get("accepted"):
         return local_draft, local_repair
+    unit_results = local_repair.get("unit_results") if isinstance(local_repair.get("unit_results"), list) else []
+    if local_repair.get("attempted") and any(isinstance(item, dict) and item.get("accepted") for item in unit_results):
+        return draft, {
+            "attempted": True,
+            "accepted": False,
+            "mode": "local_units",
+            "threshold": threshold,
+            "before": before.to_dict(),
+            "local_repair": local_repair,
+            "reason": "local unit repair was rejected; skipped expensive whole-chapter repair in this transaction",
+        }
     repair_prompt = f"""
 你正在进行{task_label}的拟人化小单元返修。目标不是润色几句话，而是把整章改成连续的 300-700 字小单元生产稿。
 
@@ -356,8 +367,17 @@ JSON 字段：
     after = evaluate_chapter_units(repaired.content)
     before_chars = chinese_chars(draft.content)
     after_chars = chinese_chars(repaired.content)
-    accepted = after.score >= before.score and after_chars >= min(min_chars, before_chars)
-    if not accepted:
+    rejection = _unit_flow_rejection_reason(
+        before=before.to_dict(),
+        after=after.to_dict(),
+        before_chars=before_chars,
+        after_chars=after_chars,
+        min_chars=min_chars,
+        threshold=threshold,
+        content=repaired.content,
+        before_content=draft.content,
+    )
+    if rejection:
         return draft, {
             "attempted": True,
             "accepted": False,
@@ -366,7 +386,7 @@ JSON 字段：
             "before": before.to_dict(),
             "after": after.to_dict(),
             "local_repair": local_repair,
-            "reason": "repaired draft did not improve unit flow or preserved length",
+            "reason": rejection,
             "provider": response.provider,
             "model": response.model,
             **llm_usage_payload(response, prompt=repair_prompt),
@@ -513,8 +533,17 @@ def repair_failed_chapter_units(
     before_score = int(before_report.get("score") or 0)
     before_chars = chinese_chars(draft.content)
     after_chars = chinese_chars(candidate_content)
-    accepted = after.score >= before_score and after_chars >= min(min_chars, int(before_chars * 0.92))
-    if not accepted:
+    rejection = _unit_flow_rejection_reason(
+        before=before_report,
+        after=after.to_dict(),
+        before_chars=before_chars,
+        after_chars=after_chars,
+        min_chars=min_chars,
+        threshold=threshold,
+        content=candidate_content,
+        before_content=draft.content,
+    )
+    if rejection:
         return draft, {
             "attempted": True,
             "accepted": False,
@@ -524,7 +553,7 @@ def repair_failed_chapter_units(
             "after": after.to_dict(),
             "unit_results": unit_results,
             "usage": responses_usage,
-            "reason": "local unit repair did not improve unit flow or preserved length",
+            "reason": rejection,
         }
     repaired = DraftOutput(
         title=draft.title,
@@ -545,6 +574,63 @@ def repair_failed_chapter_units(
         "unit_results": unit_results,
         "usage": responses_usage,
     }
+
+
+def _unit_flow_rejection_reason(
+    *,
+    before: dict,
+    after: dict,
+    before_chars: int,
+    after_chars: int,
+    min_chars: int,
+    threshold: int,
+    content: str,
+    before_content: str = "",
+) -> str:
+    before_score = int(before.get("score") or 0)
+    after_score = int(after.get("score") or 0)
+    before_units = int(before.get("unit_count") or 0)
+    after_units = int(after.get("unit_count") or 0)
+    if after_score < before_score:
+        return f"unit flow regressed: {before_score}->{after_score}"
+    if after_chars < min(min_chars, int(before_chars * 0.92)):
+        return "repaired draft did not preserve required length"
+    if before_units and after_units > max(before_units + 2, int(before_units * 1.25)):
+        return f"unit count expanded suspiciously: {before_units}->{after_units}"
+    if _repeated_long_segment_count(content) > _repeated_long_segment_count(before_content):
+        return "repaired draft contains repeated long segments"
+    if after_score < threshold:
+        return f"unit flow remains below threshold: {after_score}<{threshold}"
+    return ""
+
+
+def _has_repeated_long_segments(content: str) -> bool:
+    return _repeated_long_segment_count(content) > 0
+
+
+def _repeated_long_segment_count(content: str) -> int:
+    repeats = 0
+    seen: set[str] = set()
+    for paragraph in re.split(r"\n{2,}", content or ""):
+        normalized = re.sub(r"\s+", "", paragraph)
+        if len(normalized) < 60:
+            continue
+        key = normalized[:180]
+        if key in seen:
+            repeats += 1
+            continue
+        seen.add(key)
+    seen.clear()
+    for part in re.split(r"(?:\n{2,}|[。！？])", content or ""):
+        normalized = re.sub(r"\s+", "", part)
+        if len(normalized) < 60:
+            continue
+        key = normalized[:140]
+        if key in seen:
+            repeats += 1
+            continue
+        seen.add(key)
+    return repeats
 
 
 def actual_usage_tokens(usage: dict | None) -> tuple[int, int, int]:

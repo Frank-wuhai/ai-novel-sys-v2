@@ -24,6 +24,8 @@ from app.models.entities import (
     KnowledgeEmbedding,
     MarketSignal,
     PlatformFeedback,
+    ProductionRunReview,
+    QualityReport,
     StoryBible,
     StoryFoundation,
     VisualAsset,
@@ -601,9 +603,84 @@ def _knowledge_chunks(session: Session, *, book: Book, limit_chapters: int) -> l
         text = "\n".join([chapter.title, chapter.summary, latest.content[:3000] if latest else ""]).strip()
         if text:
             chunks.append(_chunk("chapter", str(chapter.id), f"chapter {chapter.chapter_number}", text))
+        quality = (
+            session.scalar(
+                select(QualityReport)
+                .join(ChapterVersion, QualityReport.chapter_version_id == ChapterVersion.id)
+                .where(ChapterVersion.chapter_id == chapter.id)
+                .order_by(QualityReport.id.desc())
+            )
+            if chapter.id
+            else None
+        )
+        quality_text = _quality_lesson_text(chapter=chapter, version=latest, quality=quality)
+        if quality_text:
+            chunks.append(_chunk("quality_lesson", str(quality.id), f"chapter {chapter.chapter_number} quality", quality_text))
+    for review in session.scalars(
+        select(ProductionRunReview).where(ProductionRunReview.book_id == book.id).order_by(ProductionRunReview.id.desc()).limit(80)
+    ):
+        review_text = _production_review_text(review)
+        if review_text:
+            chunks.append(_chunk("production_review", str(review.id), f"production review {review.id}", review_text))
     for feedback in session.scalars(select(PlatformFeedback).where(PlatformFeedback.book_id == book.id).order_by(PlatformFeedback.id.desc()).limit(80)):
         chunks.append(_chunk("feedback", str(feedback.id), f"{feedback.platform}:{feedback.metric_name}", feedback.raw_text or feedback.metric_value))
     return [chunk for chunk in chunks if chunk["text"].strip()]
+
+
+def _quality_lesson_text(*, chapter: Chapter, version: ChapterVersion | None, quality: QualityReport | None) -> str:
+    if not quality:
+        return ""
+    data = _loads_json_dict(quality.report)
+    issues = _string_list(data.get("issues"))[:8]
+    warnings = _string_list(data.get("warnings"))[:6]
+    strengths = _string_list(data.get("strengths"))[:6]
+    reviewer = data.get("llm_review") if isinstance(data.get("llm_review"), dict) else {}
+    suggestions = _string_list(reviewer.get("revision_suggestions"))[:6]
+    risk_flags = _string_list(reviewer.get("risk_flags"))[:6]
+    assessment = data.get("reading_assessment") if isinstance(data.get("reading_assessment"), dict) else {}
+    dimensions = data.get("dimensions") if isinstance(data.get("dimensions"), dict) else {}
+    weak_dimensions = [
+        f"{key}={value}"
+        for key, value in sorted(dimensions.items(), key=lambda item: int(item[1]) if isinstance(item[1], int) else 999)[:8]
+    ]
+    lines = [
+        f"章节: 第{chapter.chapter_number}章 {chapter.title}",
+        f"版本: v{version.id if version else ''} status={version.status if version else ''} source={version.source if version else ''}",
+        f"质检: score={quality.score} passed={quality.passed}",
+    ]
+    if assessment:
+        lines.append(f"阅读评估: level={assessment.get('level') or assessment.get('draft_level') or ''} action={assessment.get('action') or ''}")
+    if strengths:
+        lines.append("有效经验: " + "；".join(strengths))
+    if issues:
+        lines.append("失败问题: " + "；".join(issues))
+    if warnings:
+        lines.append("风险提醒: " + "；".join(warnings))
+    if weak_dimensions:
+        lines.append("薄弱维度: " + "；".join(weak_dimensions))
+    if suggestions:
+        lines.append("修订经验: " + "；".join(suggestions))
+    if risk_flags:
+        lines.append("禁用惯性: " + "；".join(risk_flags))
+    return "\n".join(line for line in lines if line.strip())
+
+
+def _production_review_text(review: ProductionRunReview) -> str:
+    data = _loads_json_dict(review.review_json)
+    if not data:
+        return ""
+    lines = [
+        f"生产复盘: chapter_id={review.chapter_id} version_id={review.chapter_version_id or ''} status={review.status}",
+    ]
+    for key in ("headline", "summary", "diagnosis", "next_action", "reason"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            lines.append(f"{key}: {value.strip()[:500]}")
+    for key in ("issues", "warnings", "lessons", "actions", "recommendations"):
+        values = _string_list(data.get(key))[:8]
+        if values:
+            lines.append(f"{key}: " + "；".join(values))
+    return "\n".join(lines)
 
 
 def _visual_prompt(session: Session, *, book: Book, chapter: Chapter | None, asset_type: str, style: str) -> str:
@@ -704,6 +781,22 @@ def _loads_json(raw: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON: {exc}") from exc
+
+
+def _loads_json_dict(raw: str | None) -> dict[str, Any]:
+    try:
+        data = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
 
 
 def _bounded_int(value: Any, *, default: int, low: int, high: int) -> int:

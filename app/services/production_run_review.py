@@ -236,7 +236,7 @@ def _recommendations(*, alignment: dict[str, Any], unit_report: dict[str, Any], 
         indexes = "、".join(str(item.get("index")) for item in weak_units[:5])
         rows.append(f"下轮生产重点关注第 {indexes} 单元。")
     if int(unit_report.get("score") or 0) < 70:
-        rows.append("单元流仍低于 70 分，下一轮生产应优先优化单元衔接；当前章是否通过以质检结论和人工阅读为准。")
+        rows.append("单元流仍低于 70 分，下一轮生产应优先优化单元衔接；当前章是否通过以质检结论和采用确认为准。")
     return list(dict.fromkeys(rows))[:6]
 
 
@@ -328,7 +328,7 @@ def _pattern_recommendations(
     if "info_gain" in names:
         rows.append("强化信息增量：每个单元给读者一条新线索、规则、身份、代价或局面变化。")
     if avg_score and avg_score < 70:
-        rows.append("本章生成后不建议直接审批，优先复检小单元流。")
+        rows.append("本章生成后不建议直接采用确认，优先复检小单元流。")
     return list(dict.fromkeys(rows))[:6]
 
 

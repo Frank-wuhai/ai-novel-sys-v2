@@ -13,7 +13,7 @@ python -m app.cli author-command-center --book-id 1 --chapter-number 1 --start 1
 python scripts/run_local_dashboard.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` and use the writing desk as the main flow. The default author-facing action should be continue, repair, revise, approve, or prepare publishing; queue controls, database tools, model diagnostics, and publishing internals stay in advanced panels.
+Open `http://127.0.0.1:8765` and use the writing desk as the main flow. The desktop shortcut also uses this fixed local URL; if the port is occupied it fails loudly instead of silently switching to another port. The default author-facing action should be continue, repair, revise, approve, or prepare publishing; queue controls, database tools, model diagnostics, and publishing internals stay in advanced panels.
 
 ## Author Flow
 
@@ -31,6 +31,8 @@ In short:
 ## Operator Manual
 
 The full command reference has moved to [docs/operator_manual.md](docs/operator_manual.md). Use it for CLI recovery, database operations, queue supervision, publishing targets, inspection commands, and regression details.
+
+External operator agents such as OpenClaw or Hermes should use the whitelisted wrapper in [docs/agent_operator_layer.md](docs/agent_operator_layer.md) instead of running arbitrary project commands.
 
 ## Core Boundaries
 
