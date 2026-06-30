@@ -34,6 +34,7 @@ from app.services.agent_plan_intelligence import (
     run_agent_plan_enhancement_cycle,
     summarize_semantic_memory,
 )
+from app.services.agent_plan_utilization import build_agent_plan_utilization_report
 from app.services.aesthetic_profile import apply_aesthetic_profile
 from app.services.author_command_center import build_author_command_center
 from app.services.canon import (
@@ -106,6 +107,7 @@ from app.services.planning import (
     run_book_cycle,
     run_next_action,
 )
+from app.services.production_kernel import ProductionKernel
 from app.services.evidence import (
     add_evidence_source,
     add_market_signal,
@@ -162,6 +164,11 @@ def _print_revision_decision(adjustment_text: str) -> None:
     print(f"revision_confidence={decision.get('置信度', '')}")
     print(f"revision_reason={decision.get('判定理由', '')}")
     print(f"revision_escalation={decision.get('升级规则', '')}")
+
+
+def _print_debug_entrypoint(recommended_command: str) -> None:
+    print("debug_entrypoint=true")
+    print(f"recommended_command={recommended_command}")
 
 
 def main() -> None:
@@ -272,6 +279,7 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--count", type=int, default=10)
+    p.add_argument("--no-state-repairs", action="store_true", help="read-only planning; do not apply state repair writes")
 
     p = sub.add_parser("run-next-action")
     p.add_argument("--book-id", type=int, required=True)
@@ -284,7 +292,30 @@ def main() -> None:
     p.add_argument("--preview-only", action="store_true", help="only report the next action; do not write versions, reports, or jobs")
     p.add_argument("--queue-generation", action="store_true")
 
+    p = sub.add_parser("production-run-next")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--goal-prefix", default="自动规划")
+    p.add_argument("--required-beats", default="")
+    p.add_argument("--constraints", default="")
+    p.add_argument("--platform", default="manual")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--preview-only", action="store_true", help="only report the next action; do not write versions, reports, or jobs")
+    p.add_argument("--queue-generation", action="store_true")
+
     p = sub.add_parser("run-book-cycle")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--start", type=int, default=1)
+    p.add_argument("--count", type=int, default=10)
+    p.add_argument("--max-steps", type=int, default=10)
+    p.add_argument("--goal-prefix", default="自动规划")
+    p.add_argument("--required-beats", default="")
+    p.add_argument("--constraints", default="")
+    p.add_argument("--platform", default="manual")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--queue-generation", action="store_true")
+
+    p = sub.add_parser("production-run-cycle")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--start", type=int, default=1)
     p.add_argument("--count", type=int, default=10)
@@ -318,6 +349,9 @@ def main() -> None:
     p.add_argument("--live-embedding", action="store_true")
     p.add_argument("--skip-memory", action="store_true")
     p.add_argument("--skip-visuals", action="store_true")
+
+    p = sub.add_parser("agent-plan-utilization")
+    p.add_argument("--book-id", type=int, required=True)
 
     p = sub.add_parser("production-control")
     p.add_argument("--book-id", type=int, required=True)
@@ -955,7 +989,13 @@ def main() -> None:
                 for brief in briefs:
                     print(f"brief_id={brief.id}\tchapter_id={brief.chapter_id}\tstatus={brief.status}")
             elif args.cmd == "plan-chapters":
-                for item in plan_chapters(session, book_id=args.book_id, start=args.start, count=args.count):
+                for item in plan_chapters(
+                    session,
+                    book_id=args.book_id,
+                    start=args.start,
+                    count=args.count,
+                    apply_state_repairs=not args.no_state_repairs,
+                ):
                     print(
                         "\t".join(
                             [
@@ -972,6 +1012,35 @@ def main() -> None:
                             ]
                         )
                     )
+            elif args.cmd == "production-run-next":
+                if args.preview_only:
+                    plan = ProductionKernel(
+                        session,
+                        book_id=args.book_id,
+                        chapter_number=args.chapter_number,
+                        platform=args.platform,
+                    ).plan()
+                    print(f"chapter_number={plan.item.chapter_number}")
+                    print(f"action={plan.item.next_action}")
+                    print("status=preview")
+                    print(f"message={plan.item.reason}")
+                    print(f"object_id={plan.item.latest_version_id or plan.item.brief_id or plan.item.publish_job_id or ''}")
+                else:
+                    run = ProductionKernel(
+                        session,
+                        book_id=args.book_id,
+                        chapter_number=args.chapter_number,
+                        platform=args.platform,
+                    ).run_until_terminal(dry_run=args.dry_run)
+                    latest = run.latest_result
+                    print(f"chapter_number={args.chapter_number}")
+                    print(f"action={latest.get('action', '')}")
+                    print(f"status={latest.get('status', '')}")
+                    print(f"message={latest.get('message', '')}")
+                    print(f"object_id={latest.get('object_id', '')}")
+                    print(f"terminal_status={run.terminal_status}")
+                    print(f"terminal_message={run.terminal_message}")
+                    print(f"executed_count={len(run.executed)}")
             elif args.cmd == "run-next-action":
                 result = run_next_action(
                     session,
@@ -991,7 +1060,7 @@ def main() -> None:
                 print(f"message={result.message}")
                 if result.object_id is not None:
                     print(f"object_id={result.object_id}")
-            elif args.cmd == "run-book-cycle":
+            elif args.cmd in {"run-book-cycle", "production-run-cycle"}:
                 result = run_book_cycle(
                     session,
                     book_id=args.book_id,
@@ -1075,6 +1144,9 @@ def main() -> None:
                     create_visuals=not args.skip_visuals,
                 )
                 print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "agent-plan-utilization":
+                result = build_agent_plan_utilization_report(session, book_id=args.book_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
             elif args.cmd == "production-control":
                 report = build_production_control_report(
                     session,
@@ -1147,10 +1219,16 @@ def main() -> None:
                 print(f"remaining_tokens={report.remaining_tokens}")
                 print(f"task_count={report.task_count}")
             elif args.cmd == "draft-chapter":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number}"
+                )
                 version = draft_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number, dry_run=args.dry_run)
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
             elif args.cmd == "enqueue-draft":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number} --queue-generation"
+                )
                 task = enqueue_draft_chapter(
                     session,
                     book_id=args.book_id,
@@ -1164,6 +1242,9 @@ def main() -> None:
                 print(f"task_type={task.task_type}")
                 print(f"task_timeout_seconds={args.task_timeout_seconds}")
             elif args.cmd == "enqueue-revision":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number} --queue-generation"
+                )
                 task = enqueue_revise_chapter(
                     session,
                     book_id=args.book_id,
@@ -1364,6 +1445,9 @@ def main() -> None:
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
             elif args.cmd == "review-chapter":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number}"
+                )
                 report = review_chapter(
                     session,
                     book_id=args.book_id,
@@ -1396,6 +1480,9 @@ def main() -> None:
                 print(f"required_beats={brief.required_beats}")
                 print(f"constraints={brief.constraints}")
             elif args.cmd == "revise-chapter":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number}"
+                )
                 version = revise_chapter(session, book_id=args.book_id, chapter_number=args.chapter_number, dry_run=args.dry_run)
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
