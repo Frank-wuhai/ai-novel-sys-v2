@@ -20,6 +20,10 @@ data/backups/
 data/trash/
 data/test-worker-logs/
 data/worker-stability-logs/
+data/self_repair/
+data/regression_runs/
+data/dry_run_reports/
+data/corrupt_backups/
 outputs/
 
 *.log
