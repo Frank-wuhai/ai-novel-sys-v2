@@ -27,6 +27,7 @@ from app.services.llm_audit import record_llm_request
 from app.services.llm_errors import classify_exception
 from app.services.naming_governance import build_naming_governance_block
 from app.services.production_packet import build_chapter_production_packet
+from app.services.production_gate import assert_production_gate
 from app.services.writer_loop import sample_failure_director
 
 TASK_TYPE_CHAPTER_SAMPLE = "chapter_sample_lab"
@@ -64,6 +65,7 @@ def generate_chapter_samples(
 ) -> GenerationTask:
     if sample_count < 1 or sample_count > 5:
         raise ValueError("sample_count must be between 1 and 5")
+    assert_production_gate(session, book_id=book_id, action="generate_chapter_samples")
     max_attempts = max(1, min(5, int(max_attempts or DEFAULT_SAMPLE_MAX_ATTEMPTS)))
     book = session.get(Book, book_id)
     if not book:
@@ -151,21 +153,68 @@ def generate_chapter_samples(
         base_prompt = prompt_context["prompt"]
         for attempt_index in range(1, max_attempts + 1):
             prompt = _prompt_with_retry_feedback(base_prompt, retry_feedback, attempt_index=attempt_index)
-            response = provider.generate(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=min(0.95, temperature + (attempt_index - 1) * 0.06),
-                model=model,
-                response_format={"type": "json_object"},
-            )
-            data, repair = _parse_or_repair_sample_output(
-                provider,
-                response_text=response.text,
-                original_prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                model=model,
-            )
+            response = None
+            try:
+                response = provider.generate(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=min(0.95, temperature + (attempt_index - 1) * 0.06),
+                    model=model,
+                    response_format={"type": "json_object"},
+                )
+                data, repair = _parse_or_repair_sample_output(
+                    provider,
+                    response_text=response.text,
+                    original_prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    model=model,
+                )
+            except Exception as exc:
+                classification = classify_exception(exc)
+                error_category = (
+                    "json_repair_failed"
+                    if isinstance(exc, json.JSONDecodeError) or "Expecting" in str(exc) or "JSON" in type(exc).__name__
+                    else classification.category
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt_index,
+                        "score": 0,
+                        "status": "parse_failed" if error_category == "json_repair_failed" else "failed",
+                        "gate_passed": False,
+                        "usable": False,
+                        "recommended_sample_index": None,
+                        "issues": [str(exc)[:240]],
+                        "repeated_motifs": [],
+                        "max_pair_overlap": None,
+                        "request_id": response.request_id if response else "",
+                        "error_category": error_category,
+                        "retryable": True if error_category == "json_repair_failed" else classification.retryable,
+                    }
+                )
+                record_llm_request(
+                    session,
+                    book_id=book_id,
+                    task_type=TASK_TYPE_CHAPTER_SAMPLE,
+                    generation_task_id=task_id,
+                    provider=response.provider if response else "live",
+                    model=response.model if response else model,
+                    request_id=response.request_id if response else "",
+                    prompt_template=f"{PROMPT_TEMPLATE}#attempt{attempt_index}",
+                    prompt_chars=len(prompt),
+                    response_chars=len(response.text) if response else 0,
+                    estimated_prompt_tokens=estimate_tokens(prompt),
+                    estimated_response_tokens=estimate_tokens(response.text) if response else 0,
+                    actual_prompt_tokens=int((response.usage or {}).get("prompt_tokens") or 0) if response else 0,
+                    actual_response_tokens=int((response.usage or {}).get("completion_tokens") or 0) if response else 0,
+                    actual_total_tokens=int((response.usage or {}).get("total_tokens") or 0) if response else 0,
+                    elapsed_ms=response.elapsed_ms if response else 0,
+                    status="parse_failed",
+                    error_category=error_category,
+                )
+                retry_feedback = "上一轮小样 JSON 格式错误，下一轮必须输出严格合法 JSON；字符串内部引号和换行必须转义。"
+                continue
             samples = _normalize_samples(data.get("samples"), limit=sample_count)
             if not samples:
                 raise ValueError("LLM did not return usable chapter samples")
@@ -259,14 +308,23 @@ def generate_chapter_samples(
         return task
     except Exception as exc:
         classification = classify_exception(exc)
+        error_text = str(exc)
+        attempt_rows = attempts if "attempts" in locals() else []
+        json_parse_error = (
+            isinstance(exc, json.JSONDecodeError)
+            or "Expecting" in error_text
+            or "JSON" in type(exc).__name__
+            or any(str(item.get("error_category") or "") == "json_repair_failed" for item in attempt_rows if isinstance(item, dict))
+        )
         task = session.get(GenerationTask, task_id)
         task.status = "failed"
         task.output_json = _dumps_json(
             {
-                "error_category": classification.category,
+                "error_category": "json_repair_failed" if json_parse_error else classification.category,
                 "error_type": type(exc).__name__,
-                "error": str(exc),
-                "retryable": classification.retryable,
+                "error": error_text,
+                "retryable": True if json_parse_error else classification.retryable,
+                "attempts": attempt_rows,
             }
         )
         record_llm_request(
@@ -390,6 +448,7 @@ def adopt_chapter_sample(
     task = session.get(GenerationTask, task_id)
     if not task:
         raise ValueError(f"chapter sample task not found: {task_id}")
+    assert_production_gate(session, book_id=task.book_id, action="adopt_recommended_chapter_sample")
     if task.task_type != TASK_TYPE_CHAPTER_SAMPLE:
         raise ValueError(f"not a chapter sample task: {task.task_type}")
     input_data = _loads_json(task.input_json)
@@ -779,12 +838,12 @@ def _sample_patterns(items: list[dict], *, limit: int) -> list[str]:
 
 def _sample_learning_prompt(learning: dict) -> str:
     if not learning.get("human_approved_count"):
-        return "暂无经人工明确验证的小样学习；近期采用记录只作为试写历史，不得当作偏好复刻。"
+        return "暂无经采用确认的小样学习；近期采用记录只作为试写历史，不得当作偏好复刻。"
     lines = [
-        f"- 经人工验证的小样 {learning.get('human_approved_count', 0)} 次；采用但未明确验证的记录不得当作作者偏好。",
+        f"- 经采用确认的小样 {learning.get('human_approved_count', 0)} 次；采用但未明确验证的记录不得当作作者偏好。",
     ]
     for item in learning.get("successful_patterns", [])[:4]:
-        lines.append(f"- 人工确认方向：{item}")
+        lines.append(f"- 采用确认方向：{item}")
     return "\n".join(lines)
 
 
@@ -887,7 +946,7 @@ def _build_sample_prompt_context(
 前章承接：
 {packet.context.previous_chapter_context}
 
-人工验证学习：
+采用确认学习：
 {_sample_learning_prompt(sample_learning)}
 
 同章反模板约束：
@@ -908,10 +967,10 @@ Canon 与世界规则：
 - 每个 opening 必须满足可用小样底线：有主角短期目标、现场阻碍、至少两处身体/感官反应、一个可见证据、一次局面变化和一个能扩成整章的后续诱因。
 - 如果某个小样只能概括“气质/氛围/规则”，却没有人物互动、阻碍变化和收益代价，它就是失败小样。
 - 三个小样必须分别测试不同“整章发动机”：例如关系交易、规则误判、身体异变、门槛考验、利益交换、道德选择、信息错认；不得都靠盘问、追杀、欠账、机构关注或系统提示制造推进。
-- 本轮目标是探索，不是复刻已采用小样。采用记录只代表试写历史，不代表作者偏好；除非人工明确验证，否则不得学习为固定模板。
+- 本轮目标是探索，不是复刻已采用小样。采用记录只代表试写历史，不代表作者偏好；除非采用确认，否则不得学习为固定模板。
 - 三个小样必须先各自声明 exploration_axis 和 experiment_hypothesis：分别测试不同叙事发动机，例如人物处境、关系压力、规则误判、场景奇观、道德选择、信息悬疑；不得只是三个不同地点的同一套开场。
 - 三个小样必须先在脑中完成“发动机分配”：短期目标、主压力、配角功能、秘密来源、章末诱因五项不能成套复用。若两个小样都靠欠账/盘问/追杀/演技观察推动，即为失败。
-- 采用小样只代表本次试写方向，不进入长期学习；只有人工明确说“这个方向以后保留”，才可沉淀为作者偏好。
+- 采用小样只代表本次试写方向，不进入长期学习；只有明确要求“这个方向以后保留”，才可沉淀为作者偏好。
 - 第二章及以后必须先承接上一章最后动作的后果、情绪或未解决问题，再选择适合本章的切入法推进。
 - 每个小样必须使用不同开篇策略，且不得复用“写作智能上下文”中最近开篇记忆的地点、第一动作、第一矛盾和章末钩子形态。
 - 如果本书 Book Profile 指定题材偏差护栏，必须按护栏执行；不要把别的书的默认套路套进来。
