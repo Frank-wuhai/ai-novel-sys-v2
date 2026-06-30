@@ -24,6 +24,7 @@ data/self_repair/
 data/regression_runs/
 data/dry_run_reports/
 data/corrupt_backups/
+data/dashboard-url.txt
 outputs/
 
 *.log
