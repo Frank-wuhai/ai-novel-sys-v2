@@ -87,7 +87,8 @@ from app.services.chapter_samples import (
     sync_chapter_sample_learning,
 )
 from app.services.dashboard_production_actions import repair_chapter_brief, restart_production_from_chapter
-from app.services.author_runner import author_background_timeout_seconds, author_terminal_status, run_author_mode
+from app.services.dashboard_background import background_runs_payload, pending_generation_task_id
+from app.services.author_runner import author_background_timeout_seconds, author_terminal_status, default_revision_cycles, run_author_mode
 from app.services.failure_attribution import attribute_generation_failure
 from app.services.intent_acceptance import evaluate_author_intent
 from app.services.model_strategy import build_model_strategy
@@ -98,6 +99,7 @@ from app.services.production_scaffold import repair_production_scaffold
 from app.services.publish_preflight import build_publish_preflight
 from app.services.readiness import check_production_readiness
 from app.services.revision_intent import extract_revision_decision
+from app.services.self_repair import perform_self_repair_action
 from app.services.story_dna import (
     build_story_dna_from_development,
     build_story_dna_from_skeleton,
@@ -123,7 +125,6 @@ from app.services.skeleton_sync import (
 from app.services.writer_loop import build_writer_loop_plan
 from app.llm.providers import ArkOpenAIProvider
 from app.services.llm_queue import (
-    QUEUE_TYPES,
     build_generation_queue_health,
     cancel_generation_queue_task,
     pause_generation_queue_task,
@@ -165,6 +166,46 @@ from app.dashboard_payloads import (
     _quality_payload,
     _version_diff_payload,
 )
+from app.dashboard_skeleton_constants import SKELETON_APPROVAL_FIELDS
+from app.dashboard_knowledge_payload import knowledge_payload
+
+
+_STALE_ALLOWED_ACTIONS = {"queue_health"}
+_SERVER_CODE_FINGERPRINT = None
+
+
+def _watched_code_files() -> list[Path]:
+    files = [ROOT / "scripts" / "run_local_dashboard.py", ROOT / "app" / "dashboard.html"]
+    files.extend(path for path in (ROOT / "app").rglob("*.py") if "__pycache__" not in path.parts)
+    return sorted(set(files), key=lambda path: str(path.relative_to(ROOT)))
+
+
+def _code_fingerprint() -> tuple[tuple[str, int, int], ...]:
+    rows: list[tuple[str, int, int]] = []
+    for path in _watched_code_files():
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            rows.append((str(path.relative_to(ROOT)), -1, -1))
+            continue
+        rows.append((str(path.relative_to(ROOT)), int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(rows)
+
+
+def _assert_server_code_current(action: str) -> None:
+    if action in _STALE_ALLOWED_ACTIONS:
+        return
+    if _SERVER_CODE_FINGERPRINT is None:
+        return
+    if _code_fingerprint() == _SERVER_CODE_FINGERPRINT:
+        return
+    raise RuntimeError(
+        "服务代码已更新，但当前 dashboard 进程仍是旧代码；已阻止写入数据库。"
+        "请运行 scripts/start_dashboard_desktop.sh 重启前台服务，或刷新到新启动的 dashboard 后再继续。"
+    )
+
+
+_SERVER_CODE_FINGERPRINT = _code_fingerprint()
 
 
 _BACKGROUND_LOCK = threading.Lock()
@@ -178,7 +219,7 @@ def _start_background_queue_run(*, max_tasks: int = 1, book_id: int = 0, chapter
     selected_task_id = None
     if book_id or chapter_number:
         with session_scope() as session:
-            selected_task_id = _pending_generation_task_id(session, book_id=book_id, chapter_number=chapter_number)
+            selected_task_id = pending_generation_task_id(session, book_id=book_id, chapter_number=chapter_number)
         if not selected_task_id:
             return {"status": "noop", "message": "当前作品/章节没有待启动的生成任务。"}
     with _BACKGROUND_LOCK:
@@ -190,26 +231,44 @@ def _start_background_queue_run(*, max_tasks: int = 1, book_id: int = 0, chapter
             "run_id": run_id,
             "status": "running",
             "started_at": time.time(),
+            "last_progress_at": time.time(),
             "finished_at": None,
             "executed_count": 0,
+            "executed": [],
             "error": "",
         }
 
     def worker() -> None:
+        executed: list[dict] = []
         try:
             with _DB_WRITE_LOCK, session_scope() as session:
+                selected_status = ""
                 if selected_task_id:
                     result = run_generation_queue_task(session, task_id=selected_task_id)
+                    selected_status = result.task.status
                     executed_count = 1 if result.task.status in {"completed", "failed", "pending"} else 0
                 else:
                     batch = run_generation_queue(session, max_tasks=max_tasks)
                     executed_count = len(batch.results)
+            if selected_task_id and selected_status == "completed" and book_id and chapter_number:
+                with _DB_WRITE_LOCK:
+                    author_run = run_author_mode(
+                        book_id=book_id,
+                        chapter_number=chapter_number,
+                        max_revision_cycles=default_revision_cycles(),
+                    )
+                executed = author_run.executed
             with _BACKGROUND_LOCK:
                 _BACKGROUND_RUNS[run_id].update(
                     {
                         "status": "completed",
                         "finished_at": time.time(),
                         "executed_count": executed_count,
+                        "post_generation_executed_count": len(executed),
+                        "post_generation_executed": executed,
+                        "result": executed[-1] if executed else {},
+                        "terminal_status": author_terminal_status(executed)["status"] if executed else "",
+                        "terminal_message": author_terminal_status(executed)["message"] if executed else "",
                     }
                 )
         except Exception as exc:
@@ -233,11 +292,11 @@ def _start_background_review_run(
     chapter_number: int,
     platform: str = "manual",
     auto_revise_until_pass: bool = False,
-    max_revision_cycles: int = 3,
+    max_revision_cycles: int | None = None,
 ) -> dict:
     if not book_id or not chapter_number:
         raise ValueError("book_id and chapter_number are required")
-    max_revision_cycles = max(1, min(5, int(max_revision_cycles or 3)))
+    max_revision_cycles = max(1, min(12, int(max_revision_cycles or default_revision_cycles())))
     with _BACKGROUND_LOCK:
         active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
         if active:
@@ -303,7 +362,9 @@ def _start_background_review_run(
                 if result.action == "revise_chapter":
                     revision_count += 1
                     continue
-                if result.action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}:
+                if result.action == "record_chapter_continuity":
+                    continue
+                if result.action in {"approve_chapter", "mark_publish_job"}:
                     break
                 break
             with _BACKGROUND_LOCK:
@@ -430,11 +491,11 @@ def _start_background_author_run(
     book_id: int,
     chapter_number: int,
     platform: str = "manual",
-    max_revision_cycles: int = 3,
+    max_revision_cycles: int | None = None,
 ) -> dict:
     if not book_id or not chapter_number:
         raise ValueError("book_id and chapter_number are required")
-    max_revision_cycles = max(1, min(5, int(max_revision_cycles or 3)))
+    max_revision_cycles = max(1, min(12, int(max_revision_cycles or default_revision_cycles())))
     with _BACKGROUND_LOCK:
         active = next((run for run in _BACKGROUND_RUNS.values() if run.get("status") == "running"), None)
         if active:
@@ -454,6 +515,18 @@ def _start_background_author_run(
 
     def worker() -> None:
         executed: list[dict] = []
+        def on_progress(items: list[dict]) -> None:
+            with _BACKGROUND_LOCK:
+                if run_id in _BACKGROUND_RUNS:
+                    _BACKGROUND_RUNS[run_id].update(
+                        {
+                            "last_progress_at": time.time(),
+                            "executed_count": len(items),
+                            "executed": items,
+                            "result": items[-1] if items else {},
+                        }
+                    )
+
         try:
             with _DB_WRITE_LOCK:
                 run = run_author_mode(
@@ -461,6 +534,7 @@ def _start_background_author_run(
                     chapter_number=chapter_number,
                     platform=platform,
                     max_revision_cycles=max_revision_cycles,
+                    on_progress=on_progress,
                 )
             executed = run.executed
             with _BACKGROUND_LOCK:
@@ -491,70 +565,7 @@ def _start_background_author_run(
 
     thread = threading.Thread(target=worker, name=f"author-worker-{run_id}", daemon=True)
     thread.start()
-    return {"status": "running", "run_id": run_id, "message": "主笔模式已开始：系统会自动跑到可读稿或明确失败。"}
-
-
-def _background_runs_payload() -> list[dict]:
-    now = time.time()
-    with _BACKGROUND_LOCK:
-        for run in _BACKGROUND_RUNS.values():
-            if (
-                run.get("status") == "running"
-                and int(run.get("executed_count") or 0) == 0
-                and now - float(run.get("started_at") or now) > int(run.get("timeout_seconds") or 180)
-            ):
-                kind = str(run.get("kind") or "")
-                timeout_message = "后台任务启动超时，请重试；若反复出现，查看模型连接或数据库锁。"
-                if kind == "sample":
-                    timeout_message = "章节小样生成超时，请重试；若反复出现，查看模型连接。"
-                elif kind == "author":
-                    timeout_message = "后台主笔启动超时，请重试；若反复出现，查看模型连接或数据库锁。"
-                run.update(
-                    {
-                        "status": "failed",
-                        "finished_at": now,
-                        "error": f"后台任务启动后 {int(run.get('timeout_seconds') or 180)} 秒内没有完成任何动作，已自动标记为失败。",
-                        "terminal_status": "system_failed",
-                        "terminal_message": timeout_message,
-                    }
-                )
-        runs = list(_BACKGROUND_RUNS.values())[-10:]
-    payload = []
-    for run in reversed(runs):
-        started_at = float(run.get("started_at") or now)
-        finished_at = run.get("finished_at")
-        payload.append(
-            {
-                "run_id": run.get("run_id", ""),
-                "kind": run.get("kind", "queue"),
-                "status": run.get("status", ""),
-                "running_age_seconds": int((float(finished_at) if finished_at else now) - started_at),
-                "executed_count": run.get("executed_count", 0),
-                "error": run.get("error", ""),
-                "result": run.get("result", {}),
-                "terminal_status": run.get("terminal_status", ""),
-                "terminal_message": run.get("terminal_message", ""),
-                "timeout_seconds": int(run.get("timeout_seconds") or 180),
-            }
-        )
-    return payload
-
-
-def _pending_generation_task_id(session, *, book_id: int = 0, chapter_number: int = 0) -> int | None:
-    stmt = (
-        select(GenerationTask)
-        .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "pending")
-        .order_by(GenerationTask.id)
-    )
-    if book_id:
-        stmt = stmt.where(GenerationTask.book_id == book_id)
-    tasks = list(session.scalars(stmt))
-    for task in tasks:
-        input_data = _loads_json(task.input_json)
-        if chapter_number and int(input_data.get("chapter_number") or 0) != chapter_number:
-            continue
-        return task.id
-    return None
+    return {"status": "running", "run_id": run_id, "message": "主笔模式已开始：系统会自动推进到通过、回炉重建、发布准备或硬安全上限。"}
 
 
 def main() -> int:
@@ -651,7 +662,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             "oldest_pending_chapter": report.oldest_pending_chapter,
                             "running_count": report.running_count,
                             "stale_running_count": report.stale_running_count,
-                            "background_runs": _background_runs_payload(),
+                            "background_runs": background_runs_payload(_BACKGROUND_RUNS, _BACKGROUND_LOCK),
                             "running_tasks": [
                                 {
                                     "task_id": item.task_id,
@@ -743,6 +754,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw or "{}")
             if not isinstance(payload, dict):
                 raise ValueError("JSON object is required")
+            action = str(payload.get("action") or "")
+            _assert_server_code_current(action)
             if payload.get("action") == "restore_database":
                 self._send_json(_perform_restore_action(payload))
                 return
@@ -799,7 +812,7 @@ def _perform_action(session, payload: dict) -> dict:
     action = str(payload.get("action") or "")
     if action == "queue_health":
         report = build_generation_queue_health(session)
-        return {"status": "ok", "total": report.total, "counts": report.counts, "background_runs": _background_runs_payload()}
+        return {"status": "ok", "total": report.total, "counts": report.counts, "background_runs": background_runs_payload(_BACKGROUND_RUNS, _BACKGROUND_LOCK)}
     if action == "update_book_settings":
         book = session.get(Book, int(payload.get("book_id") or 0))
         if not book:
@@ -828,7 +841,7 @@ def _perform_action(session, payload: dict) -> dict:
             chapter_number=int(payload.get("chapter_number") or 0),
             platform=str(payload.get("platform") or "manual"),
             auto_revise_until_pass=bool(payload.get("auto_revise_until_pass")),
-            max_revision_cycles=int(payload.get("max_revision_cycles") or 3),
+            max_revision_cycles=int(payload.get("max_revision_cycles") or default_revision_cycles()),
         )
     if action == "start_author_background":
         book_id = int(payload.get("book_id") or 0)
@@ -854,7 +867,7 @@ def _perform_action(session, payload: dict) -> dict:
             book_id=book_id,
             chapter_number=chapter_number,
             platform=str(payload.get("platform") or "manual"),
-            max_revision_cycles=int(payload.get("max_revision_cycles") or 3),
+            max_revision_cycles=int(payload.get("max_revision_cycles") or default_revision_cycles()),
         )
     if action == "update_chapter_brief":
         return _update_chapter_brief_action(session, payload)
@@ -920,6 +933,9 @@ def _perform_action(session, payload: dict) -> dict:
             "error_category": result.error_category,
             "error": result.error,
         }
+    self_repair = perform_self_repair_action(session, payload)
+    if self_repair is not None:
+        return self_repair
     if action == "repair_readiness_gate":
         return _repair_readiness_gate_action(session, payload)
     if action == "auto_resolve_author_blocker":
@@ -1285,14 +1301,14 @@ def _perform_action(session, payload: dict) -> dict:
             repaired_skeleton = _sanitize_story_skeleton_payload({key: str(preview_skeleton.get(key) or "").strip() for key, _ in SKELETON_APPROVAL_FIELDS})
             after = audit_skeleton_sources({f"preview.{key}": value for key, value in repaired_skeleton.items()})
             repair_payload = {
-                "status": "completed" if after.passed else "needs_human_review",
+                "status": "completed" if after.passed else "needs_skeleton_review",
                 "passed": after.passed,
                 "skeleton": repaired_skeleton,
                 "repaired_skeleton": repaired_skeleton,
                 "after": after.to_dict(),
                 "applied_strategy": "apply_current_preview",
                 "next_actions": [
-                    "当前预览仍有未解 blocker，请先在页面中人工调整后再确认。"
+                    "当前预览仍有未解 blocker，请先在页面中调整设定后再确认。"
                 ] if not after.passed else [],
             }
         else:
@@ -1302,7 +1318,7 @@ def _perform_action(session, payload: dict) -> dict:
             repair_payload = _sanitize_skeleton_repair_payload(repair_payload)
         if not repair_payload.get("passed"):
             return {
-                "status": "needs_human_review",
+                "status": "needs_skeleton_review",
                 "message": "自动修复草案仍未通过骨架审计；页面已填入草案，请先处理未解 blocker。",
                 **repair_payload,
             }
@@ -1476,7 +1492,7 @@ def _perform_action(session, payload: dict) -> dict:
             session,
             book_id=int(payload.get("book_id") or 0),
             chapter_number=int(payload.get("chapter_number") or 0),
-            platform="manual_approval",
+            platform="editorial_revision",
             suggestion_text=suggestion,
             revision_mode=mode,
         )
@@ -1592,7 +1608,7 @@ def _perform_action(session, payload: dict) -> dict:
         preflight = _production_preflight_payload(session, book_id=book_id, chapter_number=chapter_number)
         preflight = _auto_repair_preflight_if_needed(session, book_id=book_id, chapter_number=chapter_number, preflight=preflight)
         if preflight.get("blockers"):
-            raise ValueError("当前章仍有体检阻断项，不能审批：" + "；".join(preflight["blockers"]))
+            raise ValueError("当前章仍有体检阻断项，不能采用：" + "；".join(preflight["blockers"]))
         version = latest_version_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
         chapter = session.get(Chapter, version.chapter_id)
         quality = session.query(QualityReport).filter(QualityReport.chapter_version_id == version.id).order_by(QualityReport.id.desc()).first()
@@ -1628,8 +1644,8 @@ def _perform_restore_action(payload: dict) -> dict:
 
 def _perform_action_with_retry(payload: dict) -> dict:
     last_error: Exception | None = None
-    if not _DB_WRITE_LOCK.acquire(timeout=2):
-        return {"status": "busy", "message": "后台任务正在写入数据库，请等待当前任务结束后再继续操作。"}
+    if not _DB_WRITE_LOCK.acquire(timeout=15):
+        return {"status": "busy", "message": "后台任务正在写入数据库，当前操作没有执行；请等本轮生成/修订结束后再点继续。"}
     try:
         for attempt in range(12):
             try:
@@ -1642,7 +1658,11 @@ def _perform_action_with_retry(payload: dict) -> dict:
                 time.sleep(0.5 * (attempt + 1))
     finally:
         _DB_WRITE_LOCK.release()
-    raise RuntimeError("数据库正在被后台任务写入，请稍后重试。原始错误：database is locked") from last_error
+    return {
+        "status": "busy",
+        "message": "数据库正在被另一个任务写入，当前操作没有执行；系统已保留现有章节数据，请等本轮任务结束后再继续。",
+        "error_category": "database_locked",
+    }
 
 
 def _update_story_skeleton(session, *, book: Book, payload: dict) -> dict:
@@ -2047,14 +2067,6 @@ def _clean_story_skeleton(data: dict, *, current_skeleton: dict) -> dict:
     if not cleaned["arc_title"]:
         cleaned["arc_title"] = "开局破局"
     return cleaned
-
-
-SKELETON_APPROVAL_FIELDS = [
-    ("premise", "一句话核心设定"), ("reader_promise", "读者承诺"), ("world_engine", "世界规则 / 能力曲线"),
-    ("protagonist_engine", "主角动力 / 成长弧"), ("conflict_engine", "长期冲突 / 主线"), ("forbidden_rules", "禁忌规则"),
-    ("style_guide", "文风指南"), ("aesthetic_profile", "审美画像 / 题材主味"), ("story_dna", "作品 DNA / 章节发动机库"), ("volume_summary", "第一卷摘要"),
-    ("arc_goal", "剧情段目标"), ("arc_climax", "剧情段高潮"), ("arc_turn", "剧情段转折"),
-]
 
 
 def _skeleton_payload_from_update_payload(payload: dict) -> dict[str, str]:
@@ -2640,7 +2652,7 @@ def _auto_resolve_author_blocker_action(session, payload: dict) -> dict:
     route = prepare_production(session, book_id=book_id, chapter_number=chapter_number, platform=platform).to_dict()
     message = _auto_resolve_message(steps=steps, route=route, readiness_result=readiness_result)
     return {
-        "status": "resolved" if route.get("can_continue") or route.get("primary_intent") in {"continue", "wait", "approve"} else "needs_author",
+        "status": "resolved" if route.get("can_continue") or route.get("primary_intent") in {"continue", "wait", "approve"} else "needs_confirmation",
         "message": message,
         "steps": steps,
         "router": route,
@@ -2652,15 +2664,25 @@ def _auto_resolve_message(*, steps: list[dict], route: dict, readiness_result: d
     skeleton_preview = readiness_result.get("skeleton_preview")
     if skeleton_preview:
         return "系统已生成设定修复草案；需要你确认是否启用新版设定。"
+    if _route_is_publish_prepare(route):
+        return "当前章已采用，下一步是发布准备，不需要返回修订。"
     if route.get("can_continue"):
         return "系统已处理当前打断项，可以继续写作。"
     if route.get("primary_intent") == "wait":
         return "系统已处理当前打断项，后台正在运行，等待自动刷新。"
     if route.get("primary_intent") == "approve":
-        return "系统已处理当前打断项，当前章需要阅读确认。"
+        return "系统已处理当前打断项，当前章等待确认采用。"
     if steps:
         return "系统已处理可自动解决的打断项；仍有一项需要确认。"
-    return "当前没有可自动处理的打断项；请查看系统给出的唯一下一步。"
+    return "当前没有可自动处理的打断项；请查看系统给出的下一步。"
+
+
+def _route_is_publish_prepare(route: dict) -> bool:
+    text = " ".join(
+        str(route.get(key) or "")
+        for key in ("headline", "detail", "author_state", "primary_label", "recommended_action")
+    )
+    return "发布" in text or str(route.get("primary_intent") or "") == "open_publish"
 
 
 def _readiness_repair_message(*, steps: list[dict], after) -> str:
@@ -2954,144 +2976,25 @@ def _feedback_payload(session, *, book_id: int) -> dict:
 
 
 def _knowledge_payload(session, *, book_id: int, chapter_number: int) -> dict:
-    book = session.get(Book, book_id)
-    if not book:
-        raise ValueError(f"book not found: {book_id}")
-    story_context, story_refs = format_story_control_context(session, book_id=book_id, chapter_number=chapter_number)
-    canon_context, canon_refs = format_canon_context(session, book_id=book_id, chapter_number=chapter_number)
-    evidence_context, signal_ids = format_market_evidence_context(session, genre=book.genre)
-    bible = get_story_bible(session, book_id=book_id)
-    embedding_rows = []
-    embedding_count = 0
-    visual_assets = []
-    try:
-        embedding_rows = list(
-            session.scalars(
-                select(KnowledgeEmbedding)
-                .where(KnowledgeEmbedding.book_id == book_id)
-                .order_by(KnowledgeEmbedding.id.desc())
-                .limit(5)
-            )
-        )
-        embedding_count = session.query(KnowledgeEmbedding).filter(KnowledgeEmbedding.book_id == book_id).count()
-        visual_assets = list_visual_assets(session, book_id=book_id, limit=8)
-    except OperationalError:
-        session.rollback()
-    return {
-        "story_bible": {"id": bible.id, "status": bible.status} if bible else None,
-        "skeleton": _story_skeleton_payload(session, book_id=book_id),
-        "story_refs": story_refs,
-        "canon_refs": canon_refs,
-        "story_context": story_context,
-        "canon_context": canon_context,
-        "evidence_context": evidence_context,
-        "market_signal_ids": signal_ids,
-        "evidence_audit": [
-            {
-                "signal_id": item.signal_id,
-                "usable": item.usable,
-                "reasons": item.reasons,
-                "source": item.source_key,
-                "signal": item.signal_text,
-            }
-            for item in audit_market_evidence(session, genre=book.genre)
-        ],
-        "semantic_memory": {
-            "count": embedding_count,
-            "recent": [
-                {
-                    "id": item.id,
-                    "source_type": item.source_type,
-                    "source_label": item.source_label,
-                    "model": item.model,
-                    "dimensions": item.dimensions,
-                }
-                for item in embedding_rows
-            ],
-        },
-        "visual_assets": [
-            {
-                "id": item.id,
-                "asset_type": item.asset_type,
-                "chapter_id": item.chapter_id,
-                "status": item.status,
-                "model": item.model,
-                "artifact_path": item.artifact_path,
-            }
-            for item in visual_assets
-        ],
-        "web_search": web_search_status(),
-    }
+    payload = knowledge_payload(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        latest_foundation_fn=_latest_foundation_for_dashboard,
+        approval_payload_fn=_skeleton_approval_payload,
+    )
+    payload["web_search"] = web_search_status()
+    return payload
 
 
 def _story_skeleton_payload(session, *, book_id: int) -> dict:
-    foundation = _latest_foundation_for_dashboard(session, book_id=book_id)
-    bible = get_story_bible(session, book_id=book_id)
-    volume = session.scalar(select(Volume).where(Volume.book_id == book_id, Volume.volume_number == 1))
-    arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
-    dna_display = story_dna_display_fields(style_guide=bible.style_guide if bible else "", forbidden_rules=bible.forbidden_rules if bible else "")
-    bible_display = story_bible_display_fields(style_guide=dna_display["style_guide"], forbidden_rules=dna_display["forbidden_rules"])
-    story_dna = dna_display["story_dna"] or story_dna_for_book(session, book_id=book_id)
-    skeleton_values = {
-        "premise": foundation.premise if foundation else (bible.positioning if bible else ""),
-        "reader_promise": foundation.reader_promise if foundation else (bible.reader_promise if bible else ""),
-        "world_engine": foundation.world_engine if foundation else (bible.power_curve if bible else ""),
-        "protagonist_engine": foundation.protagonist_engine if foundation else (bible.protagonist_arc if bible else ""),
-        "conflict_engine": foundation.conflict_engine if foundation else (bible.main_plot if bible else ""),
-        "forbidden_rules": bible_display["forbidden_rules"],
-        "style_guide": bible_display["style_guide"],
-        "aesthetic_profile": bible_display["aesthetic_profile"],
-        "story_dna": story_dna,
-        "volume_summary": volume.summary if volume else "",
-        "arc_goal": arc.goal if arc else "",
-        "arc_climax": arc.climax if arc else "",
-        "arc_turn": arc.turn if arc else "",
-    }
-    payload = {
-        "foundation": {
-            "id": foundation.id,
-            "premise": foundation.premise,
-            "reader_promise": foundation.reader_promise,
-            "world_engine": foundation.world_engine,
-            "protagonist_engine": foundation.protagonist_engine,
-            "conflict_engine": foundation.conflict_engine,
-            "status": foundation.status,
-        } if foundation else None,
-        "story_bible": {
-            "id": bible.id,
-            "positioning": bible.positioning,
-            "reader_promise": bible.reader_promise,
-            "main_plot": bible.main_plot,
-            "protagonist_arc": bible.protagonist_arc,
-            "relationship_arc": bible.relationship_arc,
-            "power_curve": bible.power_curve,
-            "forbidden_rules": bible_display["forbidden_rules"],
-            "style_guide": bible_display["style_guide"],
-            "aesthetic_profile": bible_display["aesthetic_profile"],
-            "story_dna": story_dna,
-            "status": bible.status,
-        } if bible else None,
-        "volume": {
-            "id": volume.id,
-            "title": volume.title,
-            "summary": volume.summary,
-            "status": volume.status,
-        } if volume else None,
-        "story_arc": {
-            "id": arc.id,
-            "title": arc.title,
-            "start_chapter": arc.start_chapter,
-            "end_chapter": arc.end_chapter,
-            "goal": arc.goal,
-            "climax": arc.climax,
-            "turn": arc.turn,
-            "status": arc.status,
-        } if arc else None,
-    }
-    payload["approvals"] = _skeleton_approval_payload(session, book_id=book_id, skeleton=skeleton_values)
-    payload["versions"] = list_skeleton_versions(session, book_id=book_id)
-    payload["governance"] = audit_story_skeleton_with_agent_evidence(session, book_id=book_id).to_dict()
-    return payload
+    return knowledge_payload(
+        session,
+        book_id=book_id,
+        chapter_number=1,
+        latest_foundation_fn=_latest_foundation_for_dashboard,
+        approval_payload_fn=_skeleton_approval_payload,
+    )["skeleton"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

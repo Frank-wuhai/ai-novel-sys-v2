@@ -263,7 +263,7 @@ def _continuity_prompt(memory: dict) -> str:
 def _revision_prompt(report: dict) -> str:
     if not report.get("has_feedback"):
         return ""
-    lines = [f"人工意见导演单：修订模式 {report.get('mode') or 'targeted'}"]
+    lines = [f"修订方向导演单：修订模式 {report.get('mode') or 'targeted'}"]
     for key, label in (("keep", "保留"), ("remove", "删除"), ("add", "新增/强化"), ("avoid", "禁止"), ("acceptance", "验收")):
         values = report.get(key) or []
         if values:

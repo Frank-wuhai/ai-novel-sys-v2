@@ -1292,7 +1292,7 @@
           <div id="mainlineCockpit"></div>
         </section>
         <section class="panel">
-          <h2>当前章阅读</h2>
+          <h2>当前章检查</h2>
           <div id="currentChapterReader"></div>
         </section>
         <details class="panel">
@@ -1313,13 +1313,13 @@
           <div class="forms" style="padding-top:8px;">
             <label>写作平台<input id="wizardPlatform" value="番茄小说"></label>
             <label>运行模式<select id="wizardDryRun"><option value="false">正常生成</option><option value="true">演示预览</option></select></label>
-            <label>最多自动修订轮数<input id="wizardMaxSteps" type="number" min="1" max="5" value="3"></label>
+            <label>自动修订软上限<input id="wizardMaxSteps" type="number" min="1" max="12" value="6"></label>
             <button id="saveBookTargetFromProduction" class="secondary">保存为作品目标</button>
           </div>
           </details>
           <div class="wizard-actions">
             <button id="continueProduction" class="primary-action">继续写作</button>
-            <button id="openSuggestion" class="secondary">写修改意见</button>
+            <button id="openSuggestion" class="secondary">写修订方向</button>
           </div>
           <details class="subtle-panel">
             <summary>高级 / 排错</summary>
@@ -1328,10 +1328,11 @@
               <button id="repairReadinessGate" class="secondary">自动整理准备</button>
               <button id="repairSkeletonFromProduction" class="secondary">修复作品设定</button>
               <button id="restartFromCurrentChapter" class="secondary">从当前章重启</button>
+              <button id="openSelfRepair" class="secondary">自迭代修复台</button>
               <button class="secondary" data-view-button="backend">后台排错</button>
             </div>
           </details>
-      <div class="hint">不确定时直接看上方状态；能继续时点“继续写作”，不满意当前章时写修改意见。</div>
+      <div class="hint">不确定时直接看上方状态；能继续时点“继续写作”，需要调整当前章时写修订方向。</div>
           <div class="decision-strip">
             <label>修改意见<textarea id="quickFeedbackText" placeholder="局部改：写清哪段、什么感觉不对、希望怎么变。整章重写：写清新方向、必须保留/禁止什么。"></textarea></label>
             <div class="wizard-actions" style="padding:0;border-top:0;">
@@ -1423,7 +1424,7 @@
     <section class="page-layout" data-view="approval">
       <div class="page-main">
       <section class="panel">
-        <h2>阅读确认</h2>
+        <h2>采用确认</h2>
         <div id="approvalSummary"></div>
         <div class="actions">
           <button id="oneClickApprovalDecision" class="primary-action">一键处理当前章</button>
@@ -1432,21 +1433,21 @@
         <div id="approvalPanel"></div>
       </section>
       <details class="panel">
-        <summary>修改建议</summary>
+        <summary>修订方向</summary>
         <div class="page-intro">
           <strong>先读当前章，再决定通过或退回。</strong>
-          <span>即使章节已经通过质检、已人工批准或已经走到发布前，系统也会把当前章退回修订，并把建议写入新的修订要求。</span>
+          <span>即使章节已经通过质检、已采用确认或已经走到发布前，系统也会把当前章退回修订，并把建议写入新的修订要求。</span>
         </div>
       <div class="suggestion-layout">
         <section class="suggestion-card">
-          <h3>给当前章提修改建议</h3>
+          <h3>给当前章提修订方向</h3>
           <div class="body">
             <div class="compact-form two">
               <label>目标章<input id="revisionSuggestionChapter" type="number" min="1" value="1"></label>
               <label>来源<input id="revisionSuggestionPlatform" value="manual"></label>
             </div>
             <input id="revisionSuggestionMode" type="hidden" value="targeted">
-            <label>修改建议<textarea id="revisionSuggestionText" placeholder="直接写自然语言即可：哪里不好、希望改成什么读感、哪些句子或桥段必须修。系统会自动判断是局部修、定点修还是重写。"></textarea></label>
+            <label>修订方向<textarea id="revisionSuggestionText" placeholder="直接写自然语言即可：哪里不好、希望改成什么读感、哪些句子或桥段必须修。系统会自动判断是局部修、定点修还是重写。"></textarea></label>
             <details class="advanced-options">
               <summary>高级补充</summary>
               <div class="compact-form two">
@@ -1537,6 +1538,22 @@
           </details>
         </section>
         <section class="panel">
+          <h2>自迭代修复台</h2>
+          <div class="page-intro">
+            <strong>让系统先做维护诊断。</strong>
+            <span>模型只生成修复方案和补丁草案；不会直接改代码或执行任意命令。</span>
+          </div>
+          <div class="forms">
+            <label style="grid-column:1 / -1;">问题描述<textarea id="selfRepairIssue" placeholder="例如：生产主线按钮显示刷新状态，点击后没有推进。"></textarea></label>
+            <label>模式<select id="selfRepairMode"><option value="dry">演示诊断</option><option value="live">调用真实模型</option></select></label>
+            <label>回归套件<select id="selfRepairSuite"><option value="production">生产决策</option><option value="dashboard">前台点击</option><option value="strategy">生产策略</option><option value="quick">完整快速套件</option></select></label>
+            <button id="generateSelfRepairPlan">生成修复方案</button>
+            <button id="runSelfRepairRegressions" class="secondary">运行安全回归</button>
+            <button id="loadSelfRepairReport" class="secondary">打开最近报告</button>
+          </div>
+          <div id="selfRepairOutput" class="empty">暂无自修复报告。</div>
+        </section>
+        <section class="panel">
           <h2>后台生产任务</h2>
           <div id="queue"></div>
         </section>
@@ -1555,7 +1572,7 @@
           <div id="chapterDetail"></div>
         </section>
         <section class="panel">
-          <h2>作者决策</h2>
+          <h2>创作团队确认</h2>
           <div id="decisions"></div>
         </section>
         <details class="panel">
@@ -1619,7 +1636,7 @@
     let draftSkeletonGovernance = null;
     let skeletonRevisionIdeaDraft = '';
     let lastPreparationResult = null;
-    const AUTO_PRODUCTION_ACTIONS = ['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job'];
+    const AUTO_PRODUCTION_ACTIONS = ['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'generate_rebuild_candidates', 'revision_trend_recovery', 'revision_budget_recovery', 'revise_chapter', 'record_chapter_continuity', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job'];
 
     function setActiveView(view) {
       activeView = view;
@@ -1649,7 +1666,10 @@
     function setRefreshBusy(isBusy) {
       ['refresh', 'refreshProduction'].forEach((id) => {
         const button = $(id);
-        if (button) button.disabled = isBusy;
+        if (!button) return;
+        if (!button.dataset.idleText) button.dataset.idleText = button.textContent;
+        button.disabled = isBusy;
+        button.textContent = isBusy ? '刷新中...' : button.dataset.idleText;
       });
     }
 
@@ -1672,6 +1692,7 @@
       }
       refreshInFlight = true;
       setRefreshBusy(true);
+      document.querySelectorAll('.runtime-error').forEach((node) => node.remove());
       $('state').textContent = '刷新中';
       try {
         const params = new URLSearchParams({book_id: bookId, start: $('start').value, count: $('count').value, chapter_number: $('chapter').value});
@@ -1716,7 +1737,7 @@
         renderDirectorWorkbench(detail);
         renderBookLibrary();
         renderChapters(snapshot.chapters);
-        renderDecisions(snapshot.human_decisions.items);
+        renderDecisions((snapshot.team_decisions || snapshot.human_decisions).items);
         renderQueue(snapshot, scopedHealth);
         renderReadiness(snapshot.readiness);
         renderLLMUsage(llmUsage);
@@ -1733,6 +1754,8 @@
         $('state').textContent = `已更新 ${new Date().toLocaleTimeString()}`;
         updateAutoRefresh(scopedHealth);
         maybeAutoStartPendingGeneration(scopedHealth);
+      } catch (error) {
+        showError(error, '刷新状态失败');
       } finally {
         refreshInFlight = false;
         setRefreshBusy(false);
@@ -1848,7 +1871,7 @@
 
     async function fetchJson(path) {
       const response = await fetch(path);
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw new Error(`${path}: ${await response.text()}`);
       return response.json();
     }
 
@@ -1886,6 +1909,9 @@
       if (value.includes('ARK_API_KEY') || value.includes('ARK_BASE_URL')) {
         return '模型配置不完整：请检查 .env 里的 ARK_API_KEY 和 ARK_BASE_URL。';
       }
+      if (value.includes('服务代码已更新')) {
+        return value;
+      }
       if (value.includes('JSON')) {
         return '模型返回格式不符合要求。解决办法：如果是章节生成/修订，请在“实时状态”里点击“重试失败任务”；如果是新书构思，请点“按补充意见重构思”。原始错误：' + value;
       }
@@ -1894,7 +1920,7 @@
 
     function renderSummary(snapshot, health) {
       const queueCounts = visibleQueueCounts(health);
-      const decisions = snapshot.human_decisions;
+      const decisions = snapshot.team_decisions || snapshot.human_decisions;
       const control = snapshot.production_control || {};
       const command = snapshot.command_center || {};
       const chapter = selectedChapter(snapshot);
@@ -1903,14 +1929,14 @@
         metric('总控状态', command.headline || control.status_label || '未诊断', controlStatusClass(command.status || control.status)),
         metric('当前章', chapter ? `第 ${chapter.number} 章` : ($('chapter').value || 1), ''),
         metric('生成任务', productionQueueState(queueCounts), (queueCounts.failed || 0) ? 'bad' : (queueCounts.running || queueCounts.pending) ? 'warn' : 'ok'),
-        metric('待你处理', decisions.continuity + decisions.approval + decisions.publish + decisions.inspect, (decisions.continuity + decisions.approval + decisions.publish + decisions.inspect) ? 'warn' : 'ok')
+        metric('待确认', decisions.continuity + (decisions.adoption ?? decisions.approval) + decisions.publish + decisions.inspect, (decisions.continuity + (decisions.adoption ?? decisions.approval) + decisions.publish + decisions.inspect) ? 'warn' : 'ok')
       ].join('');
       updatePrimaryAction(snapshot, health);
     }
 
     function controlStatusClass(status) {
       if (status === 'blocked') return 'bad';
-      if (['running', 'queued', 'needs_author'].includes(status)) return 'warn';
+      if (['running', 'queued', 'needs_author', 'needs_confirmation'].includes(status)) return 'warn';
       if (status === 'can_produce') return 'ok';
       return '';
     }
@@ -1941,7 +1967,7 @@
         return;
       }
       if (chapter?.next_action === 'approve_chapter') {
-        button.textContent = '阅读并审批当前章';
+        button.textContent = '确认采用当前章';
         return;
       }
       if (chapter?.next_action === 'record_chapter_continuity') {
@@ -2116,7 +2142,7 @@
           <strong>${escapeHtml(statusText)}</strong>
           <div class="timeline">
             <div class="timeline-item"><span>当前动作</span><b>${escapeHtml(currentAction || '无')}</b></div>
-            <div class="timeline-item"><span>章节状态</span><b>${escapeHtml(chapter?.author_status_label || statusLabel(chapter?.version_status || 'missing'))}</b></div>
+            <div class="timeline-item"><span>章节状态</span><b>${escapeHtml(chapter?.team_status_label || chapter?.author_status_label || statusLabel(chapter?.version_status || 'missing'))}</b></div>
             <div class="timeline-item"><span>生成进度</span><b>${escapeHtml(authorFriendlyQueueText(visibleCounts))}</b></div>
             <div class="timeline-item"><span>最近模型</span><b>${escapeHtml(latestRequest?.model || '暂无')}</b></div>
           </div>
@@ -2154,7 +2180,7 @@
         ['方向对齐', preflight?.alignment ? `${statusLabel(preflight.alignment.status)} / ${preflight.alignment.score} 分` : '暂无'],
         ['系统偏差', biasSystemLabel(bias)],
         ['模型偏差', (bias?.model_bias_hits || []).length ? escapeHtml(bias.model_bias_hits.join('，')) : '未发现'],
-        ['作者意图兑现', acceptanceLabel(acceptance, displayState.autoRepairOnly)],
+        ['章节承诺兑现', acceptanceLabel(acceptance, displayState.autoRepairOnly)],
         ['单元生产复盘', productionReview ? `<span class="${productionReview.status === 'pass' ? 'ok' : 'warn'}">${escapeHtml(productionReview.headline || '')}</span>` : '暂无'],
         ['模式记忆', patternMemory && patternMemory.source_review_count ? escapeHtml(patternMemory.headline || '') : '暂无'],
         ['失败归因', attribution ? escapeHtml(attribution.category) : '暂无'],
@@ -2175,8 +2201,8 @@
 
     function sampleOutcomeLabel(value) {
       const labels = {
-        human_approved: '人工通过，已验证',
-        quality_passed: '综合评估通过，待你确认',
+        human_approved: '采用确认，已验证',
+        quality_passed: '综合评估通过，待确认',
         quality_failed: '综合评估需修订',
         needs_more_work: '仍需修订',
         pending: '等待结果'
@@ -2284,7 +2310,7 @@
       ].filter(Boolean);
       const learningRows = [
         `已采用 ${learningData.total_adoptions || 0} 次`,
-        `人工明确通过 ${learningData.human_approved_count || 0} 次`,
+        `采用确认 ${learningData.human_approved_count || 0} 次`,
         `待观察 ${learningData.pending_count || 0} 次`,
         ...(learningData.weak_patterns || []).slice(0, 2).map((item) => `谨慎方向：${item}`)
       ];
@@ -2341,8 +2367,8 @@
             `优先补：${(quality.weak_dimensions || []).map(dimensionLabel).join('，') || '暂无'}`
           ])}
           ${revision.has_feedback
-            ? table(['人工意见导演单', '内容'], revisionRows)
-            : '<div class="empty">当前章暂无新的人工修订意见。</div>'}
+            ? table(['修订方向导演单', '内容'], revisionRows)
+            : '<div class="empty">当前章暂无新的修订方向。</div>'}
         </details>`;
     }
 
@@ -2471,7 +2497,8 @@
 
     function authorRunLabel(run) {
       const labels = {
-        ready_for_human_reading: '可读稿待审批',
+        ready_for_human_reading: '历史可读稿待确认',
+        ready_for_adoption: '待采用确认',
         needs_author_direction: '系统整理中',
         auto_paused: '自动暂停',
         system_failed: '系统失败'
@@ -2481,7 +2508,8 @@
 
     function authorRunText(run) {
       if (run.status === 'failed') return run.terminal_message || run.error || '系统执行失败，请查看失败详情。';
-      if (run.terminal_status === 'ready_for_human_reading') return run.terminal_message || '可读稿已完成，等待你阅读后通过或修改。';
+      if (run.terminal_status === 'ready_for_human_reading') return run.terminal_message || '可读稿已完成，等待确认采用。';
+      if (run.terminal_status === 'ready_for_adoption') return run.terminal_message || '主编准定稿已完成，等待确认采用。';
       if (run.terminal_status === 'auto_paused') return run.terminal_message || '系统已自动暂停并保留当前最佳状态。';
       if (run.terminal_status === 'needs_author_direction') return run.terminal_message || '系统正在整理当前打断项，会优先自动选择可执行的修复路径。';
       if (run.terminal_status === 'system_failed') return run.terminal_message || '系统执行失败，请查看失败详情。';
@@ -2543,7 +2571,7 @@
         ['setup', '准备作品', readinessPassed ? '完成' : '待补齐'],
         ['generate', '生成章节', generationHint(chapter || {})],
         ['review', '审稿修订', reviewStageText(chapter, queueCounts)],
-        ['approve', '阅读确认', approvalHint(chapter || {})],
+        ['approve', '采用确认', approvalHint(chapter || {})],
         ['publish', '发布准备', publishStageText(chapter)]
       ];
       $('mainlineCockpit').innerHTML = `
@@ -2576,7 +2604,7 @@
       const decisionStage = chapter?.production_decision?.stage || '';
       if (decisionStage) return decisionStage;
       const action = chapter?.next_action || '';
-      if (['approve_chapter', 'reading_assessment_review'].includes(action)) return 'approve';
+      if (action === 'approve_chapter') return 'approve';
       if (action === 'record_chapter_continuity') return 'review';
       if (['mark_publish_job', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'retry_publish_job', 'done'].includes(action)) return 'publish';
       if (['review_chapter', 'create_revision_brief', 'revise_chapter'].includes(action)) return 'review';
@@ -2595,7 +2623,7 @@
     function mainlineStepState(key, stage, readinessPassed, chapter) {
       if (key === 'setup') return readinessPassed ? '完成' : '待处理';
       if (key === mainlineStepStage(stage)) return '当前';
-      if (key === 'approve' && ['approve_chapter', 'reading_assessment_review'].includes(chapter?.next_action)) return '等待你';
+      if (key === 'approve' && chapter?.next_action === 'approve_chapter') return '等待你';
       return mainlineStepClass(key, stage, readinessPassed, chapter) === 'done' ? '已过' : '后续';
     }
 
@@ -2632,36 +2660,36 @@
       if (!chapter) return '当前章不在已加载范围内，请调整章节号或扩大章数后刷新。';
       const autoChapter = firstAutoProductionChapter(snapshot);
       if (!AUTO_PRODUCTION_ACTIONS.includes(chapter.next_action) && autoChapter) {
-        if (['approve_chapter', 'reading_assessment_review'].includes(chapter.next_action)) {
-          return '当前章已到阅读确认点；满意就采用当前章，不满意就写修改意见。';
+        if (chapter.next_action === 'approve_chapter') {
+          return '当前章已到采用确认点；确认后进入发布准备。';
         }
         return `当前章需要处理；范围内第 ${autoChapter.number} 章可以继续自动生产。`;
       }
       if (chapter.next_action === 'record_chapter_continuity') return '当前章质检已通过，点击“继续写作”会整理连续性摘要。';
-      if (chapter.next_action === 'approve_chapter') return '当前章已通过质检，等待你阅读确认。满意就采用，不满意就提修改建议。';
-      if (chapter.next_action === 'reading_assessment_review') return '当前章已过基础质检，但仍需阅读评估。满意就通过，不满意就提具体修改建议。';
+      if (chapter.next_action === 'approve_chapter') return '主编已给出准定稿判断，等待确认采用。';
       if (chapter.next_action === 'mark_publish_job') return '当前章已进入待发布，可在发布区一键发布到平台。';
       if (chapter.next_action === 'done') return '当前章已完成全部流程，可以切换到下一章。';
       return `当前章下一步是：${actionLabel(chapter.next_action)}。点击“继续写作”会执行这一步。`;
     }
 
     function generationHint(chapter) {
-      if (chapter.author_status === 'needs_status_review') return chapter.author_next_step || '当前稿件质量通过，但系统状态需要核对。';
+      const teamStatus = chapter.team_status || chapter.author_status;
+      if (teamStatus === 'needs_status_review') return chapter.team_next_step || chapter.author_next_step || '当前稿件质量通过，但系统状态需要核对。';
       const action = chapter.next_action;
-      if (['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'revise_chapter'].includes(action)) {
+      if (['create_chapter_brief', 'draft_chapter', 'review_chapter', 'create_revision_brief', 'generate_rebuild_candidates', 'revision_trend_recovery', 'revision_budget_recovery', 'revise_chapter', 'record_chapter_continuity'].includes(action)) {
         return `点击“继续写作”，系统会执行：${actionLabel(action)}。`;
       }
       if (action === 'wait_generation_task') return '已有内容等待继续处理，点击“继续写作”即可；生成中会自动刷新状态。';
-      return `生成阶段状态：${chapter.author_status_label || statusLabel(chapter.version_status || '') || '未开始'}。`;
+      return `生成阶段状态：${chapter.team_status_label || chapter.author_status_label || statusLabel(chapter.version_status || '') || '未开始'}。`;
     }
 
     function approvalHint(chapter) {
       if (chapter.next_action === 'record_chapter_continuity') return '点击“继续写作”会自动记录连续性摘要。';
-      if (chapter.next_action === 'approve_chapter') return '等待你阅读确认；采用后进入发布准备。';
-      if (chapter.next_action === 'reading_assessment_review') return '等待你阅读评估；通过后进入发布准备，不通过则按意见重修。';
-      if (chapter.author_status === 'needs_status_review') return chapter.author_next_step || '质检已通过，但后台版本状态需要核对。';
+      if (chapter.next_action === 'approve_chapter') return '等待确认采用；采用后进入发布准备。';
+      const teamStatus = chapter.team_status || chapter.author_status;
+      if (teamStatus === 'needs_status_review') return chapter.team_next_step || chapter.author_next_step || '质检已通过，但后台版本状态需要核对。';
       if (chapter.quality_passed) return '质检已通过。';
-      return '还没到阅读确认阶段。';
+      return '还没到采用确认阶段。';
     }
 
     function publishHint(chapter) {
@@ -2680,9 +2708,9 @@
         return;
       }
       if ($('mapSummary')) $('mapSummary').innerHTML = renderFlowStats(chapters);
-      const content = table(['章', '作者状态', '系统状态', '下一步', '原因'], chapters.map((item) => [
+      const content = table(['章', '团队状态', '系统状态', '下一步', '原因'], chapters.map((item) => [
         `<button class="secondary" data-select-chapter="${item.number}">${item.number}</button>`,
-        escapeHtml(item.author_status_label || statusLabel(item.version_status || 'missing')),
+        escapeHtml(item.team_status_label || item.author_status_label || statusLabel(item.version_status || 'missing')),
         escapeHtml(statusLabel(item.version_status || 'missing')),
         escapeHtml(item.author_next_step || actionLabel(item.next_action)),
         escapeHtml(reasonLabel(item.reason))
@@ -2694,14 +2722,14 @@
     function renderFlowStats(chapters) {
       const total = chapters.length;
       const done = chapters.filter((item) => item.next_action === 'done').length;
-      const waiting = chapters.filter((item) => item.author_status === 'needs_author' || item.next_action === 'approve_chapter').length;
+      const waiting = chapters.filter((item) => ['needs_author', 'needs_confirmation'].includes(item.team_status || item.author_status) || item.next_action === 'approve_chapter').length;
       const autoReady = chapters.filter((item) => AUTO_PRODUCTION_ACTIONS.includes(item.next_action)).length;
       const publish = chapters.filter((item) => ['mark_publish_job', 'create_publish_job', 'publish_job_dry_run', 'queue_publish_job'].includes(item.next_action)).length;
       return `
         <div class="timeline">
           <div class="timeline-item"><span>已加载</span><b>${total}</b></div>
           <div class="timeline-item"><span>可自动推进</span><b class="${autoReady ? 'ok' : ''}">${autoReady}</b></div>
-          <div class="timeline-item"><span>待你确认</span><b class="${waiting ? 'warn' : 'ok'}">${waiting}</b></div>
+          <div class="timeline-item"><span>待确认</span><b class="${waiting ? 'warn' : 'ok'}">${waiting}</b></div>
           <div class="timeline-item"><span>发布准备</span><b>${publish}</b></div>
           <div class="timeline-item"><span>已完成</span><b>${done}</b></div>
         </div>`;
@@ -2722,7 +2750,7 @@
       const approveLabel = '采用当前章';
       const approveButton = canApprove ? `<button id="approveFromReader">${approveLabel}</button>` : '';
       const inspectHint = canInspect
-        ? (canApprove ? '请阅读全文；满意就采用当前章，不满意就写修改意见。' : '当前版本可以阅读，但还不能采用；先看一致性与质检结论。')
+        ? (canApprove ? '请阅读全文；满意就采用当前章，不满意就写修订方向。' : '当前版本可以阅读，但还不能采用；先看一致性与质检结论。')
         : '当前章还没有可阅读正文。';
       $('currentChapterReader').innerHTML = `
         <div class="chapter-reader">
@@ -2734,7 +2762,7 @@
           ${renderQualityConsistency(chapter, latest, quality)}
           <div class="chapter-reader-actions">
             <button id="toggleChapterFullText" class="secondary">展开/收起全文</button>
-            <button id="suggestFromReader" class="secondary">写修改意见</button>
+            <button id="suggestFromReader" class="secondary">写修订方向</button>
             ${approveButton}
           </div>
           <pre id="chapterFullText" class="chapter-text collapsed">${escapeHtml(latest.content || '')}</pre>
@@ -2783,7 +2811,7 @@
                 <button class="pass" id="approveFromApproval" ${canApprove ? '' : 'disabled'}>${approveLabel}</button>
               </div>
               <input id="approvalRevisionMode" type="hidden" value="targeted">
-              <label>退回修改建议<textarea id="approvalRevisionNote" placeholder="直接写自然语言即可：哪里不好、希望改成什么读感、哪些句子或桥段必须修。系统会自动判断修订方式。"></textarea></label>
+              <label>退回修订方向<textarea id="approvalRevisionNote" placeholder="直接写自然语言即可：哪里不好、希望改成什么读感、哪些句子或桥段必须修。系统会自动判断修订方式。"></textarea></label>
               <details class="advanced-options">
                 <summary>高级补充</summary>
                 <div class="compact-form two">
@@ -2794,7 +2822,7 @@
                 <label>读者体验与最大问题<textarea id="approvalReaderIntent" placeholder="例如：读者要觉得主角更主动；最大问题是现实线压力太弱。"></textarea></label>
               </details>
               <button class="rewrite" id="submitApprovalRevision">提交修改并退回生产</button>
-              <div class="hint" style="padding:0;">这会覆盖当前章旧修改建议，并让“继续写作”按所选方式重新生成修订版。</div>
+              <div class="hint" style="padding:0;">这会覆盖当前章旧修订方向，并让“继续写作”按所选方式重新生成修订版。</div>
             </div>
           </section>
         </div>`;
@@ -2843,7 +2871,7 @@
           <div class="timeline-item"><span>阻断/提醒</span><b class="${issueCount ? 'bad' : (warningCount ? 'warn' : 'ok')}">${issueCount} / ${warningCount}</b></div>
           <div class="timeline-item"><span>一致性</span><b class="${consistencyCount ? 'bad' : 'ok'}">${consistencyCount ? `${consistencyCount} 项冲突` : '正常'}</b></div>
           <div class="timeline-item"><span>主编审稿</span><b>${escapeHtml(reviewText)}</b></div>
-          <div class="timeline-item"><span>建议动作</span><b class="${canApprove ? 'ok' : 'warn'}">${canApprove ? '可阅读审批' : '写修改意见'}</b></div>
+          <div class="timeline-item"><span>建议动作</span><b class="${approvalActionClass(chapter, latest, quality)}">${escapeHtml(approvalSuggestedAction(chapter, latest, quality))}</b></div>
         </div>`;
     }
 
@@ -2851,8 +2879,27 @@
       if (!chapter || !latest) return false;
       if (!quality || quality.passed !== true) return false;
       if (qualityConsistencyIssues(chapter, latest, quality).length) return false;
-      if (['approve_chapter', 'reading_assessment_review'].includes(chapter.next_action)) return true;
+      if (chapter.next_action === 'approve_chapter') return true;
       return false;
+    }
+
+    function isPublishAction(action) {
+      return ['create_publish_job', 'publish_job_dry_run', 'queue_publish_job', 'mark_publish_job', 'retry_publish_job', 'done'].includes(action);
+    }
+
+    function approvalSuggestedAction(chapter, latest, quality) {
+      if (!chapter || !latest) return '等待正文';
+      if (latest.status === 'approved' || isPublishAction(chapter.next_action)) return '进入发布准备';
+      if (chapter.next_action === 'approve_chapter' && quality?.passed === true) return '可采用确认';
+      if (latest.status === 'needs_revision' || quality?.passed === false) return '交回主笔修订';
+      return '等待下一步判断';
+    }
+
+    function approvalActionClass(chapter, latest, quality) {
+      const action = approvalSuggestedAction(chapter, latest, quality);
+      if (action === '进入发布准备' || action === '可采用确认') return 'ok';
+      if (action === '交回主笔修订') return 'warn';
+      return '';
     }
 
     function qualityConsistencyIssues(chapter, latest, quality) {
@@ -2873,7 +2920,7 @@
       if ((latest.status === 'reviewed_pass' || latest.status === 'approved') && quality.passed === false) {
         issues.push('版本状态显示已通过，但最新综合评估要求修订。');
       }
-      if (latest.status === 'needs_revision' && quality.passed === true && chapter?.author_status !== 'needs_revision') {
+      if (latest.status === 'needs_revision' && quality.passed === true && (chapter?.team_status || chapter?.author_status) !== 'needs_revision') {
         issues.push('综合评估已通过，但版本状态仍是需修订。');
       }
       if (chapter && typeof chapter.quality_passed === 'boolean' && chapter.quality_passed !== quality.passed) {
@@ -3072,7 +3119,7 @@
       const category = item?.error_category || '';
       const detail = String(item?.error || '');
       if (detail.includes('LLM output is not valid JSON') || detail.includes('Unterminated string') || category === 'structured_output') {
-        return '模型返回的章节修订结果格式不完整。处理：先点“重试失败任务”；如果连续失败，再缩短人工修改建议，或降低单次修订要求后重新提交。已有最新可读版本会保留，不会丢稿。';
+        return '模型返回的章节修订结果格式不完整。处理：先点“重试失败任务”；如果连续失败，再缩短修订方向，或降低单次修订要求后重新提交。已有最新可读版本会保留，不会丢稿。';
       }
       if (category === 'validation') return '任务校验失败。处理：先点“重试失败任务”；如果仍失败，查看当前章是否已有 brief、最新版本是否处于需修订状态。';
       if (category === 'timeout') return '模型响应超时。处理：重试；如果反复超时，降低 max_tokens 或稍后再试。';
@@ -3141,7 +3188,7 @@
           ['方向对齐', preflight?.alignment ? `${statusLabel(preflight.alignment.status)} / ${preflight.alignment.score}` : '暂无'],
           ['系统偏差', biasSystemLabel(bias)],
           ['模型偏差', (bias?.model_bias_hits || []).join('，') || '未发现'],
-          ['作者意图兑现', acceptanceLabel(acceptance, displayState.autoRepairOnly)],
+          ['章节承诺兑现', acceptanceLabel(acceptance, displayState.autoRepairOnly)],
           ['单元生产复盘', productionReview ? `<span class="${productionReview.status === 'pass' ? 'ok' : 'warn'}">${escapeHtml(productionReview.headline || '')}</span>` : '暂无'],
           ['模式记忆', patternMemory && patternMemory.source_review_count ? escapeHtml(patternMemory.headline || '') : '暂无'],
           ['失败归因', attribution ? escapeHtml(attribution.category) : '暂无']
@@ -3184,7 +3231,7 @@
         if (text.includes('下一次不建议确认当前章') || text.includes('下一次不建议作者确认')) {
           return approvedOrPassed
             ? '复盘提醒：单元流低于 70 分，当前章已通过时不需要退回；下轮生产优先优化单元衔接。'
-            : '单元流低于 70 分，建议先继续修订或阅读确认后再采用。';
+            : '单元流低于 70 分，建议先继续修订或采用确认后再采用。';
         }
         if (text.startsWith('重点关注第 ')) {
           return text.replace('重点关注第 ', '下轮生产重点关注第 ');
@@ -3231,7 +3278,7 @@
       const passNote = stratification?.tier === 'B_solid_draft'
         ? '<div class="hint"><strong>编辑分层：合格底稿。</strong> 当前稿方向正确但尚未达到准定稿，系统会优先做升华修订。</div>'
         : data.status === 'PASS'
-        ? '<div class="hint"><strong>质检结论：可进入作者阅读确认。</strong> 下方“创作提醒”是优化建议，不是必须修完才能继续；只有“规则问题/硬性问题”才是阻断。</div>'
+        ? '<div class="hint"><strong>质检结论：可进入采用确认。</strong> 下方“创作提醒”是优化建议，不是必须修完才能继续；只有“规则问题/硬性问题”才是阻断。</div>'
         : '<div class="hint"><strong>质检结论：需要修订。</strong> 先处理规则问题和硬性问题，再看创作提醒。</div>';
       const reportMetaRows = [
         ['综合报告', data.quality_report_id ? `#${data.quality_report_id}` : ''],
@@ -3247,7 +3294,7 @@
           table(['字段', '值'], [['状态', qualityStatusLabel(hardGate.status || '')], ['是否通过', hardGate.passed ? '通过' : '未通过']]) +
           table(['硬指标', '分数'], hardRows, true) +
           chips('硬性问题', hardGate.issues || []) : '') +
-        (editorialGate ? '<h2>主编门禁</h2>' + table(['字段', '值'], editorialRows) : '') +
+        (editorialGate ? '<h2>主编判断</h2>' + table(['字段', '值'], editorialRows) : '') +
         '<h2>规则维度明细</h2>' +
         table(['维度', '分数'], dimensions.map(([name, score]) => [
           escapeHtml(dimensionLabel(name)),
@@ -3480,6 +3527,32 @@
         ]), true);
     }
 
+    function renderSelfRepairReport(result) {
+      const payload = result.payload || {};
+      const plan = payload.repair_plan || payload;
+      const rows = [
+        ['状态', statusLabel(result.status || payload.status || '')],
+        ['报告', result.report_path || payload.report_path || ''],
+        ['摘要', result.summary || plan.summary || payload.message || '']
+      ];
+      const lists = [];
+      if (Array.isArray(plan.suspected_root_causes)) {
+        lists.push(`<h3>可能原因</h3><ul>${plan.suspected_root_causes.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`);
+      }
+      if (Array.isArray(plan.repair_steps)) {
+        lists.push(`<h3>修复步骤</h3><ul>${plan.repair_steps.map((item) => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>`);
+      }
+      if (Array.isArray(plan.regression_tests)) {
+        lists.push(`<h3>建议回归</h3><div class="chips">${plan.regression_tests.map((item) => `<span>${escapeHtml(String(item))}</span>`).join('')}</div>`);
+      }
+      $('selfRepairOutput').innerHTML =
+        `<strong>${escapeHtml(result.headline || plan.headline || '自修复报告')}</strong>` +
+        table(['字段', '值'], rows, true) +
+        lists.join('') +
+        (payload.stdout ? `<details class="subtle-panel"><summary>回归输出</summary><pre>${escapeHtml(payload.stdout)}</pre></details>` : '') +
+        (payload.stderr ? `<details class="subtle-panel"><summary>错误输出</summary><pre>${escapeHtml(payload.stderr)}</pre></details>` : '');
+    }
+
     function renderKnowledge(payload) {
       const memory = payload.semantic_memory || {count: 0, recent: []};
       const assets = payload.visual_assets || [];
@@ -3617,7 +3690,7 @@
           <button id="saveAndApproveSkeletonBottom">保存并启用</button>
           <button class="secondary" data-view-button="production">回到写作台</button>
         </div>
-        <div class="hint">保存启用后，后续章节会使用新版设定。已经生成的章节不会被自动改写；不满意当前章时，在写作台“当前章阅读”里写修改意见后重修。</div>
+        <div class="hint">保存启用后，后续章节会使用新版设定。已经生成的章节不会被自动改写；需要调整当前章时，在写作台“当前章检查”里写修订方向后重修。</div>
       `;
     }
 
@@ -3775,9 +3848,9 @@
           </div>
           ${table(['主编维度', '评分', '判断', '下一步'], dimensionRows, true)}
           ${chips('证据摘要', governance.evidence_summary || [])}
-          ${chips('必须人工判断', governance.human_decisions || [])}
+          ${chips('必须确认', governance.team_decisions || governance.human_decisions || [])}
           ${chips('逻辑问题', issues)}
-          ${chips('修改建议', recs)}
+          ${chips('修订方向', recs)}
           ${chips('命中来源', sourceRows)}
         </div>`;
     }
@@ -3833,7 +3906,7 @@
       superseded: '已被新建议覆盖',
       needs_attention: '需要处理',
       needs_confirmation: '需要确认',
-      needs_author: '等待作者确认',
+      needs_author: '等待采用确认',
       repaired_ready: '已整理，可继续',
       idle: '空闲',
       ahead_or_diverged: '版本异常',
@@ -3844,8 +3917,8 @@
       unversioned: '未版本化'
     };
     const ACTION_LABELS = {
-      approve_chapter: '阅读并审批当前章',
-      reading_assessment_review: '阅读评估当前章',
+      approve_chapter: '确认采用当前章',
+      reading_assessment_review: '历史阅读评估修订',
       agent_plan_cycle: 'Agent Plan 增强一轮',
       create_market_research_pack: '生成联网搜索任务包',
       run_market_web_search: 'Tavily 搜索并导入',
@@ -3873,13 +3946,16 @@
       record_feedback: '记录反馈',
       submit_revision_suggestion: '提交修订建议',
       adopt_chapter_sample: '采用章节小样',
-      submit_approval_revision: '提交审批修订决策',
+      submit_approval_revision: '提交修订方向',
       resume_queue_task: '恢复生成任务',
       retry_publish_job: '重试发布任务',
       retry_queue_task: '重试生成任务',
       review_chapter: '质检章节',
       revise_chapter: '修订章节',
+      generate_rebuild_candidates: '多候选重建择优',
+      defer_chapter_for_later: '未通过，继续回炉',
       revision_trend_recovery: '自动回退并换策略',
+      revision_budget_recovery: '修订预算恢复',
       restore_database: '恢复数据库',
       run_next_action: '预览下一步',
       run_current_until_blocked: '继续写作当前章',
@@ -3890,19 +3966,24 @@
       start_author_background: '启动主笔模式',
       start_queue_background: '继续生成',
       record_continuity_dashboard: '记录连续性',
-      approve_current_chapter: '阅读并审批当前章',
+      approve_current_chapter: '确认采用当前章',
       repair_current_chapter_brief: '修复当前章阻断项',
       repair_readiness_gate: '自动整理准备',
       repair_skeleton: '打开设定修复',
       repair_readiness: '自动整理准备',
+      generate_self_repair_plan: '生成自修复方案',
+      run_self_repair_regressions: '运行自修复回归',
+      latest_self_repair_report: '打开最近自修复报告',
       run_queue: '继续处理生成任务',
       done: '已完成',
       wait_generation_task: '等待继续生成'
     };
     const DECISION_LABELS = {
       continuity_writeback: '连续性回写',
-      human_approval: '作者确认',
+      human_approval: '采用确认',
+      adoption_confirmation: '采用确认',
       final_publish_confirmation: '待发布',
+      publish_confirmation: '待发布',
       manual_inspection: '需要后台排错'
     };
     const READINESS_LABELS = {
@@ -3914,7 +3995,8 @@
       canon: 'Canon',
       semantic_memory: '语义记忆',
       chapter_queue: '后台生产',
-      human_decisions: '人工决策',
+      team_decisions: '确认事项',
+      human_decisions: '确认事项',
       llm: '模型配置'
     };
     const DIMENSION_LABELS = {
@@ -3996,7 +4078,7 @@
     function taskTypeLabel(value) { return TASK_TYPE_LABELS[value] || value || ''; }
     function automationModeLabel(value) {
       if (value === 'fanqie_playwright') return '番茄浏览器自动化';
-      if (value === 'manual') return '人工处理';
+      if (value === 'manual') return '手动平台处理';
       return value || '';
     }
     function reasonLabel(value) {
@@ -4012,7 +4094,7 @@
         'latest version needs revision and clean revision brief exists': '当前章已有干净修订说明，可以继续修订',
         'latest version has a feedback/recovery brief and should continue revision': '系统已生成修复/恢复说明，可以继续修订',
         'quality passed but continuity has not been recorded': '综合评估通过，需要记录连续性',
-        'quality and continuity are complete': '质检和连续性已完成，等待阅读审批',
+        'quality and continuity are complete': '质检和连续性已完成，等待采用确认',
         'approved version has no publish job': '章节已确认，可以创建发布任务',
         'publish job is pending dry-run': '发布任务待生成预览',
         'publish dry-run is ready': '发布预览已生成，可以进入待发布',
@@ -4023,9 +4105,9 @@
       return labels[text] || text;
     }
     function decisionSuggestion(item) {
-      if (item.type === 'continuity_writeback') return '在上方“当前章一键流程”点“记录连续性”。';
-      if (item.type === 'human_approval') return '确认章节内容无误后，点“阅读并审批当前章”。';
-      if (item.type === 'final_publish_confirmation') return '在“发布配置与任务”中点击“一键发布到平台”。';
+      if (item.type === 'continuity_writeback') return '连续性会由继续生产自动回写。';
+      if (item.type === 'human_approval' || item.type === 'adoption_confirmation') return '确认采用当前章后进入发布准备。';
+      if (item.type === 'final_publish_confirmation' || item.type === 'publish_confirmation') return '在“发布配置与任务”中点击“一键发布到平台”。';
       return '查看章节详情后再处理。';
     }
     function reportLabel(value) {
@@ -4420,8 +4502,12 @@
       }
       await refresh();
       const route = result.router || {};
+      const chapter = selectedChapter(currentSnapshot);
       $('state').textContent = result.message || route.headline || '打断项处理完成';
-      if (route.can_continue || route.primary_intent === 'continue') {
+      if (isPublishAction(chapter?.next_action)) {
+        setActiveView('backend');
+        $('state').textContent = '当前章已采用，下一步是发布准备，不需要返回修订。';
+      } else if (route.can_continue || route.primary_intent === 'continue') {
         await continueProduction();
       } else if (route.primary_intent === 'wait') {
         startTemporaryRefresh();
@@ -4491,7 +4577,7 @@
         await postAction('start_queue_background', currentProductionPayload());
         return;
       }
-      if (['approve_chapter', 'reading_assessment_review'].includes(chapter?.next_action)) {
+      if (chapter?.next_action === 'approve_chapter') {
         if (!window.confirm('确认采用当前章最新版本吗？确认后系统会继续准备发布。')) return;
         await approveCurrentChapter(false);
         return;
@@ -4510,7 +4596,7 @@
           book_id: currentSnapshot.book.id,
           chapter_number: Number($('chapter').value),
           platform: currentWritingPlatform(),
-          max_revision_cycles: Number($('wizardMaxSteps').value || 3)
+          max_revision_cycles: Number($('wizardMaxSteps').value || 1)
         });
         startTemporaryRefresh();
         return;
@@ -4548,6 +4634,10 @@
     $('repairSkeletonFromProduction').addEventListener('click', () => {
       setActiveView('skeleton');
       oneClickSkeletonRepair().catch(showError);
+    });
+    $('openSelfRepair').addEventListener('click', () => {
+      setActiveView('backend');
+      window.requestAnimationFrame(() => $('selfRepairOutput')?.closest('.panel')?.scrollIntoView({block: 'start', behavior: 'smooth'}));
     });
     $('restartFromCurrentChapter').addEventListener('click', () => restartFromCurrentChapter().catch(showError));
     async function restartFromCurrentChapter() {
@@ -4595,10 +4685,10 @@
       if (!currentSnapshot?.book?.id) return;
       const note = buildApprovalContract();
       if (!note.trim()) {
-        window.alert('请先写一句修改建议，例如：动作表述不完整，像“本能想挣”要改成“想挣脱/挣开”。');
+        window.alert('请先写一句修订方向，例如：动作表述不完整，像“本能想挣”要改成“想挣脱/挣开”。');
         return;
       }
-      const mode = $('approvalRevisionMode') ? $('approvalRevisionMode').value : 'rewrite';
+      const mode = $('approvalRevisionMode') ? $('approvalRevisionMode').value : 'targeted';
       await postAction('submit_approval_revision', {
         book_id: currentSnapshot.book.id,
         chapter_number: Number($('chapter').value),
@@ -4689,7 +4779,7 @@
       }
       await postAction('start_author_background', currentProductionPayload({
         platform: $('wizardPlatform').value,
-        max_revision_cycles: Number($('wizardMaxSteps').value || 3)
+        max_revision_cycles: Number($('wizardMaxSteps').value || 1)
       }));
       startTemporaryRefresh();
     }
@@ -4707,9 +4797,9 @@
       ].filter((row) => row[1]);
       if (!rows.length) return '';
       return [
-        '人工评审表:',
+        '读感修订表:',
         ...rows.map((row) => `${row[0]}：${row[1]}`),
-        '验收方式：下一版正文必须能逐项对应以上人工评审表；不要只复述这些要求。'
+        '验收方式：下一版正文必须能逐项对应以上读感修订表；不要只复述这些要求。'
       ].join('\n');
     }
     function buildApprovalContract() {
@@ -4728,9 +4818,9 @@
       ].filter((row) => row[1]);
       if (rows.length) {
         parts.push([
-          '人工评审表:',
+          '读感修订表:',
           ...rows.map((row) => `${row[0]}：${row[1]}`),
-          '验收方式：下一版正文必须能逐项对应以上人工评审表；不要只复述这些要求。'
+          '验收方式：下一版正文必须能逐项对应以上读感修订表；不要只复述这些要求。'
         ].join('\n'));
       }
       return parts.join('\n\n');
@@ -5017,7 +5107,7 @@
         current_skeleton: readSkeletonForm(),
         repaired_skeleton: previewSkeleton
       }, {skipRefresh: true});
-      if (result.status === 'needs_human_review') {
+      if (result.status === 'needs_skeleton_review') {
         applySkeletonDraft(result.skeleton || {});
         const after = result.after || {};
         const next = (result.next_actions || []).slice(0, 2).join('；');
@@ -5126,7 +5216,7 @@
       const reviewContract = reviewPrefix ? buildReviewContract(reviewPrefix) : '';
       const value = [String(text || '').trim(), reviewContract].filter(Boolean).join('\n\n');
       if (!value) {
-        showError(new Error('请先写修改建议，或填写人工评审表'));
+        showError(new Error('请先写修订方向，或填写读感修订表'));
         return;
       }
       const result = await postAction('submit_revision_suggestion', {
@@ -5149,7 +5239,7 @@
         );
         $('revisionSuggestionText').value = '';
         clearReviewContract('review');
-        $('state').textContent = '修改建议已提交，当前章会按新建议重新修订';
+        $('state').textContent = '修订方向已提交，当前章会按新建议重新修订';
       } catch (exc) {
         showError(exc);
       }
@@ -5167,7 +5257,7 @@
           );
           $('revisionSuggestionText').value = '';
           clearReviewContract('review');
-          $('state').textContent = '修改建议已提交，当前章会按新建议重新修订';
+          $('state').textContent = '修订方向已提交，当前章会按新建议重新修订';
           setActiveView('production');
           return;
         }
@@ -5179,16 +5269,16 @@
     $('quickFeedback').addEventListener('click', async () => {
       const text = $('quickFeedbackText').value.trim();
       if (!text) {
-        showError(new Error('请先写修改建议'));
+        showError(new Error('请先写修订方向'));
         return;
       }
       try {
         await submitRevisionSuggestion($('chapter').value, text, 'manual', 'targeted');
         $('quickFeedbackText').value = '';
-        $('state').textContent = '局部修改建议已提交，主笔模式会按新建议重修';
+        $('state').textContent = '局部修订方向已提交，主笔模式会按新建议重修';
         await postAction('start_author_background', currentProductionPayload({
           platform: $('wizardPlatform').value,
-          max_revision_cycles: Number($('wizardMaxSteps').value || 3)
+          max_revision_cycles: Number($('wizardMaxSteps').value || 1)
         }));
         startTemporaryRefresh();
       } catch (exc) {
@@ -5202,12 +5292,12 @@
         return;
       }
       try {
-        await submitRevisionSuggestion($('chapter').value, text, 'manual', 'fresh');
+        await submitRevisionSuggestion($('chapter').value, text, 'editorial_revision', 'rewrite');
         $('quickFeedbackText').value = '';
-        $('state').textContent = '整章重写方向已提交，主笔模式会重新生产这一章';
+        $('state').textContent = '结构修订方向已提交，主笔会按新方向重修这一章';
         await postAction('start_author_background', currentProductionPayload({
           platform: $('wizardPlatform').value,
-          max_revision_cycles: Number($('wizardMaxSteps').value || 3)
+          max_revision_cycles: Number($('wizardMaxSteps').value || 1)
         }));
         startTemporaryRefresh();
       } catch (exc) {
@@ -5246,6 +5336,38 @@
       } catch (error) {
         $('newBookLLMStatus').innerHTML = `<span class="bad">${escapeHtml(error.message)}</span>`;
         showError(error);
+      }
+    });
+    $('generateSelfRepairPlan').addEventListener('click', async () => {
+      try {
+        const liveModel = $('selfRepairMode').value === 'live';
+        const result = await postAction('generate_self_repair_plan', {
+          issue: $('selfRepairIssue').value,
+          book_id: Number($('book').value || 0),
+          chapter_number: Number($('chapter').value || 1),
+          live_model: liveModel
+        }, {skipRefresh: true});
+        renderSelfRepairReport(result);
+      } catch (error) {
+        showError(error, '自修复方案生成失败');
+      }
+    });
+    $('runSelfRepairRegressions').addEventListener('click', async () => {
+      try {
+        const result = await postAction('run_self_repair_regressions', {
+          suite: $('selfRepairSuite').value
+        }, {skipRefresh: true});
+        renderSelfRepairReport(result);
+      } catch (error) {
+        showError(error, '自修复回归失败');
+      }
+    });
+    $('loadSelfRepairReport').addEventListener('click', async () => {
+      try {
+        const result = await postAction('latest_self_repair_report', {}, {skipRefresh: true});
+        renderSelfRepairReport(result);
+      } catch (error) {
+        showError(error, '读取自修复报告失败');
       }
     });
     $('brainstormNewBook').addEventListener('click', async () => {
@@ -5326,13 +5448,13 @@
       }).catch(showError);
     });
 
-    function showError(error) {
+    function showError(error, title = '任务执行出错') {
       const message = friendlyError(error.message || error);
-      $('state').textContent = '任务执行出错，请按页面提示处理';
+      $('state').textContent = `${title}，请按页面提示处理`;
       document.querySelectorAll('.runtime-error').forEach((node) => node.remove());
       document.querySelector('main').insertAdjacentHTML(
         'afterbegin',
-        `<div class="panel empty runtime-error"><strong>任务执行出错</strong><br>${escapeHtml(message)}<br><span class="muted">页面已保留当前作品数据；可先刷新；若仍失败，请在“高级 / 排错”里处理失败任务。</span></div>`
+        `<div class="panel empty runtime-error"><strong>${escapeHtml(title)}</strong><br>${escapeHtml(message)}<br><span class="muted">页面已保留当前作品数据；可先刷新；若仍失败，请在“高级 / 排错”里处理失败任务。</span></div>`
       );
     }
 

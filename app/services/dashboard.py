@@ -9,8 +9,8 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Book, GenerationTask
 from app.services.author_command_center import build_author_command_center
-from app.services.llm_queue import QUEUE_TYPES
-from app.services.planning import build_human_decision_package, plan_chapters
+from app.services.llm_queue import VISIBLE_QUEUE_TYPES
+from app.services.planning import build_human_decision_package, build_team_decision_package, plan_chapters
 from app.services.production_decision import decide_chapter_production
 from app.services.production_control import build_production_control_report
 from app.services.readiness import check_production_readiness
@@ -33,8 +33,8 @@ def build_project_dashboard(
     if not book:
         raise ValueError(f"book not found: {book_id}")
     readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
-    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
-    decisions = build_human_decision_package(session, book_id=book_id, start=start, count=count)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
+    decisions = build_team_decision_package(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
     queue_tasks = _queue_tasks(session, book_id=book_id)
     tasks = _recent_tasks(session, book_id=book_id, limit=recent_tasks)
     task_stats = _task_stats(tasks)
@@ -108,6 +108,17 @@ def build_project_dashboard(
     lines.append(
         "\t".join(
             [
+                "team_decisions",
+                f"continuity={decisions.continuity_count}",
+                f"adoption={decisions.approval_count}",
+                f"publish={decisions.publish_count}",
+                f"inspect={decisions.inspect_count}",
+            ]
+        )
+    )
+    lines.append(
+        "\t".join(
+            [
                 "human_decisions",
                 f"continuity={decisions.continuity_count}",
                 f"approval={decisions.approval_count}",
@@ -134,8 +145,8 @@ def build_project_snapshot(
     if not book:
         raise ValueError(f"book not found: {book_id}")
     readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
-    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
-    decisions = build_human_decision_package(session, book_id=book_id, start=start, count=count)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
+    decisions = build_team_decision_package(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
     queue_tasks = _queue_tasks(session, book_id=book_id)
     tasks = _recent_tasks(session, book_id=book_id, limit=recent_tasks)
     task_stats = _task_stats(tasks)
@@ -183,6 +194,7 @@ def build_project_snapshot(
             "estimated_tokens": task_stats["estimated_tokens"],
             "elapsed_ms": task_stats["elapsed_ms"],
         },
+        "team_decisions": _team_decisions_payload(decisions),
         "human_decisions": {
             "continuity": decisions.continuity_count,
             "approval": decisions.approval_count,
@@ -213,6 +225,59 @@ def build_project_snapshot(
     }
 
 
+def _team_decisions_payload(decisions) -> dict:
+    return {
+        "continuity": decisions.continuity_count,
+        "adoption": decisions.approval_count,
+        "publish": decisions.publish_count,
+        "inspect": decisions.inspect_count,
+        "items": [
+            {
+                "type": _team_decision_type(item.decision_type),
+                "legacy_type": item.decision_type,
+                "role": _team_decision_role(item.decision_type),
+                "chapter": item.chapter_number,
+                "chapter_id": item.chapter_id,
+                "version_id": item.version_id,
+                "publish_job_id": item.publish_job_id,
+                "reason": item.reason,
+                "display_reason": _team_decision_reason(item.decision_type, item.reason),
+                "command_hint": item.command_hint,
+            }
+            for item in decisions.items
+        ],
+    }
+
+
+def _team_decision_type(value: str) -> str:
+    return {
+        "human_approval": "adoption_confirmation",
+        "final_publish_confirmation": "publish_confirmation",
+        "manual_inspection": "flow_inspection",
+        "continuity_writeback": "continuity_writeback",
+    }.get(value, value)
+
+
+def _team_decision_role(value: str) -> str:
+    if value == "human_approval":
+        return "主编"
+    if value == "final_publish_confirmation":
+        return "流程官"
+    if value == "manual_inspection":
+        return "流程官"
+    return "主笔"
+
+
+def _team_decision_reason(decision_type: str, reason: str) -> str:
+    if decision_type == "human_approval":
+        return "主编已给出准定稿判断，等待你确认是否采用。"
+    if decision_type == "final_publish_confirmation":
+        return "流程官已完成发布准备，等待最终发布确认。"
+    if decision_type == "manual_inspection":
+        return "流程官发现状态不一致，需要先排查。"
+    return reason
+
+
 def _chapter_snapshot(item) -> dict:
     decision = decide_chapter_production(item)
     return {
@@ -221,6 +286,9 @@ def _chapter_snapshot(item) -> dict:
         "brief_id": item.brief_id,
         "version_id": item.latest_version_id,
         "version_status": item.latest_version_status,
+        "team_status": decision.status,
+        "team_status_label": decision.label,
+        "team_next_step": decision.next_step,
         "author_status": decision.status,
         "author_status_label": decision.label,
         "author_next_step": decision.next_step,
@@ -251,7 +319,7 @@ def _recommend_next(*, book_id: int, plan_items, queue_tasks: list[GenerationTas
     waiting = next((item for item in plan_items if item.next_action == "wait_generation_task"), None)
     if waiting:
         return "wait for queued generation, or run list-generation-queue --status pending"
-    manual = next((item for item in plan_items if item.next_action in {"record_chapter_continuity", "approve_chapter", "mark_publish_job"}), None)
+    manual = next((item for item in plan_items if item.next_action in {"approve_chapter", "mark_publish_job"}), None)
     if manual:
         return f"python -m app.cli human-decision-package --book-id {book_id} --start {manual.chapter_number} --count 1"
     return "no immediate action in selected range"
@@ -261,7 +329,7 @@ def _queue_tasks(session: Session, *, book_id: int) -> list[GenerationTask]:
     return list(
         session.scalars(
             select(GenerationTask)
-            .where(GenerationTask.book_id == book_id, GenerationTask.task_type.in_(QUEUE_TYPES))
+            .where(GenerationTask.book_id == book_id, GenerationTask.task_type.in_(VISIBLE_QUEUE_TYPES))
             .order_by(GenerationTask.id.desc())
         )
     )

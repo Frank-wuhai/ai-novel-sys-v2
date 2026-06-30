@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Book, GenerationTask
-from app.services.llm_queue import QUEUE_TYPES
+from app.services.llm_queue import QUEUE_TYPES, VISIBLE_QUEUE_TYPES
 from app.services.planning import plan_chapters
+from app.services.chapter_production_state import get_chapter_production_state
 from app.services.production_decision import decide_chapter_production
 from app.services.readiness import check_production_readiness
 from app.services.status_language import author_next_action_text, author_status_text
@@ -27,8 +28,9 @@ def build_author_command_center(
     if not book:
         raise ValueError(f"book not found: {book_id}")
     readiness = check_production_readiness(session, book_id=book_id, start=start, count=count, live_llm=False)
-    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count)
+    plan_items = plan_chapters(session, book_id=book_id, start=start, count=count, apply_state_repairs=False)
     current = next((item for item in plan_items if item.chapter_number == chapter_number), None)
+    current_state = get_chapter_production_state(session, book_id=book_id, chapter_number=chapter_number)
     auto_item = next((item for item in plan_items if decide_chapter_production(item).can_continue), None)
     tasks = list(session.scalars(select(GenerationTask).where(GenerationTask.book_id == book_id).order_by(GenerationTask.id.desc()).limit(80)))
     counts = Counter(task.status for task in tasks)
@@ -85,6 +87,7 @@ def build_author_command_center(
             blockers=["generation_queue_failed"],
             next_actions=[author_next_action_text(error_text)],
             failed_tasks=failed_tasks,
+            production_state=current_state.to_dict(),
         )
     if not current:
         return _center(
@@ -107,6 +110,7 @@ def build_author_command_center(
             primary_label=decision.primary_label,
             primary_intent=decision.primary_intent,
             next_actions=[decision.next_step],
+            production_state=current_state.to_dict(),
         )
     if decision.can_continue:
         return _center(
@@ -117,13 +121,14 @@ def build_author_command_center(
             primary_label=decision.primary_label,
             primary_intent=decision.primary_intent,
             next_actions=[decision.next_step],
+            production_state=current_state.to_dict(),
         )
-    if auto_item:
+    if auto_item and not _current_blocks_mainline(decision):
         auto_decision = decide_chapter_production(auto_item)
         return _center(
             status="can_produce",
             stage=auto_decision.stage,
-            headline=f"当前章需人工处理，可先推进第 {auto_item.chapter_number} 章",
+            headline=f"当前章等待确认，可先推进第 {auto_item.chapter_number} 章",
             detail=auto_decision.next_step,
             primary_label=f"切到第 {auto_item.chapter_number} 章继续",
             primary_intent="continue_auto_chapter",
@@ -138,7 +143,25 @@ def build_author_command_center(
         primary_label=decision.primary_label,
         primary_intent=decision.primary_intent,
         next_actions=[decision.next_step],
+        production_state=current_state.to_dict(),
     )
+
+
+def _current_blocks_mainline(decision: Any) -> bool:
+    if bool(getattr(decision, "needs_author", False)):
+        return True
+    if bool(getattr(decision, "can_continue", False)):
+        return False
+    status = str(getattr(decision, "status", "") or "")
+    return status in {
+        "needs_revision",
+        "revision_deadlock",
+        "deferred_backlog",
+        "blocked_by_previous",
+        "blocked_by_deferred_backlog",
+        "candidate_rebuild",
+        "revision_recovery",
+    }
 
 
 def _center(
@@ -153,6 +176,7 @@ def _center(
     next_actions: list[str] | None = None,
     target_chapter_number: int | None = None,
     failed_tasks: list[dict[str, Any]] | None = None,
+    production_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -164,10 +188,11 @@ def _center(
             "intent": primary_intent,
             "target_chapter_number": target_chapter_number,
         },
-        "secondary_actions": ["作品设定", "写修改意见", "后台排错"],
+        "secondary_actions": ["作品设定", "交回主笔修订", "后台排错"],
         "blockers": blockers or [],
         "next_actions": next_actions or [],
         "failed_tasks": failed_tasks or [],
+        "production_state": production_state or {},
     }
 
 
@@ -207,7 +232,7 @@ def _active_failed_tasks(session: Session, *, book_id: int, limit: int = 5) -> l
                 "chapter_number": input_data.get("chapter_number"),
                 "error_category": str(output_data.get("error_category") or ""),
                 "error": str(output_data.get("error") or "")[:220],
-                "is_queue_task": task.task_type in QUEUE_TYPES,
+                "is_queue_task": task.task_type in VISIBLE_QUEUE_TYPES,
             }
         )
         if len(rows) >= limit:
@@ -216,13 +241,31 @@ def _active_failed_tasks(session: Session, *, book_id: int, limit: int = 5) -> l
 
 
 def _obsolete_failed_generation_task(session: Session, task: GenerationTask) -> bool:
-    if task.task_type in QUEUE_TYPES:
+    if task.task_type in VISIBLE_QUEUE_TYPES:
         return False
     input_data = _loads_json(task.input_json)
     chapter_number = input_data.get("chapter_number")
     source_version_id = input_data.get("source_version_id")
     revision_brief_id = input_data.get("revision_brief_id")
     quality_report_id = input_data.get("quality_report_id")
+    if task.task_type == "chapter_sample_lab" and chapter_number:
+        later_production_tasks = session.scalars(
+            select(GenerationTask)
+            .where(
+                GenerationTask.book_id == task.book_id,
+                GenerationTask.status == "completed",
+                GenerationTask.created_at > task.created_at,
+            )
+            .order_by(GenerationTask.id.desc())
+            .limit(40)
+        )
+        for later_production in later_production_tasks:
+            candidate_input = _loads_json(later_production.input_json)
+            if (
+                candidate_input.get("chapter_number") == chapter_number
+                and later_production.task_type in {"draft_chapter", "revise_chapter", "review_chapter", "llm_review_chapter"}
+            ):
+                return True
     stmt = (
         select(GenerationTask)
         .where(
@@ -266,5 +309,6 @@ def _task_type_label(value: str) -> str:
         "review_chapter": "章节质检",
         "llm_review_chapter": "模型审稿",
         "chapter_sample_lab": "章节小样",
+        "rebuild_chapter_candidates": "重建候选择优",
     }
     return labels.get(value, value or "生成任务")
