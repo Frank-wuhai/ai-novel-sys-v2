@@ -62,6 +62,7 @@ from app.services.llm_queue import (
     build_generation_queue_health,
     cancel_generation_queue_task,
     enqueue_draft_chapter,
+    enqueue_rebuild_candidates,
     enqueue_revise_chapter,
     list_generation_queue,
     pause_generation_queue_task,
@@ -419,6 +420,14 @@ def main() -> None:
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
     p.add_argument("--max-attempts", type=int, default=3)
+    p.add_argument("--task-timeout-seconds", type=int, default=3600)
+
+    p = sub.add_parser("enqueue-rebuild-candidates")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--live-llm", action="store_true")
+    p.add_argument("--candidate-count", type=int, default=3)
+    p.add_argument("--max-attempts", type=int, default=2)
     p.add_argument("--task-timeout-seconds", type=int, default=3600)
 
     p = sub.add_parser("list-generation-queue")
@@ -1256,6 +1265,24 @@ def main() -> None:
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
                 print(f"task_type={task.task_type}")
+                print(f"task_timeout_seconds={args.task_timeout_seconds}")
+            elif args.cmd == "enqueue-rebuild-candidates":
+                _print_debug_entrypoint(
+                    f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number} --queue-generation"
+                )
+                task = enqueue_rebuild_candidates(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    dry_run=not args.live_llm,
+                    candidate_count=args.candidate_count,
+                    max_attempts=args.max_attempts,
+                    timeout_seconds=args.task_timeout_seconds,
+                )
+                print(f"generation_task_id={task.id}")
+                print(f"status={task.status}")
+                print(f"task_type={task.task_type}")
+                print(f"candidate_count={args.candidate_count}")
                 print(f"task_timeout_seconds={args.task_timeout_seconds}")
             elif args.cmd == "list-generation-queue":
                 for task in list_generation_queue(session, status=args.status, limit=args.limit):

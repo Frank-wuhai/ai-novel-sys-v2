@@ -53,6 +53,7 @@ def generate_rebuild_candidates(
     chapter_number: int,
     candidate_count: int = 3,
     dry_run: bool = False,
+    existing_task_id: int | None = None,
 ) -> RebuildCandidateResult:
     candidate_count = max(2, min(5, int(candidate_count or 3)))
     book = session.get(Book, book_id)
@@ -86,11 +87,34 @@ def generate_rebuild_candidates(
     max_tokens = settings.llm_revision_max_tokens
     llm_parameters = llm_parameter_snapshot(dry_run=dry_run, max_tokens=max_tokens, temperature=temperature, model=model)
     protected_rebuild_constraints = _protected_rebuild_constraints(brief)
-    task = GenerationTask(
-        book_id=book_id,
-        task_type=TASK_TYPE_REBUILD_CANDIDATES,
-        status="running",
-        input_json=json.dumps(
+    task = session.get(GenerationTask, existing_task_id) if existing_task_id else None
+    if task is None:
+        task = GenerationTask(
+            book_id=book_id,
+            task_type=TASK_TYPE_REBUILD_CANDIDATES,
+            status="running",
+            input_json=json.dumps(
+                {
+                    "chapter_number": chapter_number,
+                    "dry_run": dry_run,
+                    "candidate_count": candidate_count,
+                    "source_version_id": source_version.id,
+                    "revision_brief_id": brief.id,
+                    "quality_report_id": quality.id if quality else None,
+                    "protected_rebuild_constraints": protected_rebuild_constraints,
+                    "prompt_template": f"{template.name}@{template.version}",
+                    "llm_parameters": llm_parameters,
+                },
+                ensure_ascii=False,
+            ),
+            output_json="{}",
+        )
+        session.add(task)
+        session.flush()
+        session.commit()
+    else:
+        input_data = json.loads(task.input_json or "{}")
+        input_data.update(
             {
                 "chapter_number": chapter_number,
                 "dry_run": dry_run,
@@ -101,14 +125,11 @@ def generate_rebuild_candidates(
                 "protected_rebuild_constraints": protected_rebuild_constraints,
                 "prompt_template": f"{template.name}@{template.version}",
                 "llm_parameters": llm_parameters,
-            },
-            ensure_ascii=False,
-        ),
-        output_json="{}",
-    )
-    session.add(task)
-    session.flush()
-    session.commit()
+            }
+        )
+        task.input_json = json.dumps(input_data, ensure_ascii=False)
+        task.status = "running"
+        session.flush()
 
     try:
         rows: list[dict] = []

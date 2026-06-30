@@ -4,7 +4,8 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,13 +15,14 @@ from app.models.entities import Chapter, ChapterBrief, ChapterVersion, Generatio
 from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
 from app.services.production_gate import assert_production_gate
+from app.services.rebuild_candidates import generate_rebuild_candidates
 from app.services.revision_supervisor import persistent_revision_budget
 
 
 QUEUE_DRAFT = "queue_draft_chapter"
 QUEUE_REVISE = "queue_revise_chapter"
 QUEUE_REBUILD_CANDIDATES = "rebuild_chapter_candidates"
-QUEUE_TYPES = {QUEUE_DRAFT, QUEUE_REVISE}
+QUEUE_TYPES = {QUEUE_DRAFT, QUEUE_REVISE, QUEUE_REBUILD_CANDIDATES}
 VISIBLE_QUEUE_TYPES = set(QUEUE_TYPES) | {QUEUE_REBUILD_CANDIDATES}
 ACTIVE_STATUSES = {"pending", "running", "paused"}
 
@@ -131,6 +133,29 @@ def enqueue_revise_chapter(
     )
 
 
+def enqueue_rebuild_candidates(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    dry_run: bool = True,
+    candidate_count: int = 3,
+    max_attempts: int = 2,
+    timeout_seconds: int = 3600,
+) -> GenerationTask:
+    assert_production_gate(session, book_id=book_id, action="generate_rebuild_candidates")
+    _guard_active_chapter_queue_task(session, book_id=book_id, chapter_number=chapter_number)
+    return _enqueue(
+        session,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        dry_run=dry_run,
+        queue_type=QUEUE_REBUILD_CANDIDATES,
+        max_attempts=max_attempts,
+        timeout_seconds=timeout_seconds,
+        extra_input={"candidate_count": max(2, min(5, int(candidate_count or 3)))},
+    )
+
 def list_generation_queue(
     session: Session,
     *,
@@ -199,6 +224,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
         return QueueRunResult(task=task, version_id=None, child_generation_task_id=None)
 
     before_task_id = session.scalar(select(func.max(GenerationTask.id))) or 0
+    lease = _acquire_task_lease(task, input_data, timeout_seconds=timeout_seconds)
     task.status = "running"
     task.input_json = _dumps_json(input_data)
     session.flush()
@@ -206,8 +232,21 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     try:
         if task.task_type == QUEUE_DRAFT:
             version = draft_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)
+            version_id = version.id
         elif task.task_type == QUEUE_REVISE:
             version = revise_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)
+            version_id = version.id
+        elif task.task_type == QUEUE_REBUILD_CANDIDATES:
+            result = generate_rebuild_candidates(
+                session,
+                book_id=task.book_id,
+                chapter_number=chapter_number,
+                candidate_count=int(input_data.get("candidate_count") or 3),
+                dry_run=dry_run,
+                existing_task_id=task.id,
+            )
+            version_id = result.selected_version_id
+            version = session.get(ChapterVersion, version_id)
         else:
             raise ValueError(f"unsupported queue type: {task.task_type}")
     except Exception as exc:
@@ -225,19 +264,20 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
                 "llm_parameters": llm_parameters,
                 "running_age_seconds": _running_age_seconds(task),
                 "retryable": retryable,
+                "lease": lease,
             }
         )
         session.flush()
         return QueueRunResult(task=task, version_id=None, child_generation_task_id=None)
 
-    child_task = _latest_child_generation_task(session, after_id=before_task_id, version_id=version.id)
+    child_task = _latest_child_generation_task(session, after_id=before_task_id, version_id=version_id)
     task.status = "completed"
     input_data = _loads_json(task.input_json)
-    input_data.pop("running_started_at", None)
+    _clear_task_lease(input_data)
     task.input_json = _dumps_json(input_data)
     task.output_json = _dumps_json(
         {
-            "version_id": version.id,
+            "version_id": version_id,
             "child_generation_task_id": child_task.id if child_task else None,
             "dry_run": dry_run,
             "attempt": attempt,
@@ -249,7 +289,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     session.flush()
     return QueueRunResult(
         task=task,
-        version_id=version.id,
+        version_id=version_id,
         child_generation_task_id=child_task.id if child_task else None,
     )
 
@@ -297,7 +337,7 @@ def recover_stale_generation_tasks(
         attempt = int(input_data.get("attempt") or output_data.get("attempt") or 0)
         max_attempts = int(input_data.get("max_attempts") or output_data.get("max_attempts") or 3)
         new_status = "pending" if attempt < max_attempts else "failed"
-        input_data.pop("running_started_at", None)
+        _clear_task_lease(input_data)
         task.input_json = _dumps_json(input_data)
         output_data.update(
             {
@@ -392,24 +432,26 @@ def _enqueue(
     queue_type: str,
     max_attempts: int,
     timeout_seconds: int,
+    extra_input: dict | None = None,
 ) -> GenerationTask:
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     llm_parameters = _queue_llm_parameter_snapshot(queue_type=queue_type, dry_run=dry_run)
+    input_data = {
+        "chapter_number": chapter_number,
+        "dry_run": dry_run,
+        "attempt": 0,
+        "max_attempts": max_attempts,
+        "task_timeout_seconds": timeout_seconds,
+        "llm_parameters": llm_parameters,
+    }
+    if extra_input:
+        input_data.update(extra_input)
     task = GenerationTask(
         book_id=book_id,
         task_type=queue_type,
         status="pending",
-        input_json=_dumps_json(
-            {
-                "chapter_number": chapter_number,
-                "dry_run": dry_run,
-                "attempt": 0,
-                "max_attempts": max_attempts,
-                "task_timeout_seconds": timeout_seconds,
-                "llm_parameters": llm_parameters,
-            }
-        ),
+        input_json=_dumps_json(input_data),
         output_json="{}",
     )
     session.add(task)
@@ -589,7 +631,42 @@ def _dumps_json(value: dict) -> str:
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat()
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _acquire_task_lease(task: GenerationTask, input_data: dict, *, timeout_seconds: int) -> dict:
+    now = _utc_now()
+    lease = {
+        "lease_owner": f"local-worker:{uuid4().hex[:12]}",
+        "lease_acquired_at": _utc_now_iso(),
+        "lease_expires_at": (now + timedelta(seconds=timeout_seconds)).replace(microsecond=0).isoformat() + "Z",
+        "heartbeat_at": _utc_now_iso(),
+    }
+    input_data.update(lease)
+    input_data["running_started_at"] = lease["lease_acquired_at"]
+    return lease
+
+
+def _clear_task_lease(input_data: dict) -> None:
+    for key in ("running_started_at", "lease_owner", "lease_acquired_at", "lease_expires_at", "heartbeat_at"):
+        input_data.pop(key, None)
+
+
+def heartbeat_generation_task(session: Session, *, task_id: int, progress: str = "") -> GenerationTask:
+    task = _get_queue_task(session, task_id=task_id)
+    if task.status != "running":
+        raise ValueError(f"only running tasks can heartbeat, got {task.status}")
+    input_data = _loads_json(task.input_json)
+    input_data["heartbeat_at"] = _utc_now_iso()
+    if progress:
+        input_data["last_progress"] = progress
+    task.input_json = _dumps_json(input_data)
+    session.flush()
+    return task
 
 
 def _running_age_seconds(task: GenerationTask) -> int:

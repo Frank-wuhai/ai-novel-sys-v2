@@ -88,6 +88,9 @@ def build_project_dashboard(
                     f"max_attempts={input_data.get('max_attempts', '')}",
                     f"timeout_seconds={_task_timeout_seconds(input_data)}",
                     f"running_age_seconds={_running_age_seconds(task) if task.status == 'running' else ''}",
+                    f"heartbeat_at={input_data.get('heartbeat_at', '')}",
+                    f"lease_expires_at={input_data.get('lease_expires_at', '')}",
+                    f"last_progress={input_data.get('last_progress', '')}",
                     f"error_category={output_data.get('error_category', '')}",
                 ]
             )
@@ -377,6 +380,10 @@ def _task_snapshot(session: Session, task: GenerationTask) -> dict:
         "actual_model": actual,
         "running_age_seconds": _running_age_seconds(task) if task.status == "running" else 0,
         "stale": task.status == "running" and _running_age_seconds(task) >= _task_timeout_seconds(input_data),
+        "lease_owner": input_data.get("lease_owner", ""),
+        "lease_expires_at": input_data.get("lease_expires_at", ""),
+        "heartbeat_at": input_data.get("heartbeat_at", ""),
+        "last_progress": input_data.get("last_progress", ""),
         "error_category": output_data.get("error_category", ""),
     }
 

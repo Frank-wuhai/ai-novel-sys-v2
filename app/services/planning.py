@@ -14,7 +14,7 @@ from app.services.brief_sanitizer import sanitize_existing_chapter_brief
 from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.context_contamination import audit_context_contamination, context_anchor_lines
 from app.services.feedback import format_chapter_sample_adoption_context, submit_revision_suggestion
-from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REVISE, enqueue_draft_chapter, enqueue_revise_chapter
+from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REBUILD_CANDIDATES, QUEUE_REVISE, enqueue_draft_chapter, enqueue_rebuild_candidates, enqueue_revise_chapter
 from app.services.legacy_trace_cleanup import cleanup_active_production_traces
 from app.services.pre_draft_inputs import evaluate_pre_draft_inputs, latest_sample_task_id
 from app.services.production_actions import AUTO_ACTIONS, MANUAL_ACTIONS
@@ -420,6 +420,9 @@ def run_next_action(
             brief.id,
         )
     if action == "generate_rebuild_candidates":
+        if queue_generation:
+            task = enqueue_rebuild_candidates(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, candidate_count=3)
+            return RunNextActionResult(chapter_number, action, "queued", "queued rebuild candidate generation task", task.id)
         result = generate_rebuild_candidates(
             session,
             book_id=book_id,
@@ -443,7 +446,7 @@ def run_next_action(
             item.latest_version_id,
         )
     if action == "done":
-        return RunNextActionResult(chapter_number, action, "noop", "chapter is complete", None)
+        return RunNextActionResult(chapter_number, action, "completed", "chapter is complete", None)
     return RunNextActionResult(chapter_number, action, "blocked", item.reason, None)
 
 
@@ -854,6 +857,9 @@ def _plan_one(
         draft_queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_DRAFT)
     elif version.status == "needs_revision":
         revision_queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REVISE)
+        rebuild_queue_task = _active_generation_queue_task(session, book_id=book_id, chapter_number=chapter_number, queue_type=QUEUE_REBUILD_CANDIDATES)
+        if rebuild_queue_task and not revision_queue_task:
+            revision_queue_task = rebuild_queue_task
         trend_blocker = (
             ""
             if _revision_brief_defers_trend_recovery(version, revision_brief, quality)
