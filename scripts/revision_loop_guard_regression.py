@@ -16,7 +16,9 @@ from app.models.entities import (
     PlatformFeedback,
     QualityReport,
 )
-from app.services.planning import _maybe_apply_revision_loop_guard, plan_chapters, run_next_action
+from app.services.chapter_revision import _fallback_quality_for_recovery_revision
+from app.services.llm_queue import _guard_revision_enqueue_policy
+from app.services.planning import _active_revision_budget_recovery, _maybe_apply_revision_loop_guard, plan_chapters, run_next_action
 from app.services.author_runner import author_terminal_status
 from app.services.feedback import submit_revision_suggestion
 from app.services.revision_supervisor import apply_revision_budget_recovery
@@ -377,6 +379,30 @@ def main() -> int:
             session.add(budget_quality)
             session.flush()
             created["quality_reports"].append(budget_quality)
+        for task_index in range(2):
+            budget_task = GenerationTask(
+                book_id=book.id,
+                task_type="revise_chapter",
+                status="completed",
+                input_json=json.dumps({"chapter_number": 4, "revision_mode": "rewrite"}, ensure_ascii=False),
+                output_json=json.dumps(
+                    {
+                        "version_id": budget_versions[min(task_index, len(budget_versions) - 1)].id,
+                        "provider": "regression",
+                        "elapsed_ms": 1000,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            session.add(budget_task)
+            session.flush()
+            created["generation_tasks"].append(budget_task)
+        try:
+            _guard_revision_enqueue_policy(session, book_id=book.id, chapter_number=4)
+            failures.append("direct_revision_enqueue_bypassed_budget")
+        except ValueError as exc:
+            if "persistent_revision_budget" not in str(exc):
+                failures.append(f"direct_revision_enqueue_wrong_blocker:{exc}")
         budget_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=4)
         if budget_recovery.status != "recovered":
             failures.append("budget_recovery_not_applied")
@@ -390,6 +416,35 @@ def main() -> int:
             failures.append("budget_recovery_still_requests_author_direction")
         if "保留最佳稿的主事件" not in budget_text:
             failures.append("budget_recovery_missing_preserve_boundary")
+        budget_recovery_version = (
+            session.get(ChapterVersion, budget_recovery.recovery_version_id) if budget_recovery.recovery_version_id else None
+        )
+        if not _active_revision_budget_recovery(budget_recovery_version, budget_brief):
+            failures.append("budget_recovery_not_routed_through_active_recovery")
+        repeated_budget_recovery = apply_revision_budget_recovery(session, book_id=book.id, chapter_number=4)
+        if (
+            repeated_budget_recovery.recovery_version_id != budget_recovery.recovery_version_id
+            or repeated_budget_recovery.recovery_brief_id != budget_recovery.recovery_brief_id
+        ):
+            failures.append("budget_recovery_not_idempotent")
+        budget_plan = plan_chapters(session, book_id=book.id, start=4, count=1)[0]
+        if budget_plan.next_action != "revise_chapter":
+            failures.append(f"author_runner_budget_recovery_not_pending:{budget_plan.next_action}:{budget_plan.reason}")
+        fallback_quality = (
+            _fallback_quality_for_recovery_revision(
+                session,
+                source_version=budget_recovery_version,
+                revision_brief=budget_brief,
+            )
+            if budget_recovery_version and budget_brief
+            else None
+        )
+        if not fallback_quality or fallback_quality.chapter_version_id != budget_versions[1].id:
+            failures.append("budget_recovery_missing_source_quality_fallback")
+        try:
+            _guard_revision_enqueue_policy(session, book_id=book.id, chapter_number=4)
+        except ValueError as exc:
+            failures.append(f"active_budget_recovery_enqueue_blocked:{exc}")
 
         readable_restore_chapter = Chapter(book_id=book.id, chapter_number=40, title="第40章", status="drafting")
         session.add(readable_restore_chapter)

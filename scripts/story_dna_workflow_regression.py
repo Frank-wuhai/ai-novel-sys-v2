@@ -76,7 +76,7 @@ def main() -> int:
             print(story_dna)
             return 1
         result = run_next_action(session, book_id=book_id, chapter_number=1, dry_run=True)
-        if result.action not in {"create_chapter_brief", "draft_chapter"}:
+        if result.action not in {"create_chapter_brief", "draft_chapter", "generate_chapter_samples"}:
             print("unexpected first action")
             print(result)
             return 1

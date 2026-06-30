@@ -128,7 +128,7 @@ def main() -> int:
             chapter_id=chapter.id,
             goal="阅读评估结论：当前稿不是正式批准稿，需要继续修。",
             required_beats="reading_assessment_contract: 修复开头承接、场景展开和人物动机。",
-            constraints="人工意图: 保留当前最佳稿作为底稿，但不能直接批准。",
+            constraints="修订方向: 保留当前最佳稿作为底稿，但不能直接批准。\nrevision_mode:fresh",
             status="superseded",
         )
         session.add_all([source, current, protected_brief])
@@ -166,7 +166,62 @@ def main() -> int:
         )
         protected_report = json.loads(protected_quality.report or "{}") if protected_quality else {}
         protected_brief_status = protected_brief.status
+        protected_brief_text = "\n".join([protected_brief.goal or "", protected_brief.required_beats or "", protected_brief.constraints or ""])
         protected_restored_status = protected_restored.status if protected_restored else ""
+
+    with session_scope() as session:
+        book = Book(title="Revision Comparison Base Pass Regression", genre="玄幻", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        source = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=1,
+            title="源稿",
+            content="源稿正文" * 900,
+            status="needs_revision",
+            source="revision:regression",
+        )
+        current = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=2,
+            title="小降但基础失败稿",
+            content="小降正文" * 900,
+            status="needs_revision",
+            source="revision:regression",
+        )
+        session.add_all([source, current])
+        session.flush()
+        source_quality = QualityReport(
+            chapter_version_id=source.id,
+            score=72,
+            passed=False,
+            report=json.dumps(
+                {"status": "NEEDS_REVISION", "score": 72, "passed": False, "base_quality_passed": True, "dimensions": {"readability": 70}},
+                ensure_ascii=False,
+            ),
+        )
+        current_quality = QualityReport(
+            chapter_version_id=current.id,
+            score=70,
+            passed=False,
+            report=json.dumps(
+                {"status": "NEEDS_REVISION", "score": 70, "passed": False, "base_quality_passed": False, "dimensions": {"readability": 69}},
+                ensure_ascii=False,
+            ),
+        )
+        task = GenerationTask(
+            book_id=book.id,
+            task_type="revise_chapter",
+            status="completed",
+            input_json=json.dumps({"chapter_number": 1, "source_version_id": source.id}, ensure_ascii=False),
+            output_json=json.dumps({"version_id": current.id}, ensure_ascii=False),
+        )
+        session.add_all([source_quality, current_quality, task])
+        session.flush()
+        base_pass_result = compare_and_restore_if_regressed(session, current_version=current, current_quality=current_quality)
 
     if result.status != "regressed":
         failures.append("comparison_did_not_detect_regression")
@@ -182,9 +237,19 @@ def main() -> int:
         failures.append("protected_restore_was_marked_pass")
     if protected_brief_status != "revision_ready":
         failures.append("protected_brief_not_reactivated")
+    if (
+        "revision_mode:targeted" not in protected_brief_text
+        or "revision_mode:fresh" in protected_brief_text
+        or "修订模式:fresh" in protected_brief_text
+    ):
+        failures.append(f"protected_brief_not_downgraded_to_targeted:{protected_brief_text}")
+    if "禁止整章重写" not in protected_brief_text:
+        failures.append("protected_brief_missing_no_fresh_guard")
     restore_meta = protected_report.get("revision_comparison_restore", {})
     if not restore_meta.get("protected_brief_id"):
         failures.append("protected_restore_missing_brief_id")
+    if base_pass_result.status != "regressed" or not base_pass_result.restored_version_id:
+        failures.append("base_quality_pass_regression_not_restored")
     print(
         json.dumps(
             {
@@ -192,6 +257,7 @@ def main() -> int:
                 "failures": failures,
                 "result": result.to_dict(),
                 "protected_result": protected_result.to_dict(),
+                "base_pass_result": base_pass_result.to_dict(),
             },
             ensure_ascii=False,
             indent=2,

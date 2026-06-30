@@ -80,14 +80,14 @@ def main() -> int:
         guidance = quality_data.get("editorial_guidance") if isinstance(quality_data.get("editorial_guidance"), dict) else {}
         if guidance.get("level") != "合格底稿":
             failures.append("quality_report_missing_author_guidance_level")
-        if guidance.get("revision_depth") != "author_review":
+        if guidance.get("revision_depth") != "machine_polish":
             failures.append("quality_report_missing_revision_depth")
-        if "停止自动修订" not in guidance.get("decision", ""):
+        if "不进入旁路确认" not in guidance.get("decision", ""):
             failures.append("quality_guidance_does_not_protect_solid_draft")
         chief = quality_data.get("editor_in_chief") if isinstance(quality_data.get("editor_in_chief"), dict) else {}
         if chief.get("draft_level") != "合格底稿":
             failures.append("editor_in_chief_missing_draft_level")
-        if "停止自动修订" not in chief.get("decision", ""):
+        if "不进入旁路确认" not in chief.get("decision", ""):
             failures.append("editor_in_chief_missing_preserve_decision")
         if not chief.get("minimum_effective_revision") or not chief.get("acceptance_checks"):
             failures.append("editor_in_chief_missing_actionable_contract")
@@ -144,6 +144,25 @@ def main() -> int:
         publish = stratify_quality_report(_publish_ready_report())
         if publish.tier != "S_publish_ready" or publish.should_auto_revise:
             failures.append("publish_ready_over_revised")
+        weak_brief = stratify_quality_report(
+            {
+                "status": "NEEDS_REVISION",
+                "score": 74,
+                "passed": False,
+                "issues": [],
+                "warnings": ["weak_narrative_dimension: brief_coverage=47"],
+                "dimensions": {"brief_coverage": 47, "scene_atmosphere": 43, "chapter_necessity": 61},
+                "llm_review": {
+                    "status": "completed",
+                    "verdict": "pass",
+                    "score": 78,
+                    "strengths": ["开篇压力成立"],
+                    "revision_suggestions": ["补齐章节承诺"],
+                },
+            }
+        )
+        if weak_brief.tier == "E_contaminated":
+            failures.append("weak_brief_coverage_wrongly_marked_contaminated")
 
     print(json.dumps({"status": "pass" if not failures else "fail", "failures": failures}, ensure_ascii=False, indent=2))
     return 0 if not failures else 1

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -24,7 +27,59 @@ class CheckResult:
     output: str
 
 
+CURRENT_PROCESS: subprocess.Popen | None = None
+RECORDER: "RegressionRunRecorder | None" = None
+
+
+class RegressionRunRecorder:
+    def __init__(self, *, args: argparse.Namespace, checks: list[tuple[str, list[str]]]) -> None:
+        self.started_at = datetime.now(UTC)
+        self.run_id = self.started_at.strftime("%Y%m%dT%H%M%SZ") + f"-{os.getpid()}"
+        self.path = ROOT / "data" / "regression_runs" / f"{self.run_id}.json"
+        self.args = vars(args)
+        self.checks = [{"name": name, "command": [sys.executable, *command]} for name, command in checks]
+        self.results: list[CheckResult] = []
+        self.current_check: dict | None = None
+        self.final_status = "RUNNING"
+        self.interrupted_signal: str | None = None
+
+    def mark_current(self, *, name: str, command: list[str]) -> None:
+        self.current_check = {"name": name, "command": [sys.executable, *command], "started_at": _utc_now()}
+        self.write(status="RUNNING")
+
+    def add_result(self, result: CheckResult) -> None:
+        self.results.append(result)
+        self.current_check = None
+        self.write(status="RUNNING")
+
+    def interrupt(self, *, signum: int) -> None:
+        self.interrupted_signal = signal.Signals(signum).name
+        self.write(status="INTERRUPTED")
+
+    def write(self, *, status: str) -> None:
+        self.final_status = status
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": self.run_id,
+            "status": status,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": None if status == "RUNNING" else _utc_now(),
+            "duration_seconds": round(time.perf_counter() - START_MONOTONIC, 3),
+            "args": self.args,
+            "interrupted_signal": self.interrupted_signal,
+            "current_check": self.current_check,
+            "checks": self.checks,
+            "results": [_result_payload(result) for result in self.results],
+            "summary": _summary_payload(self.results, status=status),
+        }
+        self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+START_MONOTONIC = time.perf_counter()
+
+
 def main() -> int:
+    global RECORDER
     parser = argparse.ArgumentParser(description="Run AI Novel System v2 local regression checks.")
     parser.add_argument("--skip-smoke", action="store_true", help="skip the broad smoke test")
     parser.add_argument("--strict-quality", action="store_true", help="fail when quality regression returns attention")
@@ -40,9 +95,12 @@ def main() -> int:
             ("migration", ["scripts/migration_regression_test.py"]),
             ("readiness", ["scripts/readiness_regression_test.py"]),
             ("author_command_center", ["scripts/author_command_center_regression.py"]),
+            ("author_command_center_failed_sample", ["scripts/author_command_center_failed_sample_regression.py"]),
+            ("author_runner_cycle", ["scripts/author_runner_cycle_regression.py"]),
             ("skeleton_repair_dashboard", ["scripts/skeleton_repair_dashboard_regression.py"]),
             ("production_scaffold", ["scripts/production_scaffold_regression.py"]),
             ("production_gate", ["scripts/production_gate_regression.py"]),
+            ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
             ("database_restore", ["scripts/database_restore_regression_test.py"]),
             ("one_button_production", ["scripts/one_button_production_regression.py"]),
@@ -55,20 +113,40 @@ def main() -> int:
             ("story_dna_workflow", ["scripts/story_dna_workflow_regression.py"]),
             ("story_dna_isolation", ["scripts/story_dna_isolation_regression.py"]),
             ("preflight_brief_repair", ["scripts/preflight_brief_repair_regression.py"]),
+            ("pre_draft_inputs", ["scripts/pre_draft_inputs_regression.py"]),
             ("production_router", ["scripts/production_router_regression.py"]),
+            ("production_orchestrator", ["scripts/production_orchestrator_regression.py"]),
+            ("production_kernel", ["scripts/production_kernel_regression.py"]),
+            ("chapter_production_state", ["scripts/chapter_production_state_regression.py"]),
+            ("book2_production_kernel", ["scripts/book2_production_kernel_regression.py"]),
+            ("production_optimization", ["scripts/production_optimization_regression.py"]),
+            ("production_blueprint", ["scripts/production_blueprint_regression.py"]),
+            ("revision_contract_manager", ["scripts/revision_contract_manager_regression.py"]),
+            ("production_strategy", ["scripts/production_strategy_regression.py"]),
+            ("production_state_matrix", ["scripts/production_state_matrix_regression.py"]),
+            ("production_transition_matrix", ["scripts/production_transition_matrix_regression.py"]),
+            ("self_repair", ["scripts/self_repair_regression.py"]),
             ("production_decision", ["scripts/production_decision_regression.py"]),
+            ("production_action_consistency", ["scripts/production_action_consistency_regression.py"]),
+            ("agent_plan_utilization", ["scripts/agent_plan_utilization_regression.py"]),
+            ("rebuild_candidates", ["scripts/rebuild_candidates_regression.py"]),
+            ("reading_assessment_rebind", ["scripts/reading_assessment_rebind_regression.py"]),
             ("reading_assessment_state", ["scripts/reading_assessment_state_regression.py"]),
             ("dashboard_current_chapter_guard", ["scripts/dashboard_current_chapter_guard_regression.py"]),
             ("dashboard_generation_status", ["scripts/dashboard_generation_status_regression.py"]),
+            ("dashboard_real_click_path", ["scripts/dashboard_real_click_path_regression.py"]),
             ("dashboard_quality_verdict", ["scripts/dashboard_quality_verdict_regression.py"]),
             ("context_contamination", ["scripts/context_contamination_regression.py"]),
             ("context_generic_power", ["scripts/context_generic_power_regression.py"]),
             ("skeleton_context_reset", ["scripts/skeleton_context_reset_regression.py"]),
             ("skeleton_global_sync", ["scripts/skeleton_global_sync_regression.py"]),
+            ("legacy_trace_cleanup", ["scripts/legacy_trace_cleanup_regression.py"]),
+            ("revision_success_boost", ["scripts/revision_success_boost_regression.py"]),
             ("production_packet_brief_self_heal", ["scripts/production_packet_brief_self_heal_regression.py"]),
             ("brief_write_sanitizer", ["scripts/brief_write_sanitizer_regression.py"]),
             ("system_trash", ["scripts/system_trash_regression.py"]),
             ("revision_intent", ["scripts/revision_intent_regression.py"]),
+            ("revision_clean_rebuild", ["scripts/revision_clean_rebuild_regression.py"]),
             ("revision_comparison", ["scripts/revision_comparison_regression.py"]),
             ("editorial_gate_brief_coverage", ["scripts/editorial_gate_brief_coverage_regression.py"]),
             ("editorial_gate_budget", ["scripts/editorial_gate_budget_regression.py"]),
@@ -77,6 +155,8 @@ def main() -> int:
             ("narrative_logic", ["scripts/narrative_logic_regression.py"]),
             ("scene_expansion", ["scripts/scene_expansion_regression.py"]),
             ("production_llm_json_repair", ["scripts/production_llm_json_repair_regression.py"]),
+            ("chapter_sample_json_repair", ["scripts/chapter_sample_json_repair_regression.py"]),
+            ("sample_adoption_continuity", ["scripts/sample_adoption_continuity_regression.py"]),
             ("chapter_unit", ["scripts/chapter_unit_regression.py"]),
             ("chapter_unit_plan", ["scripts/chapter_unit_plan_regression.py"]),
             ("production_run_review", ["scripts/production_run_review_regression.py"]),
@@ -87,6 +167,12 @@ def main() -> int:
         ]
     )
 
+    RECORDER = RegressionRunRecorder(args=args, checks=checks)
+    _install_signal_handlers()
+    RECORDER.write(status="RUNNING")
+    print(f"regression_run_id={RECORDER.run_id}")
+    print(f"regression_artifact={RECORDER.path.relative_to(ROOT)}")
+
     results: list[CheckResult] = []
     failed = False
     for name, command in checks:
@@ -96,6 +182,7 @@ def main() -> int:
         if name == "sample_diversity":
             result = _classify_json_status_result(result, strict=False, label="sample_diversity")
         results.append(result)
+        RECORDER.add_result(result)
         print(f"{result.status}\t{name}\t{result.elapsed_seconds:.1f}s")
         if result.status == "FAIL":
             failed = True
@@ -111,22 +198,78 @@ def main() -> int:
         print(f"trash_status=applied\tmoved_count={cleanup['moved_count']}\ttrash_dir={cleanup['trash_dir']}")
     elif args.trash_after_pass and failed:
         print("trash_status=skipped_due_to_regression_failure")
-    print("regression_status=" + ("FAIL" if failed else "PASS"))
+    final_status = "FAIL" if failed else "PASS"
+    print("regression_status=" + final_status)
+    RECORDER.write(status=final_status)
     return 1 if failed else 0
 
 
 def _run_check(name: str, command: list[str]) -> CheckResult:
+    global CURRENT_PROCESS
+    if RECORDER:
+        RECORDER.mark_current(name=name, command=command)
     started = time.perf_counter()
-    result = subprocess.run(
+    process = subprocess.Popen(
         [sys.executable, *command],
         cwd=str(ROOT),
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    CURRENT_PROCESS = process
+    stdout, stderr = process.communicate()
+    CURRENT_PROCESS = None
     elapsed = time.perf_counter() - started
-    output = (result.stdout + result.stderr).strip()
-    status = "PASS" if result.returncode == 0 else "FAIL"
+    output = ((stdout or "") + (stderr or "")).strip()
+    status = "PASS" if process.returncode == 0 else "FAIL"
     return CheckResult(name=name, status=status, elapsed_seconds=elapsed, output=output)
+
+
+def _install_signal_handlers() -> None:
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, _handle_interrupt)
+
+
+def _handle_interrupt(signum, _frame) -> None:
+    if RECORDER:
+        RECORDER.interrupt(signum=signum)
+        print(f"regression_status=INTERRUPTED\tsignal={signal.Signals(signum).name}")
+        print(f"regression_artifact={RECORDER.path.relative_to(ROOT)}")
+    if CURRENT_PROCESS and CURRENT_PROCESS.poll() is None:
+        CURRENT_PROCESS.terminate()
+        try:
+            CURRENT_PROCESS.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            CURRENT_PROCESS.kill()
+    raise SystemExit(128 + signum)
+
+
+def _result_payload(result: CheckResult) -> dict:
+    return {
+        "name": result.name,
+        "status": result.status,
+        "elapsed_seconds": round(result.elapsed_seconds, 3),
+        "output": result.output,
+    }
+
+
+def _summary_payload(results: list[CheckResult], *, status: str) -> dict:
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+    failed = [result.name for result in results if result.status == "FAIL"]
+    attention = [result.name for result in results if result.status == "ATTENTION"]
+    return {
+        "status": status,
+        "total_completed": len(results),
+        "counts": dict(sorted(counts.items())),
+        "failed": failed,
+        "attention": attention,
+    }
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _classify_json_status_result(result: CheckResult, *, strict: bool, label: str) -> CheckResult:

@@ -19,7 +19,7 @@ from regression_db import isolated_database
 from scripts.run_local_dashboard import _perform_action, _story_skeleton_payload
 
 
-LEGACY_MARKERS = ("陈默", "大江湖", "修订合同:", "依据质检报告", "原始人工意见", "修复质检问题")
+LEGACY_MARKERS = ("陈默", "大江湖", "修订合同:", "依据质检报告", "原始机器修订建议", "修复质检问题")
 
 
 def main() -> int:
@@ -76,7 +76,7 @@ def main() -> int:
             return 1
 
         action = run_next_action(session, book_id=book.id, chapter_number=1, dry_run=True)
-        if action.action not in {"create_chapter_brief", "draft_chapter"}:
+        if action.action not in {"create_chapter_brief", "draft_chapter", "generate_chapter_samples"}:
             print("unexpected first action")
             print(action)
             return 1
@@ -109,7 +109,7 @@ def main() -> int:
             ChapterBrief(
                 chapter_id=chapter2.id,
                 goal="第2章：写陈默确认《大江湖》不是机械游戏。",
-                required_beats="修订合同:\n- 修复质检问题：visual_underdeveloped\n- 原始人工意见：不要改结构",
+                required_beats="修订合同:\n- 修复质检问题：visual_underdeveloped\n- 原始机器修订建议：不要改结构",
                 constraints="依据质检报告补足动作。",
                 status="revision_ready",
             )

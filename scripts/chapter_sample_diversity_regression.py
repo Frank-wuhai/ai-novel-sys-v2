@@ -4,7 +4,7 @@ import argparse
 import json
 from datetime import datetime
 
-from app.models.entities import Book, Chapter, ChapterBrief, GenerationTask
+from app.models.entities import Book, Chapter, ChapterBrief, GenerationTask, PlatformFeedback, StoryArc, StoryFoundation
 from app.services.chapter_samples import TASK_TYPE_CHAPTER_SAMPLE
 from app.services.chapter_samples import _sample_diversity_report
 from app.db.session import session_scope
@@ -92,6 +92,7 @@ def _seed_sample_fixture(session) -> tuple[int, int]:
     book = Book(title=f"sample-diversity-regression-{datetime.utcnow().timestamp()}", genre="真实武侠", target_platform="manual")
     session.add(book)
     session.flush()
+    _approve_skeleton(session, book_id=book.id)
     chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
     session.add(chapter)
     samples = [
@@ -109,6 +110,32 @@ def _seed_sample_fixture(session) -> tuple[int, int]:
     session.add(task)
     session.flush()
     return book.id, chapter.chapter_number
+
+
+def _approve_skeleton(session, *, book_id: int) -> None:
+    values = {
+        "premise": "陈默进入真实江湖",
+        "reader_promise": "每章有现场压力和章末钩子",
+        "world_engine": "江湖规则有代价",
+        "protagonist_engine": "主角靠观察推进",
+        "conflict_engine": "旧案持续升级",
+        "arc_goal": "前五章建立主线压力",
+        "arc_climax": "旧案证据出现",
+        "arc_turn": "同伴身份反转",
+    }
+    session.add(
+        StoryFoundation(
+            book_id=book_id,
+            premise=values["premise"],
+            reader_promise=values["reader_promise"],
+            world_engine=values["world_engine"],
+            protagonist_engine=values["protagonist_engine"],
+            conflict_engine=values["conflict_engine"],
+        )
+    )
+    session.add(StoryArc(book_id=book_id, arc_number=1, start_chapter=1, end_chapter=5, goal=values["arc_goal"], climax=values["arc_climax"], turn=values["arc_turn"]))
+    for key, value in values.items():
+        session.add(PlatformFeedback(book_id=book_id, platform="system", metric_name="skeleton_approval", metric_value=key, raw_text=value))
 
 
 def _sample_fixture(index: int, title: str, axis: str, opening_seed: str) -> dict:

@@ -24,6 +24,8 @@ BAD_TEXT = """
 
 def main() -> int:
     good = evaluate_chapter_units(GOOD_TEXT, target_min=80, target_max=220).to_dict()
+    single_newline_text = GOOD_TEXT.replace("。", "。\n").replace("\n\n", "\n")
+    single_newline_good = evaluate_chapter_units(single_newline_text, target_min=80, target_max=220).to_dict()
     bad = evaluate_chapter_units(BAD_TEXT, target_min=80, target_max=220).to_dict()
     repaired, repair_meta = repair_humanized_unit_flow(
         _FakeRepairProvider(),
@@ -53,6 +55,10 @@ def main() -> int:
         failures.append("good_unit_count_low")
     if int(good.get("score") or 0) < 70:
         failures.append(f"good_score_low:{good.get('score')}")
+    if int(single_newline_good.get("unit_count") or 0) < 3:
+        failures.append(f"single_newline_unit_count_low:{single_newline_good.get('unit_count')}")
+    if int(single_newline_good.get("score") or 0) < 70:
+        failures.append(f"single_newline_score_low:{single_newline_good.get('score')}")
     if not bad.get("repair_contract"):
         failures.append("bad_missing_repair_contract")
     if int(bad.get("score") or 0) >= 70:
@@ -69,6 +75,10 @@ def main() -> int:
         "status": "fail" if failures else "pass",
         "failures": failures,
         "good": {"score": good.get("score"), "unit_count": good.get("unit_count")},
+        "single_newline_good": {
+            "score": single_newline_good.get("score"),
+            "unit_count": single_newline_good.get("unit_count"),
+        },
         "bad": {
             "score": bad.get("score"),
             "unit_count": bad.get("unit_count"),
@@ -141,9 +151,10 @@ class _FakeLocalRepairProvider:
         response_format: dict | None = None,
         model: str | None = None,
     ) -> LLMResponse:
+        repaired_unit = GOOD_TEXT.replace("林照", "林照这次").replace("破伞", "油纸伞").replace("腰牌", "木牌")
         text = json.dumps(
             {
-                "content_unit": GOOD_TEXT,
+                "content_unit": repaired_unit,
                 "unit_note": "补清目标、阻碍、动作后果和承接",
             },
             ensure_ascii=False,

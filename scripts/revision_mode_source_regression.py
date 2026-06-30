@@ -50,6 +50,24 @@ def main() -> int:
     )
     if _revision_requires_rewrite(targeted_brief):
         failures.append("targeted_rewrite_word_triggers_rewrite")
+    targeted_with_stale_local = ChapterBrief(
+        chapter_id=1,
+        goal="定点修订第2章",
+        required_beats="修订模式:targeted；按当前修订方向处理",
+        constraints="历史合同残留：revision_mode:local_patch；不要整章重写。",
+        status="revision_ready",
+    )
+    if _revision_is_local_patch(targeted_with_stale_local):
+        failures.append("stale_local_patch_overrides_primary_targeted")
+    conflicting_brief = ChapterBrief(
+        chapter_id=1,
+        goal="阅读评估重建第2章：旧稿只保留素材。",
+        required_beats="reading_assessment_auto_quality#1\n失败结构不得沿用。",
+        constraints="revision_mode:targeted\nreading_assessment_contract: 自动评估\nrevision_mode:rewrite",
+        status="revision_ready",
+    )
+    if not _revision_requires_rewrite(conflicting_brief):
+        failures.append("conflicting_revision_mode_did_not_escalate_to_rewrite")
     if normalize_revision_mode("unknown-mode") != "targeted":
         failures.append("unknown_revision_mode_not_targeted")
     if "必要时重写开头、重排场景" in REVISE_CHAPTER_TEMPLATE_V3:

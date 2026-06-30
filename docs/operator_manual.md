@@ -178,6 +178,17 @@ Development follows the DNA spiral rule in [`docs/dna_spiral_development.md`](do
 - Confirmed publish execution writes `publish_executions` and moves a queued job to `published` or `failed`.
 - Publishing target config is stored in `publishing_targets` and copied into `publish_jobs.automation_payload` when a job is created.
 
+## Production Decision Boundary
+
+Chapter production uses a decision convergence layer before any draft, revision, recovery, continuity, or publish action is executed.
+
+- `app.services.production_orchestrator` owns the single next-route decision for a chapter.
+- `planning.py` gathers facts, applies safe state repairs, and translates the route into the existing frontend/backend action.
+- Reading assessment, sample adoption, revision budget recovery, continuity, quality gates, and publish preparation are capability modules. They provide evidence or execute a chosen action; they must not silently replace the global route.
+- Protected inputs must survive route changes: adopted chapter samples, previous-chapter continuity, active revision briefs, and approved/passed versions.
+- Budget recovery may rebuild a brief, but it must inherit protected inputs such as the adopted sample direction and previous-chapter consequences.
+- Frontend copy should describe the unified route, not a vague state. For example: "按已采用小样和上一章后果继续修订" is preferred over a generic "待修订" when those protected inputs are active.
+
 ## Workflow Gates
 
 Chapter version status transitions:
@@ -787,6 +798,7 @@ Recommended search budget split:
 Agent Plan intelligence commands:
 
 ```bash
+python -m app.cli agent-plan-utilization --book-id 1
 python -m app.cli agent-plan-cycle --book-id 1 --chapter-number 1
 
 python -m app.cli create-market-research-pack --genre "玄幻都市" --platform "番茄小说" --query "2026 番茄小说 玄幻都市 爆款 趋势"
@@ -804,9 +816,11 @@ python -m app.cli list-visual-assets --book-id 1
 
 `agent-plan-cycle` is the recommended spiral loop for each production pass. It creates a market research pack, rebuilds semantic memory, creates Canon-bound visual prompt artifacts, and returns a compact status report. By default it uses local deterministic embeddings to avoid surprise model spend; add `--live-embedding` when you want to call the Agent Plan embedding model.
 
+`agent-plan-utilization` audits whether Agent Plan is actually being used across the full novel-production stack: configuration, model routing, market evidence, semantic memory, quality/failure lesson memory, and visual assets. Run it before production trials and after major workflow changes. A high utilization score is not a publish gate; it tells you whether Agent Plan is strengthening the system instead of merely being configured.
+
 `create-market-research-pack` writes a search task package for Agent Plan web search Harness/MCP. Import the returned JSON with `ingest-market-research-results`; the system stores every source as Evidence and every conclusion as a Market Signal so normal evidence auditing still applies.
 
-`index-book-knowledge` builds a semantic memory layer over Story Bible, Canon, chapters, and feedback. Use `--dry-run` for local deterministic vectors; omit it after `ARK_AGENT_PLAN_API_KEY` is configured to call the Agent Plan embedding model. `production-readiness` reports semantic memory as an Agent Plan enhancement and warns when the index is empty or older than the latest chapter version; `semantic-memory-status` prints the same status directly.
+`index-book-knowledge` builds a semantic memory layer over Story Bible, Canon, chapters, feedback, quality lessons, and production reviews. Use `--dry-run` for local deterministic vectors; omit it after `ARK_AGENT_PLAN_API_KEY` is configured to call the Agent Plan embedding model. `production-readiness` reports semantic memory as an Agent Plan enhancement and warns when the index is empty or older than the latest chapter version; `semantic-memory-status` prints the same status directly.
 
 `create-visual-asset` creates a Canon-bound visual prompt artifact for covers or chapter illustrations. The asset is recorded in `visual_assets` and can be passed to Agent Plan image/video generation tools without letting visual generation change story canon.
 

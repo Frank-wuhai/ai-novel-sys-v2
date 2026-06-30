@@ -12,6 +12,7 @@ This directory is the project memory for development decisions, session outputs,
 | [`humanized_production.md`](humanized_production.md) | Writing workflow model: how a human author/editor process maps into system production. | Active production spec |
 | [`root_cause_alignment.md`](root_cause_alignment.md) | Diagnosis method for story direction drift, stale context, and model-default bias. | Active troubleshooting spec |
 | [`current_development_status.md`](current_development_status.md) | Summary of active documents mapped to current system maturity and next DNA spiral. | Active status |
+| [`agent_operator_layer.md`](agent_operator_layer.md) | Safe OpenClaw/Hermes operating layer and whitelisted command wrapper. | Active operations rule |
 | [`development_archive.md`](development_archive.md) | Consolidated archive of session-era development decisions and how they relate to current architecture. | Living archive |
 
 ## How To Add Old Session Documents

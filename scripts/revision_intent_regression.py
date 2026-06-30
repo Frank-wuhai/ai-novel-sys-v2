@@ -96,20 +96,20 @@ def main() -> int:
         feedback_decision = extract_revision_decision(adjustment.adjustment_text)
         if feedback_decision.get("处理强度") != REVISION_MODE_TARGETED:
             failures.append("feedback_adjustment_not_auto_targeted")
-        if "原始意见:" not in adjustment.adjustment_text:
-            failures.append("feedback_adjustment_missing_original_intent")
+        if "修订方向:" not in adjustment.adjustment_text:
+            failures.append("feedback_adjustment_missing_machine_suggestion")
 
-        _feedback, manual_adjustment, brief, version = submit_revision_suggestion(
+        _feedback, editorial_adjustment, brief, version = submit_revision_suggestion(
             session,
             book_id=book.id,
             chapter_number=1,
             suggestion_text="主角还是太被动，章末钩子不够明确。",
-            platform="manual",
+            platform="editorial_revision",
         )
-        manual_decision = extract_revision_decision(manual_adjustment.adjustment_text)
-        if manual_decision.get("处理强度") != REVISION_MODE_TARGETED:
-            failures.append("manual_suggestion_not_auto_targeted")
-        if "修订模式:targeted" not in brief.constraints:
+        editorial_decision = extract_revision_decision(editorial_adjustment.adjustment_text)
+        if editorial_decision.get("处理强度") != REVISION_MODE_TARGETED:
+            failures.append("editorial_suggestion_not_auto_targeted")
+        if "revision_mode:targeted" not in brief.constraints:
             failures.append("revision_brief_missing_auto_mode")
         if version and version.status != "needs_revision":
             failures.append("latest_version_not_reopened")
@@ -153,7 +153,7 @@ def main() -> int:
             book_id=readable_book.id,
             chapter_number=1,
             suggestion_text="开头还不够吸引人，增强进入游戏后的第一处具体奇遇。",
-            platform="manual_approval",
+            platform="editorial_revision",
             revision_mode="targeted",
         )
         planned = plan_chapters(session, book_id=readable_book.id, start=1, count=1)[0]

@@ -85,7 +85,7 @@ def main() -> int:
         from app.services.planning import run_next_action
 
         preview = run_next_action(session, book_id=book.id, chapter_number=1, preview_only=True)
-        if preview.status != "preview" or preview.action not in {"draft_chapter", "create_chapter_brief"}:
+        if preview.status != "preview" or preview.action not in {"draft_chapter", "create_chapter_brief", "generate_chapter_samples"}:
             print("preview_only should report next action without executing")
             print(preview)
             return 1
@@ -96,6 +96,18 @@ def main() -> int:
             return 1
 
         chapter2 = session.query(Chapter).filter_by(book_id=book.id, chapter_number=2).first()
+        chapter1 = session.query(Chapter).filter_by(book_id=book.id, chapter_number=1).first()
+        if chapter1:
+            stable1 = ChapterVersion(
+                chapter_id=chapter1.id,
+                version_number=1,
+                title="第一章",
+                content="第一章稳定正文。" * 600,
+                status="reviewed_pass",
+                source="regression:stable_previous",
+            )
+            session.add(stable1)
+            session.flush()
         if not chapter2:
             chapter2 = Chapter(book_id=book.id, chapter_number=2, title="第二章", status="planned")
             session.add(chapter2)
@@ -104,7 +116,7 @@ def main() -> int:
             ChapterBrief(
                 chapter_id=chapter2.id,
                 goal="第2章：写陈默确认《大江湖》不是机械游戏。",
-                required_beats="修订合同:\n- 修复质检问题：visual_underdeveloped\n- 原始人工意见：不要改结构",
+                required_beats="修订合同:\n- 修复质检问题：visual_underdeveloped\n- 原始机器修订建议：不要改结构",
                 constraints="依据质检报告补足动作。",
                 status="revision_ready",
             )
@@ -118,7 +130,7 @@ def main() -> int:
             return 1
         latest = session.query(ChapterBrief).filter_by(chapter_id=chapter2.id).order_by(ChapterBrief.id.desc()).first()
         text = "\n".join([latest.goal, latest.required_beats, latest.constraints])
-        if any(marker in text for marker in ("陈默", "大江湖", "修订合同:", "依据质检报告", "原始人工意见")):
+        if any(marker in text for marker in ("陈默", "大江湖", "修订合同:", "依据质检报告", "原始机器修订建议")):
             print("repaired brief retained legacy text")
             print(text)
             return 1

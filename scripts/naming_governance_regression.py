@@ -99,6 +99,13 @@ def main() -> int:
         if ordinary.new_terms:
             failures.append("ordinary_terms_misread_as_names:" + ",".join(ordinary.new_terms[:6]))
 
+        dialogue_text = "原来是镇远镖局的兄弟。就当你是黑风寨的探子。你就是黑风寨留下的人？而且镖局里都认这块牌。咱们镖局的印在纸上。"
+        dialogue = evaluate_naming_governance(dialogue_text, allowed_terms=allowed)
+        if any(term.startswith(("原来是", "就当你是", "你就是", "咱们", "而且")) for term in dialogue.new_terms):
+            failures.append("dialogue_context_fragment_misread:" + ",".join(dialogue.new_terms[:8]))
+        if "镇远镖局" not in dialogue.new_terms or "黑风寨" not in dialogue.new_terms:
+            failures.append("dialogue_real_names_not_preserved:" + ",".join(dialogue.new_terms[:8]))
+
         for item in session.scalars(select(PowerSystem).where(PowerSystem.book_id == book.id)):
             session.delete(item)
         for item in session.scalars(select(WorldRule).where(WorldRule.book_id == book.id)):

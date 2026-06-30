@@ -374,9 +374,9 @@ def _loads_json(value: str) -> dict:
 def _next_action(*, notes: list[str], version_status: str, quality_passed: bool | None) -> tuple[str, str]:
     if not notes:
         if version_status == "reviewed_pass":
-            return "human_approve", "质检已过，下一步交给作者阅读并审批。"
+            return "human_approve", "质检已过，下一步进入采用确认。"
         if version_status == "approved":
-            return "ready", "章节已通过并审批，无需处理。"
+            return "ready", "章节已通过并采用确认，无需处理。"
         return "inspect_status", "没有质量问题，但版本状态不在预期范围，建议检查状态机。"
     if "missing_quality" in notes:
         return "review_chapter", "缺少质量报告，先运行 review-chapter 生成门禁结果。"
@@ -410,9 +410,9 @@ def _next_action(*, notes: list[str], version_status: str, quality_passed: bool 
         return "revise_chapter", "内容未达样本期望，建议按失败项定点修订；若方向偏离明显则整章重写。"
     if any(note.startswith("not_ready") for note in notes):
         if quality_passed:
-            return "review_chapter_or_status_sync", "质量已过但版本状态未同步，复跑 review-chapter 或检查是否需要人工审批。"
+            return "review_chapter_or_status_sync", "质量已过但版本状态未同步，复跑 review-chapter 或检查是否需要采用确认。"
         return "revise_chapter", "版本仍处于待修订状态，继续修订后复检。"
-    return "inspect_manually", "存在未分类异常，建议人工查看章节版本、brief 和质量报告。"
+    return "inspect_manually", "存在未分类异常，建议流程官排查章节版本、brief 和质量报告。"
 
 
 if __name__ == "__main__":
