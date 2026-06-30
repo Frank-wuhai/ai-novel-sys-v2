@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.services.execution_mode import ExecutionMode, execution_mode_from_flags
 from app.services.planning import ChapterPlanItem, RunNextActionResult, plan_chapters, run_next_action
 from app.services.production_decision import ProductionDecision, decide_chapter_production
 
@@ -12,7 +13,7 @@ HEAVY_GENERATION_ACTIONS = {
     "draft_chapter",
     "revise_chapter",
     "enqueue_draft_chapter",
-    "enqueue_revise_chapter",
+    "generate_rebuild_candidates",
 }
 
 MANUAL_CONFIRMATION_ACTIONS = {"approve_chapter", "mark_publish_job"}
@@ -77,7 +78,8 @@ class ProductionKernel:
         )[0]
         return KernelPlan(item=item, decision=decide_chapter_production(item))
 
-    def step(self, *, dry_run: bool = False, preview_only: bool = False) -> KernelStepResult:
+    def step(self, *, dry_run: bool = False, preview_only: bool = False, mode: ExecutionMode | str | None = None) -> KernelStepResult:
+        execution_mode = execution_mode_from_flags(dry_run=dry_run, preview_only=preview_only, mode=mode)
         plan = self.plan(apply_state_repairs=True)
         item = plan.item
         decision = plan.decision
@@ -103,17 +105,15 @@ class ProductionKernel:
                 message=decision.next_step or item.reason,
                 object_id=item.latest_version_id or item.brief_id,
             )
-        effective_preview_only = preview_only or dry_run
         result = run_next_action(
             self.session,
             book_id=self.book_id,
             chapter_number=self.chapter_number,
-            dry_run=dry_run,
-            queue_generation=(not dry_run and action in HEAVY_GENERATION_ACTIONS),
+            mode=execution_mode,
+            queue_generation=(execution_mode.queues_heavy_generation and action in HEAVY_GENERATION_ACTIONS),
             platform=self.platform,
-            preview_only=effective_preview_only,
         )
-        if result.action in {"enqueue_draft_chapter", "enqueue_revise_chapter"} and result.status == "executed":
+        if result.status == "queued" or (result.action in {"enqueue_draft_chapter", "enqueue_revise_chapter"} and result.status == "executed"):
             return KernelStepResult(
                 action=result.action,
                 status="queued",
@@ -131,12 +131,14 @@ class ProductionKernel:
         self,
         *,
         dry_run: bool = False,
+        mode: ExecutionMode | str | None = None,
         max_steps: int = 30,
         on_progress=None,
     ) -> KernelRunResult:
+        execution_mode = execution_mode_from_flags(dry_run=dry_run, mode=mode)
         executed: list[dict] = []
         for _ in range(max(1, min(80, int(max_steps or 30)))):
-            result = self.step(dry_run=dry_run)
+            result = self.step(mode=execution_mode)
             event = result.to_author_event()
             executed.append(event)
             if on_progress:

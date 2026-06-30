@@ -13,6 +13,7 @@ from app.services.chapter_standards import ensure_chapter_production_standard
 from app.services.brief_sanitizer import sanitize_existing_chapter_brief
 from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
 from app.services.context_contamination import audit_context_contamination, context_anchor_lines
+from app.services.execution_mode import ExecutionMode, execution_mode_from_flags
 from app.services.feedback import format_chapter_sample_adoption_context, submit_revision_suggestion
 from app.services.llm_queue import QUEUE_DRAFT, QUEUE_REBUILD_CANDIDATES, QUEUE_REVISE, enqueue_draft_chapter, enqueue_rebuild_candidates, enqueue_revise_chapter
 from app.services.legacy_trace_cleanup import cleanup_active_production_traces
@@ -230,15 +231,17 @@ def run_next_action(
     dry_run: bool = True,
     queue_generation: bool = False,
     preview_only: bool = False,
+    mode: ExecutionMode | str | None = None,
 ) -> RunNextActionResult:
+    execution_mode = execution_mode_from_flags(dry_run=dry_run, preview_only=preview_only, mode=mode)
+    dry_llm = execution_mode.uses_dry_llm
+    queue_heavy_generation = queue_generation or execution_mode.queues_heavy_generation
     item = _plan_one(session, book_id=book_id, chapter_number=chapter_number)
     action = item.next_action
     gate_message = _production_gate_blocker(session, book_id=book_id, action=action)
     if gate_message:
         return RunNextActionResult(chapter_number, action, "blocked", gate_message, None)
-    if preview_only:
-        return RunNextActionResult(chapter_number, action, "preview", item.reason, item.latest_version_id or item.brief_id or item.publish_job_id)
-    if dry_run:
+    if execution_mode.is_preview:
         return RunNextActionResult(chapter_number, action, "preview", item.reason, item.latest_version_id or item.brief_id or item.publish_job_id)
     if action == "create_chapter_brief":
         fields = _chapter_brief_fields(
@@ -259,10 +262,10 @@ def run_next_action(
         )
         return RunNextActionResult(chapter_number, action, "executed", "created chapter brief", brief.id)
     if action == "draft_chapter":
-        if queue_generation:
-            task = enqueue_draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+        if queue_heavy_generation:
+            task = enqueue_draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm)
             return RunNextActionResult(chapter_number, "enqueue_draft_chapter", "executed", "queued draft generation task", task.id)
-        version = draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+        version = draft_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm)
         return RunNextActionResult(chapter_number, action, "executed", "created draft version", version.id)
     if action == "generate_chapter_samples":
         task = generate_chapter_samples(
@@ -270,7 +273,7 @@ def run_next_action(
             book_id=book_id,
             chapter_number=chapter_number,
             sample_count=3,
-            dry_run=dry_run,
+            dry_run=dry_llm,
         )
         return RunNextActionResult(chapter_number, action, "executed", "generated chapter samples for pre-draft direction", task.id)
     if action == "adopt_recommended_chapter_sample":
@@ -312,7 +315,7 @@ def run_next_action(
         brief = create_revision_brief(session, book_id=book_id, chapter_number=chapter_number)
         return RunNextActionResult(chapter_number, action, "executed", "created revision brief", brief.id)
     if action == "revise_chapter":
-        if not dry_run:
+        if not dry_llm:
             chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
             latest_version = _latest_version(session, chapter_id=chapter.id) if chapter else None
             revision_brief = _latest_revision_brief(session, chapter_id=chapter.id) if chapter else None
@@ -340,8 +343,8 @@ def run_next_action(
                     )
         guard_brief = _maybe_apply_revision_loop_guard(session, book_id=book_id, chapter_number=chapter_number)
         boost = apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
-        if queue_generation:
-            task = enqueue_revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run)
+        if queue_heavy_generation:
+            task = enqueue_revise_chapter(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm)
             message = "queued revision generation task"
             if guard_brief:
                 message = f"revision safety guard applied; queued light revision task with brief {guard_brief.id}"
@@ -352,7 +355,7 @@ def run_next_action(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
-            dry_run=dry_run,
+            dry_run=dry_llm,
         )
         message = "created revised draft version"
         if guard_brief:
@@ -420,15 +423,15 @@ def run_next_action(
             brief.id,
         )
     if action == "generate_rebuild_candidates":
-        if queue_generation:
-            task = enqueue_rebuild_candidates(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_run, candidate_count=3)
+        if queue_heavy_generation:
+            task = enqueue_rebuild_candidates(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm, candidate_count=3)
             return RunNextActionResult(chapter_number, action, "queued", "queued rebuild candidate generation task", task.id)
         result = generate_rebuild_candidates(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
             candidate_count=3,
-            dry_run=dry_run,
+            dry_run=dry_llm,
         )
         return RunNextActionResult(
             chapter_number,
@@ -530,7 +533,7 @@ def run_book_cycle(
             required_beats=required_beats,
             constraints=constraints,
             platform=platform,
-            dry_run=dry_run,
+            mode=execution_mode,
             queue_generation=queue_generation,
         )
         if result.status != "executed":

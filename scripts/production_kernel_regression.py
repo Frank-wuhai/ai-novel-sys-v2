@@ -60,7 +60,7 @@ def main() -> int:
         def fake_run_next_action(*args, **kwargs):
             calls.append(dict(kwargs))
             action = kernel.plan_chapters(*args, **kwargs)[0].next_action
-            if kwargs.get("dry_run"):
+            if kwargs.get("mode") == "preview":
                 return RunNextActionResult(1, action, "preview", "preview only", 10)
             if action == "revise_chapter":
                 return RunNextActionResult(1, "enqueue_revise_chapter", "executed", "queued revision generation task", 77)
@@ -106,9 +106,10 @@ def main() -> int:
             failures.append(f"dry_run_step_should_preview:{result}")
         if (
             not calls
-            or calls[-1].get("dry_run") is not True
+            or calls[-1].get("mode") != "preview"
             or calls[-1].get("queue_generation") is not False
-            or calls[-1].get("preview_only") is not True
+            or "dry_run" in calls[-1]
+            or "preview_only" in calls[-1]
         ):
             failures.append(f"dry_run_step_not_preview_only:{calls}")
 
