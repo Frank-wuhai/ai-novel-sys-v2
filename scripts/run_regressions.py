@@ -103,6 +103,7 @@ def main() -> int:
             ("production_control_summary_wording", ["scripts/production_control_summary_wording_regression.py"]),
             ("revision_early_stop", ["scripts/revision_early_stop_regression.py"]),
             ("early_stop_orchestrator", ["scripts/early_stop_orchestrator_regression.py"]),
+            ("local_patch_default", ["scripts/local_patch_default_regression.py"]),
             ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("production_invariants", ["scripts/production_invariants_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),

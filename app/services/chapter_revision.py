@@ -203,6 +203,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         revision_brief=revision_brief,
         canon_context=packet.context.canon_context,
         dry_run=dry_run,
+        rewrite_mode=rewrite_mode,
     )
     if local_patch_version:
         return local_patch_version
@@ -767,9 +768,22 @@ def _try_local_patch_revision(
     revision_brief: ChapterBrief,
     canon_context: str,
     dry_run: bool,
+    rewrite_mode: bool = False,
 ) -> ChapterVersion | None:
-    if not _revision_is_local_patch(revision_brief):
+    # Phase 2/2: local_patch is now the *default* revise path. We only fall
+    # through to the full rewrite branch when:
+    #   * the brief explicitly asked for fresh/rewrite via ``修订模式:fresh``,
+    #     or
+    #   * the brief carries a rewrite marker (_revision_requires_rewrite),
+    #     both of which are captured by the caller in ``rewrite_mode``.
+    # Callers pass ``rewrite_mode=True`` to force the classic full-rewrite
+    # path; otherwise local_patch is attempted first. If the local patcher
+    # produces nothing meaningful (no drift hits + LLM produced identical
+    # content) it returns None and the caller falls back to a full rewrite.
+    if rewrite_mode:
         return None
+    # Legacy: if the brief explicitly opts into local_patch, that still wins.
+    # Otherwise, the default is local_patch anyway.
     bias = evaluate_generation_bias(
         content=source_version.content or "",
         goal=revision_brief.goal or "",
