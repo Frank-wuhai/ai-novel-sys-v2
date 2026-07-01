@@ -953,8 +953,17 @@ def _plan_one(
     if revision_brief is not None:
         from app.services.production_state import collect_version_scores
         from app.services.revision_early_stop import evaluate_early_stop
+        from app.services.revision_manual_override import find_active_override_baseline
 
         version_scores = collect_version_scores(session, chapter.id)
+        # Phase 2/7: if the operator manually reopened the loop, prune the
+        # history so only versions AFTER the override baseline are visible
+        # to the early-stop engine. That naturally re-arms the
+        # min_versions_before_stop warm-up (5 fresh versions required
+        # before another accept_early_stop can fire).
+        override_baseline = find_active_override_baseline(session, chapter_id=chapter.id)
+        if override_baseline is not None:
+            version_scores = [vs for vs in version_scores if vs.version_number > override_baseline]
         if version_scores:
             decision = evaluate_early_stop(version_scores)
             early_stop_should_stop = decision.should_stop
