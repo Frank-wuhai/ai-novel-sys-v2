@@ -109,6 +109,7 @@ from app.services.planning import (
     run_next_action,
 )
 from app.services.production_kernel import ProductionKernel
+from app.services.production_sandbox import production_sandbox_run
 from app.services.evidence import (
     add_evidence_source,
     add_market_signal,
@@ -385,6 +386,13 @@ def main() -> None:
 
     p = sub.add_parser("publish-preflight")
     p.add_argument("--version-id", type=int, required=True)
+
+    p = sub.add_parser("production-sandbox-run")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--start-chapter", type=int, required=True)
+    p.add_argument("--end-chapter", type=int, required=True)
+    p.add_argument("--from-live", action="store_true")
+    p.add_argument("--max-steps-per-chapter", type=int, default=10)
 
     p = sub.add_parser("project-dashboard")
     p.add_argument("--book-id", type=int, required=True)
@@ -1199,6 +1207,15 @@ def main() -> None:
                 print(json.dumps(build_model_strategy(), ensure_ascii=False, indent=2, sort_keys=True))
             elif args.cmd == "publish-preflight":
                 print(json.dumps(build_publish_preflight(session, version_id=args.version_id), ensure_ascii=False, indent=2, sort_keys=True))
+            elif args.cmd == "production-sandbox-run":
+                result = production_sandbox_run(
+                    book_id=args.book_id,
+                    start_chapter=args.start_chapter,
+                    end_chapter=args.end_chapter,
+                    from_live=args.from_live,
+                    max_steps_per_chapter=args.max_steps_per_chapter,
+                )
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
             elif args.cmd == "project-dashboard":
                 report = build_project_dashboard(
                     session,

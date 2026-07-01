@@ -118,6 +118,7 @@ def main() -> int:
             ("production_router", ["scripts/production_router_regression.py"]),
             ("production_orchestrator", ["scripts/production_orchestrator_regression.py"]),
             ("production_kernel", ["scripts/production_kernel_regression.py"]),
+            ("production_sandbox", ["scripts/production_sandbox_regression.py"]),
             ("chapter_production_state", ["scripts/chapter_production_state_regression.py"]),
             ("book2_production_kernel", ["scripts/book2_production_kernel_regression.py"]),
             ("production_optimization", ["scripts/production_optimization_regression.py"]),
