@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import signal
 import sys
 import threading
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -38,6 +40,7 @@ from app.db.session import session_scope
 from app.models.entities import GenerationTask
 from app.services.llm_queue import (
     QUEUE_TYPES,
+    claim_next_pending_task,
     recover_stale_generation_tasks,
     run_generation_queue_task,
 )
@@ -88,37 +91,47 @@ class ShutdownFlag:
         self._event.wait(timeout=seconds)
 
 
-def _claim_next_pending_task(claimed_ids: set[int]) -> Optional[int]:
-    """Atomically pick the next pending task and mark it 'claiming' in this daemon.
+def _claim_next_pending_task(
+    claimed_ids: set[int], *, worker_id: str, lease_seconds: int
+) -> Optional[int]:
+    """Atomically pick the next pending task via DB-level UPDATE.
 
-    We don't change status here (run_generation_queue_task does that). We just
-    return the id so a worker thread can call run_generation_queue_task with
-    that id.  The in-memory ``claimed_ids`` set prevents two threads inside the
-    same daemon from picking the same task inside a tight loop.  For a single
-    daemon process this is sufficient; multi-process operation would need a
-    real DB-level advisory lock which we intentionally keep out of scope.
+    Delegates the actual atomic claim to
+    :func:`app.services.llm_queue.claim_next_pending_task`, which uses an
+    ``UPDATE ... WHERE status='pending'`` guarded by row-level atomicity so
+    multi-process daemons can't grab the same task twice. The in-memory
+    ``claimed_ids`` set is a second-line defence: it prevents worker threads
+    inside *this* daemon process from re-picking a task whose row-flip is
+    still committing when the next tick fires.
     """
 
     with session_scope() as session:
-        stmt = (
-            select(GenerationTask)
-            .where(GenerationTask.task_type.in_(QUEUE_TYPES), GenerationTask.status == "pending")
-            .order_by(GenerationTask.id)
+        task = claim_next_pending_task(
+            session,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            exclude_task_ids=claimed_ids,
         )
-        for task in session.scalars(stmt):
-            if task.id in claimed_ids:
-                continue
-            return task.id
-        return None
+        if task is None:
+            return None
+        return task.id
 
 
 def _run_task(task_id: int, metrics: DaemonMetrics) -> None:
-    """Worker-thread entrypoint: process a single queue task."""
+    """Worker-thread entrypoint: process a single queue task.
+
+    The task must already have been atomically claimed (status='running',
+    lease_owner set) via ``claim_next_pending_task`` before this is invoked.
+    We call ``run_generation_queue_task(pre_claimed=True)`` so the runner
+    knows to skip re-claim / re-lease and just execute the body.
+    """
 
     started = time.monotonic()
     try:
         with session_scope() as session:
-            result = run_generation_queue_task(session, task_id=task_id)
+            result = run_generation_queue_task(
+                session, task_id=task_id, pre_claimed=True
+            )
             # Read every attribute we need while the ORM instance is still
             # bound to the session; the session closes when we leave the
             # ``with`` block and we don't want DetachedInstanceError.
@@ -171,12 +184,22 @@ def _recover_stale(stale_timeout_seconds: int, metrics: DaemonMetrics) -> None:
         LOGGER.exception("stale recovery failed: %s", exc)
 
 
+def _default_daemon_id() -> str:
+    # Combines PID and a short random suffix so lease_owner is unique even
+    # when several daemon processes on the same host share a PID space
+    # (containers, forked launchers) or when the same PID is reused after
+    # a crash. Format: "<hostname>-<pid>-<random>".
+    host = os.uname().nodename.split(".")[0]
+    return f"{host}-{os.getpid()}-{uuid4().hex[:6]}"
+
+
 def run_daemon(
     *,
     concurrency: int,
     stale_timeout_seconds: int,
     poll_interval_seconds: float,
     max_cycles: Optional[int] = None,
+    daemon_id: Optional[str] = None,
 ) -> DaemonMetrics:
     """Top-level daemon loop. Blocks until shutdown or max_cycles reached."""
 
@@ -187,6 +210,7 @@ def run_daemon(
 
     metrics = DaemonMetrics()
     shutdown = ShutdownFlag()
+    daemon_id = daemon_id or _default_daemon_id()
 
     def _handle_signal(signum, _frame):
         LOGGER.info("received signal %s — starting graceful shutdown", signum)
@@ -196,7 +220,8 @@ def run_daemon(
     signal.signal(signal.SIGTERM, _handle_signal)
 
     LOGGER.info(
-        "daemon starting concurrency=%s stale_timeout=%ss poll_interval=%ss max_cycles=%s",
+        "daemon starting id=%s concurrency=%s stale_timeout=%ss poll_interval=%ss max_cycles=%s",
+        daemon_id,
         concurrency,
         stale_timeout_seconds,
         poll_interval_seconds,
@@ -223,11 +248,19 @@ def run_daemon(
             with active_lock:
                 slots_free = concurrency - len(active)
             dispatched = 0
-            for _ in range(max(slots_free, 0)):
+            for slot_index in range(max(slots_free, 0)):
                 if shutdown.is_set():
                     break
+                # Each slot gets a unique lease owner so if a daemon crashes
+                # between claim and heartbeat, stale-recovery can tell which
+                # worker was responsible.
+                worker_id = f"{daemon_id}#w{slot_index}"
                 with active_lock:
-                    task_id = _claim_next_pending_task(claimed_ids)
+                    task_id = _claim_next_pending_task(
+                        claimed_ids,
+                        worker_id=worker_id,
+                        lease_seconds=stale_timeout_seconds,
+                    )
                     if task_id is None:
                         break
                     claimed_ids.add(task_id)
@@ -252,7 +285,7 @@ def run_daemon(
         for fut in list(active):
             fut.result()
 
-    LOGGER.info("daemon stopped metrics=%s", json.dumps(metrics.snapshot()))
+    LOGGER.info("daemon stopped id=%s metrics=%s", daemon_id, json.dumps(metrics.snapshot()))
     return metrics
 
 

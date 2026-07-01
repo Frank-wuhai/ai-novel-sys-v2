@@ -310,8 +310,28 @@ def _chapter_snapshot(item, *, queue_tasks: list[GenerationTask] | None = None) 
     return snapshot
 
 
+# Statuses that indicate a queue task is still influencing the chapter's next step.
+# ``pending``/``running``/``paused`` are active by definition; ``failed`` is included so
+# operators still see a task that needs human intervention. Historical ``completed`` and
+# ``canceled`` tasks intentionally do NOT surface on the chapter snapshot — they belong
+# in ``generation_recent`` and were previously misrendered as "关联队列任务" (see
+# fix_history_task_leak, 2026-07-01).
+_CHAPTER_QUEUE_ACTIVE_STATUSES = frozenset({"pending", "running", "paused", "failed"})
+
+
 def _chapter_queue_snapshot(chapter_number: int, queue_tasks: list[GenerationTask]) -> dict:
+    """Return the most recent queue task that is still tied to the chapter's state.
+
+    Historically this returned the newest task with a matching chapter_number
+    regardless of status, so long-completed rebuild jobs kept showing up as
+    "关联队列任务" on chapters that had already moved on to publish/adoption.
+    That misled operators reading the dashboard. We now filter to statuses that
+    still require attention.
+    """
+
     for task in queue_tasks:
+        if task.status not in _CHAPTER_QUEUE_ACTIVE_STATUSES:
+            continue
         data = _loads_json(task.input_json)
         if data.get("chapter_number") != chapter_number:
             continue

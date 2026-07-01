@@ -105,6 +105,7 @@ def main() -> int:
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
             ("generation_queue_recovery", ["scripts/generation_queue_recovery_regression.py"]),
             ("generation_queue_daemon", ["scripts/generation_queue_daemon_regression.py"]),
+            ("generation_queue_multiprocess_claim", ["scripts/generation_queue_multiprocess_claim_regression.py"]),
             ("database_restore", ["scripts/database_restore_regression_test.py"]),
             ("one_button_production", ["scripts/one_button_production_regression.py"]),
             ("architecture_boundary", ["scripts/architecture_boundary_regression.py"]),

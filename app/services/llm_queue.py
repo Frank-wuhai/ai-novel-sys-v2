@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -208,7 +208,187 @@ def build_generation_queue_health(session: Session, *, failure_limit: int = 5, s
     )
 
 
-def run_generation_queue_task(session: Session, *, task_id: int | None = None) -> QueueRunResult:
+def claim_next_pending_task(
+    session: Session,
+    *,
+    worker_id: str,
+    lease_seconds: int = 3600,
+    exclude_task_ids: set[int] | None = None,
+    max_attempts_scan: int = 32,
+) -> GenerationTask | None:
+    """Atomically claim the next pending queue task for exclusive execution.
+
+    This is the cross-process safe entry point that ``run_generation_queue_task``
+    used to lack. Correctness relies on the UPDATE being row-level atomic:
+
+        UPDATE generation_tasks
+           SET status='running', input_json=?
+         WHERE id=? AND status='pending'
+
+    Only one caller can flip a specific row from 'pending' → 'running' because
+    the WHERE clause is re-checked as part of the UPDATE. If ``rowcount`` is 0
+    we lost the race and simply advance to the next candidate.
+
+    Returns the ORM object bound to ``session`` with status already 'running'
+    and lease metadata (owner, expiry, heartbeat) written into ``input_json``.
+    Returns ``None`` if there is no pending task after scanning up to
+    ``max_attempts_scan`` candidates.
+
+    Note: callers must pass the returned task's id to ``run_generation_queue_task``
+    with ``pre_claimed=True`` so the runner doesn't try to re-acquire the lease.
+    """
+
+    excluded = set(exclude_task_ids or ())
+    scans = 0
+    while scans < max_attempts_scan:
+        scans += 1
+        stmt = (
+            select(GenerationTask)
+            .where(
+                GenerationTask.task_type.in_(QUEUE_TYPES),
+                GenerationTask.status == "pending",
+            )
+            .order_by(GenerationTask.id)
+        )
+        if excluded:
+            stmt = stmt.where(GenerationTask.id.not_in(excluded))
+        candidate = session.scalar(stmt)
+        if candidate is None:
+            return None
+
+        candidate_id = candidate.id
+        input_data = _loads_json(candidate.input_json)
+        chapter_number = int(input_data.get("chapter_number") or 0)
+        attempt = int(input_data.get("attempt") or 0) + 1
+        max_attempts = int(input_data.get("max_attempts") or 3)
+        timeout_seconds = _task_timeout_seconds(input_data, fallback=lease_seconds)
+        dry_run = bool(input_data.get("dry_run", True))
+        llm_parameters = input_data.get("llm_parameters") or _queue_llm_parameter_snapshot(
+            queue_type=candidate.task_type, dry_run=dry_run
+        )
+
+        now = _utc_now()
+        now_iso = _utc_now_iso()
+        input_data["attempt"] = attempt
+        input_data["running_started_at"] = now_iso
+        input_data["task_timeout_seconds"] = timeout_seconds
+        input_data["llm_parameters"] = llm_parameters
+        input_data["lease_owner"] = f"worker:{worker_id}"
+        input_data["lease_acquired_at"] = now_iso
+        input_data["lease_expires_at"] = (
+            (now + timedelta(seconds=timeout_seconds)).replace(microsecond=0).isoformat() + "Z"
+        )
+        input_data["heartbeat_at"] = now_iso
+
+        output_data = {
+            "status": "running",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "task_timeout_seconds": timeout_seconds,
+        }
+
+        # Atomic claim: only one process can flip a specific row from
+        # 'pending' → 'running'. rowcount==0 means we lost the race.
+        result = session.execute(
+            update(GenerationTask)
+            .where(GenerationTask.id == candidate_id, GenerationTask.status == "pending")
+            .values(
+                status="running",
+                input_json=_dumps_json(input_data),
+                output_json=_dumps_json(output_data),
+            )
+        )
+        session.commit()
+        if result.rowcount == 1:
+            claimed = session.get(GenerationTask, candidate_id)
+            if claimed is None:  # pragma: no cover — defensive
+                return None
+            # Sanity-check: chapter_number must still be > 0. Historically
+            # run_generation_queue_task rejected chapter_number<1 as validation
+            # failure; we preserve that behavior by marking the task 'failed'
+            # right away so worker threads don't waste an LLM call.
+            if chapter_number < 1:
+                claimed.status = "failed"
+                claimed.output_json = _dumps_json(
+                    {
+                        "error_category": "validation",
+                        "error": "chapter_number is required",
+                        "attempt": attempt,
+                    }
+                )
+                _clear_task_lease(input_data)
+                claimed.input_json = _dumps_json(input_data)
+                session.commit()
+                excluded.add(candidate_id)
+                continue
+            return claimed
+        # Lost the race — someone else claimed this task. Try the next.
+        excluded.add(candidate_id)
+    return None
+
+
+def run_generation_queue_task(
+    session: Session,
+    *,
+    task_id: int | None = None,
+    pre_claimed: bool = False,
+) -> QueueRunResult:
+    """Run a single queue task.
+
+    When ``pre_claimed=True`` the caller is responsible for having already
+    atomically flipped the task from 'pending' to 'running' via
+    ``claim_next_pending_task``. In that case we skip the pending-check and
+    lease-acquire paths, since duplicating them would race with a concurrent
+    worker that already owns the lease.
+
+    When ``pre_claimed=False`` (default; single-worker / legacy path) the
+    function performs the historical behavior: fetch pending task, acquire
+    lease, run business logic, commit result. This path is NOT safe for
+    multi-process concurrency — use ``claim_next_pending_task`` there.
+    """
+
+    if pre_claimed:
+        if not task_id:
+            raise ValueError("pre_claimed=True requires an explicit task_id")
+        task = session.get(GenerationTask, task_id)
+        if not task:
+            raise ValueError(f"generation queue task not found: {task_id}")
+        if task.task_type not in QUEUE_TYPES:
+            raise ValueError(f"not a generation queue task: {task.task_type}")
+        if task.status != "running":
+            raise ValueError(
+                f"pre_claimed task must already be running, got {task.status}"
+            )
+        input_data = _loads_json(task.input_json)
+        chapter_number = int(input_data.get("chapter_number") or 0)
+        dry_run = bool(input_data.get("dry_run", True))
+        attempt = int(input_data.get("attempt") or 1)
+        max_attempts = int(input_data.get("max_attempts") or 3)
+        timeout_seconds = _task_timeout_seconds(input_data, fallback=3600)
+        llm_parameters = input_data.get("llm_parameters") or _queue_llm_parameter_snapshot(
+            queue_type=task.task_type, dry_run=dry_run
+        )
+        lease = {
+            "lease_owner": input_data.get("lease_owner", ""),
+            "lease_acquired_at": input_data.get("lease_acquired_at", ""),
+            "lease_expires_at": input_data.get("lease_expires_at", ""),
+            "heartbeat_at": input_data.get("heartbeat_at", ""),
+        }
+        before_task_id = session.scalar(select(func.max(GenerationTask.id))) or 0
+        return _execute_generation_task_body(
+            session,
+            task=task,
+            input_data=input_data,
+            chapter_number=chapter_number,
+            dry_run=dry_run,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            timeout_seconds=timeout_seconds,
+            llm_parameters=llm_parameters,
+            lease=lease,
+            before_task_id=before_task_id,
+        )
+
     task = session.get(GenerationTask, task_id) if task_id else _next_pending_task(session)
     if not task:
         raise ValueError("no pending generation queue task")
@@ -243,6 +423,41 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     task.output_json = _dumps_json({"status": "running", "attempt": attempt, "max_attempts": max_attempts, "task_timeout_seconds": timeout_seconds})
     session.flush()
     session.commit()
+    return _execute_generation_task_body(
+        session,
+        task=task,
+        input_data=input_data,
+        chapter_number=chapter_number,
+        dry_run=dry_run,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        timeout_seconds=timeout_seconds,
+        llm_parameters=llm_parameters,
+        lease=lease,
+        before_task_id=before_task_id,
+    )
+
+
+def _execute_generation_task_body(
+    session: Session,
+    *,
+    task: GenerationTask,
+    input_data: dict,
+    chapter_number: int,
+    dry_run: bool,
+    attempt: int,
+    max_attempts: int,
+    timeout_seconds: int,
+    llm_parameters: dict,
+    lease: dict,
+    before_task_id: int,
+) -> QueueRunResult:
+    """Shared body executed after a task is flipped to 'running'.
+
+    Extracted so both the pre-claimed (multi-worker) path and the legacy
+    single-worker path share exactly the same success / failure branches.
+    """
+
     try:
         if task.task_type == QUEUE_DRAFT:
             version = draft_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)

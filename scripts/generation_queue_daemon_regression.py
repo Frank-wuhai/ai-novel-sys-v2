@@ -89,18 +89,24 @@ def _loads(value: str | None) -> dict:
 def _make_fake_runner(observed_threads: set[str], lock: threading.Lock):
     """Return a stand-in for run_generation_queue_task that avoids real LLM calls."""
 
-    def fake_runner(session, *, task_id):
+    def fake_runner(session, *, task_id, pre_claimed: bool = False):
+        # ``claim_next_pending_task`` already flipped the row to running and
+        # wrote lease metadata; the daemon always passes pre_claimed=True in
+        # production. Preserve that contract in the fake so a regression
+        # can't silently drift back to the racy 'pending' path.
         with lock:
             observed_threads.add(threading.current_thread().name)
         task = session.get(GenerationTask, task_id)
         if not task:
             raise ValueError(f"task {task_id} vanished")
-        # emulate a short "running" window so a second worker can overlap
+        if pre_claimed and task.status != "running":
+            raise AssertionError(
+                f"pre_claimed task must already be running, got {task.status}"
+            )
         input_data = _loads(task.input_json)
         input_data["running_started_at"] = datetime.now(UTC).isoformat()
         task.input_json = json.dumps(input_data)
-        task.status = "running"
-        session.flush()
+        # emulate a short "running" window so a second worker can overlap
         time.sleep(0.1)
         task.status = "completed"
         task.output_json = json.dumps({"version_id": None, "attempt": 1, "fake": True})
