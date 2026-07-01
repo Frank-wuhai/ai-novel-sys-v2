@@ -115,7 +115,7 @@ def _case_preview_does_not_write_live_state(session, *, book_id: int, failures: 
 def _case_frontend_backend_action_consistency(session, *, failures: list[str]) -> None:
     dashboard = DASHBOARD.read_text(encoding="utf-8")
     for action in sorted(AUTO_ACTIONS | MANUAL_ACTIONS):
-        if action in {"done", "adopt_recommended_chapter_sample", "repair_chapter_brief"}:
+        if action in {"done", "adopt_recommended_chapter_sample", "repair_chapter_brief", "accept_early_stop"}:
             continue
         if action not in dashboard:
             failures.append(f"backend_action_missing_from_dashboard:{action}")

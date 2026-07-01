@@ -107,6 +107,7 @@ def main() -> int:
             ("quality_gate_tiers", ["scripts/quality_gate_tiers_regression.py"]),
             ("revision_progress", ["scripts/revision_progress_regression.py"]),
             ("revision_manual_override", ["scripts/revision_manual_override_regression.py"]),
+            ("book2_ch3_e2e", ["scripts/book2_ch3_e2e_regression.py"]),
             ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("production_invariants", ["scripts/production_invariants_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
