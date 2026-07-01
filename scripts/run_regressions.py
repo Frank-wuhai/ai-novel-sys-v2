@@ -129,6 +129,7 @@ def main() -> int:
             ("revision_contract_manager", ["scripts/revision_contract_manager_regression.py"]),
             ("production_strategy", ["scripts/production_strategy_regression.py"]),
             ("production_strategy_pipeline", ["scripts/production_strategy_pipeline_regression.py"]),
+            ("production_strategy_rule_coverage", ["scripts/production_strategy_rule_coverage_regression.py"]),
             ("production_state_matrix", ["scripts/production_state_matrix_regression.py"]),
             ("production_transition_matrix", ["scripts/production_transition_matrix_regression.py"]),
             ("self_repair", ["scripts/self_repair_regression.py"]),
