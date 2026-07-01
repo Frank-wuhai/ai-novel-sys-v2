@@ -19,6 +19,30 @@ from app.services.readability import evaluate_readability
 from app.services.writer_craft import evaluate_writer_craft
 
 
+HARD_FLOOR = 65
+PASS_FLOOR = 75
+
+
+def classify_quality_verdict(*, score: int, hard_dimension_ok: bool, has_blocking_issues: bool) -> str:
+    """Three-tier quality verdict: hard_fail / soft_pass / pass.
+
+    Phase 2/3 quality gate stratification. Pure function so callers, tests,
+    and dashboards can share one canonical definition.
+
+    - ``hard_fail``: score < 65 OR blocking issues present OR hard dimension
+      floor breached. Must continue revising.
+    - ``soft_pass``: 65 <= score < 75 with hard gate cleared. Publishable
+      with human acceptance; early-stop still nudges revisions upward.
+    - ``pass``: score >= 75 with hard gate cleared. Recommended stop.
+    """
+    hard_gate_ok = hard_dimension_ok and not has_blocking_issues and score >= HARD_FLOOR
+    if not hard_gate_ok:
+        return "hard_fail"
+    if score >= PASS_FLOOR:
+        return "pass"
+    return "soft_pass"
+
+
 @dataclass
 class QualityResult:
     passed: bool
@@ -299,7 +323,16 @@ def evaluate_chapter(
         for name in ("basic_publishability", "production_standard", "setting_risk", "platform_risk")
     )
     hard_dimension_ok = hard_dimension_ok and not bias.blockers
-    passed = not issues and score >= 70 and hard_dimension_ok
+    # ------------------------------------------------------------------
+    # Phase 2/3: three-tier quality verdict via classify_quality_verdict.
+    # ``passed`` remains a boolean (backwards compatibility): it means
+    # "cleared the hard gate", i.e. verdict in {"soft_pass", "pass"}.
+    verdict = classify_quality_verdict(
+        score=score,
+        hard_dimension_ok=hard_dimension_ok,
+        has_blocking_issues=bool(issues),
+    )
+    passed = verdict in {"soft_pass", "pass"}
     hard_issues = [
         issue
         for issue in issues
@@ -318,6 +351,7 @@ def evaluate_chapter(
     report = json.dumps(
         {
             "status": "PASS" if passed else "FAIL",
+            "verdict": verdict,
             "score": score,
             "chinese_chars": count,
             "hard_gate": hard_gate,
@@ -338,7 +372,9 @@ def evaluate_chapter(
             "writer_craft_report": writer_craft,
             "paragraph_aesthetic_report": paragraph_aesthetic.to_dict(),
             "thresholds": {
-                "pass_score": 70,
+                "pass_score": PASS_FLOOR,
+                "soft_pass_floor": HARD_FLOOR,
+                "hard_floor": HARD_FLOOR,
                 "hard_min_dimension": 50,
                 "min_chars": min_chars,
                 "max_chars": max_chars,
