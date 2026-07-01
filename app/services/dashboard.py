@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.models.entities import Book, GenerationTask
 from app.services.author_command_center import build_author_command_center
 from app.services.llm_queue import VISIBLE_QUEUE_TYPES
+from app.services.dashboard_explain import explain_chapter_state, explain_queue_task
 from app.services.planning import build_human_decision_package, build_team_decision_package, plan_chapters
 from app.services.production_decision import decide_chapter_production
 from app.services.production_control import build_production_control_report
@@ -183,7 +184,7 @@ def build_project_snapshot(
         },
         "chapter_actions": dict(sorted(next_counts.items())),
         "chapters": [
-            _chapter_snapshot(item)
+            _chapter_snapshot(item, queue_tasks=queue_tasks)
             for item in plan_items
         ],
         "generation_queue": {
@@ -281,9 +282,10 @@ def _team_decision_reason(decision_type: str, reason: str) -> str:
     return reason
 
 
-def _chapter_snapshot(item) -> dict:
+def _chapter_snapshot(item, *, queue_tasks: list[GenerationTask] | None = None) -> dict:
     decision = decide_chapter_production(item)
-    return {
+    queue = _chapter_queue_snapshot(item.chapter_number, queue_tasks or [])
+    snapshot = {
         "number": item.chapter_number,
         "chapter_id": item.chapter_id,
         "brief_id": item.brief_id,
@@ -301,7 +303,19 @@ def _chapter_snapshot(item) -> dict:
         "publish_status": item.publish_job_status,
         "next_action": item.next_action,
         "reason": item.reason,
+        "queue": queue,
     }
+    snapshot["explain"] = explain_chapter_state(snapshot)
+    return snapshot
+
+
+def _chapter_queue_snapshot(chapter_number: int, queue_tasks: list[GenerationTask]) -> dict:
+    for task in queue_tasks:
+        data = _loads_json(task.input_json)
+        if data.get("chapter_number") != chapter_number:
+            continue
+        return _task_snapshot(None, task)
+    return {}
 
 
 def _author_chapter_state(item) -> dict[str, str]:
@@ -363,12 +377,12 @@ def _task_stats(tasks: list[GenerationTask]) -> dict[str, int]:
     }
 
 
-def _task_snapshot(session: Session, task: GenerationTask) -> dict:
+def _task_snapshot(session: Session | None, task: GenerationTask) -> dict:
     input_data = _loads_json(task.input_json)
     output_data = _loads_json(task.output_json)
     llm_parameters = input_data.get("llm_parameters") if isinstance(input_data.get("llm_parameters"), dict) else {}
-    actual = _actual_model_snapshot(session, output_data)
-    return {
+    actual = _actual_model_snapshot(session, output_data) if session is not None else {}
+    snapshot = {
         "id": task.id,
         "type": task.task_type,
         "status": task.status,
@@ -386,6 +400,8 @@ def _task_snapshot(session: Session, task: GenerationTask) -> dict:
         "last_progress": input_data.get("last_progress", ""),
         "error_category": output_data.get("error_category", ""),
     }
+    snapshot["explain"] = explain_queue_task(snapshot)
+    return snapshot
 
 
 def _actual_model_snapshot(session: Session, output_data: dict) -> dict:
