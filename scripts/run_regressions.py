@@ -103,6 +103,7 @@ def main() -> int:
             ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("production_invariants", ["scripts/production_invariants_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
+            ("generation_queue_recovery", ["scripts/generation_queue_recovery_regression.py"]),
             ("database_restore", ["scripts/database_restore_regression_test.py"]),
             ("one_button_production", ["scripts/one_button_production_regression.py"]),
             ("architecture_boundary", ["scripts/architecture_boundary_regression.py"]),

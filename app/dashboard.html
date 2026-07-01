@@ -1649,12 +1649,28 @@
       });
     }
 
+    const initialDashboardParams = new URLSearchParams(window.location.search);
+
     async function loadBooks() {
       const books = await fetchJson('/api/books');
       availableBooks = books;
-      renderBookOptions(books);
+      renderBookOptions(books, initialDashboardParams.get('book_id') || '');
+      applyInitialDashboardParams();
       if (books.length) await refresh();
       else $('state').textContent = '暂无作品';
+    }
+
+    function applyInitialDashboardParams() {
+      const bookId = initialDashboardParams.get('book_id');
+      const chapterNumber = initialDashboardParams.get('chapter_number');
+      const start = initialDashboardParams.get('start');
+      const count = initialDashboardParams.get('count');
+      if (bookId && Array.from($('book').options).some((option) => String(option.value) === String(bookId))) {
+        $('book').value = bookId;
+      }
+      if (chapterNumber) $('chapter').value = Math.max(1, Number(chapterNumber) || 1);
+      if (start) $('start').value = Math.max(1, Number(start) || 1);
+      if (count) $('count').value = Math.max(1, Number(count) || 1);
     }
 
     function renderBookOptions(books, selectedId = '') {
@@ -3040,12 +3056,18 @@
       } else if (item.status === 'failed') {
         buttons.push(actionButton('重试', 'retry_queue_task', item.id));
         buttons.push(actionButton('取消', 'cancel_queue_task', item.id));
+      } else if (item.status === 'running' && item.stale) {
+        buttons.push(actionButton('恢复超时任务', 'recover_stale_generation_tasks', item.id));
+        buttons.push(actionButton('强制取消', 'cancel_queue_task', item.id, {force: true}));
       }
       return `<div class="actions">${buttons.join('')}</div>`;
     }
 
-    function actionButton(label, action, taskId) {
-      return `<button class="secondary" data-action="${action}" data-task-id="${taskId}">${label}</button>`;
+    function actionButton(label, action, taskId, options = {}) {
+      const attrs = Object.entries(options)
+        .map(([key, value]) => ` data-${escapeHtml(String(key).replace(/[A-Z]/g, (ch) => '-' + ch.toLowerCase()))}="${escapeHtml(String(value))}"`)
+        .join('');
+      return `<button class="secondary" data-action="${action}" data-task-id="${taskId}"${attrs}>${label}</button>`;
     }
 
     function renderReadiness(readiness) {
@@ -4882,6 +4904,11 @@
       const button = event.target.closest('button[data-action]');
       if (!button) return;
       const payload = {task_id: Number(button.dataset.taskId)};
+      if (button.dataset.force === 'true') payload.force = true;
+      if (button.dataset.action === 'recover_stale_generation_tasks') {
+        payload.timeout_seconds = 3600;
+        payload.limit = 10;
+      }
       if (['agent_plan_cycle', 'create_market_research_pack', 'run_market_web_search', 'index_book_knowledge', 'create_cover_asset', 'create_chapter_illustration_asset'].includes(button.dataset.action)) {
         payload.book_id = currentSnapshot?.book?.id || Number($('bookId').value);
         payload.chapter_number = Number($('chapter').value || 0);

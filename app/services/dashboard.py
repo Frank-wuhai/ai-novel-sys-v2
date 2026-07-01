@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -429,17 +430,22 @@ def _loads_json(value: str) -> dict:
 
 
 def _running_age_seconds(task: GenerationTask) -> int:
-    from datetime import datetime
-
     input_data = _loads_json(task.input_json)
     raw = input_data.get("running_started_at")
     started = task.created_at
     if isinstance(raw, str) and raw:
         try:
-            started = datetime.fromisoformat(raw)
+            normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            started = datetime.fromisoformat(normalized)
         except ValueError:
-            started = task.created_at
-    return max(0, int((datetime.utcnow() - started).total_seconds()))
+            started = datetime.now(UTC) - timedelta(days=365)
+    return max(0, int((datetime.now(UTC) - _as_utc_aware(started)).total_seconds()))
+
+
+def _as_utc_aware(value):
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _task_timeout_seconds(input_data: dict) -> int:

@@ -230,8 +230,10 @@ def _start_background_queue_run(*, max_tasks: int = 1, book_id: int = 0, chapter
         _BACKGROUND_RUNS[run_id] = {
             "run_id": run_id,
             "status": "running",
+            "kind": "queue",
             "started_at": time.time(),
             "last_progress_at": time.time(),
+            "idle_timeout_seconds": 3600,
             "finished_at": None,
             "executed_count": 0,
             "executed": [],
@@ -798,6 +800,16 @@ def _int_query(query: dict[str, list[str]], name: str, default: int) -> int:
     return int(values[0])
 
 
+def _payload_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _book_option(book: Book) -> dict:
     return {
         "id": book.id,
@@ -907,11 +919,27 @@ def _perform_action(session, payload: dict) -> dict:
         task = resume_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
         return {"status": task.status, "generation_task_id": task.id}
     if action == "cancel_queue_task":
-        task = cancel_generation_queue_task(session, task_id=int(payload.get("task_id") or 0), reason="dashboard")
+        task = cancel_generation_queue_task(
+            session,
+            task_id=int(payload.get("task_id") or 0),
+            reason="dashboard",
+            force=_payload_bool(payload.get("force")),
+        )
         return {"status": task.status, "generation_task_id": task.id}
     if action == "retry_queue_task":
         task = retry_generation_queue_task(session, task_id=int(payload.get("task_id") or 0))
         return {"status": task.status, "generation_task_id": task.id}
+    if action == "recover_stale_generation_tasks":
+        recovered = recover_stale_generation_tasks(
+            session,
+            timeout_seconds=int(payload.get("timeout_seconds") or 3600),
+            limit=int(payload.get("limit") or 10),
+        )
+        return {
+            "status": "recovered",
+            "recovered_count": len(recovered),
+            "tasks": [item.to_dict() for item in recovered],
+        }
     if action == "backup_database":
         backup = create_database_backup(session, label=str(payload.get("label") or "dashboard"))
         return {

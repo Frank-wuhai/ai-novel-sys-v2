@@ -75,6 +75,18 @@ class StaleTaskRecovery:
     age_seconds: int
     error_category: str
 
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "previous_status": self.previous_status,
+            "new_status": self.new_status,
+            "chapter_number": self.chapter_number,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "age_seconds": self.age_seconds,
+            "error_category": self.error_category,
+        }
+
 
 @dataclass(frozen=True)
 class QueueHealthReport:
@@ -218,6 +230,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     input_data["llm_parameters"] = llm_parameters
     if chapter_number < 1:
         task.status = "failed"
+        _clear_task_lease(input_data)
         task.input_json = _dumps_json(input_data)
         task.output_json = _dumps_json({"error_category": "validation", "error": "chapter_number is required", "attempt": attempt})
         session.flush()
@@ -227,6 +240,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     lease = _acquire_task_lease(task, input_data, timeout_seconds=timeout_seconds)
     task.status = "running"
     task.input_json = _dumps_json(input_data)
+    task.output_json = _dumps_json({"status": "running", "attempt": attempt, "max_attempts": max_attempts, "task_timeout_seconds": timeout_seconds})
     session.flush()
     session.commit()
     try:
@@ -252,6 +266,10 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
     except Exception as exc:
         classification = classify_exception(exc)
         retryable = classification.retryable and attempt < max_attempts
+        running_age_seconds = _running_age_seconds(task)
+        input_data = _loads_json(task.input_json)
+        _clear_task_lease(input_data)
+        task.input_json = _dumps_json(input_data)
         task.status = "pending" if retryable else "failed"
         task.output_json = _dumps_json(
             {
@@ -262,7 +280,7 @@ def run_generation_queue_task(session: Session, *, task_id: int | None = None) -
                 "max_attempts": max_attempts,
                 "task_timeout_seconds": timeout_seconds,
                 "llm_parameters": llm_parameters,
-                "running_age_seconds": _running_age_seconds(task),
+                "running_age_seconds": running_age_seconds,
                 "retryable": retryable,
                 "lease": lease,
             }
@@ -411,12 +429,21 @@ def resume_generation_queue_task(session: Session, *, task_id: int) -> Generatio
     return task
 
 
-def cancel_generation_queue_task(session: Session, *, task_id: int, reason: str = "") -> GenerationTask:
+def cancel_generation_queue_task(session: Session, *, task_id: int, reason: str = "", force: bool = False) -> GenerationTask:
     task = _get_queue_task(session, task_id=task_id)
-    if task.status not in {"pending", "paused", "failed"}:
+    cancellable_statuses = {"pending", "paused", "failed"}
+    if force:
+        cancellable_statuses = cancellable_statuses | {"running"}
+    if task.status not in cancellable_statuses:
         raise ValueError(f"only pending, paused, or failed generation queue tasks can cancel, got {task.status}")
+    input_data = _loads_json(task.input_json)
+    _clear_task_lease(input_data)
+    task.input_json = _dumps_json(input_data)
     output_data = _loads_json(task.output_json)
     output_data["cancel_reason"] = reason
+    if force:
+        output_data["forced"] = True
+        output_data["canceled_from_status"] = task.status
     task.output_json = _dumps_json(output_data)
     task.status = "canceled"
     session.flush()
@@ -673,7 +700,8 @@ def _running_age_seconds(task: GenerationTask) -> int:
     input_data = _loads_json(task.input_json)
     raw = input_data.get("running_started_at")
     started = _parse_datetime(raw) if isinstance(raw, str) and raw else task.created_at
-    return max(0, int((datetime.utcnow() - started).total_seconds()))
+    now = datetime.now(UTC)
+    return max(0, int((now - _as_utc_aware(started)).total_seconds()))
 
 
 def _task_timeout_seconds(input_data: dict, *, fallback: int) -> int:
@@ -682,6 +710,13 @@ def _task_timeout_seconds(input_data: dict, *, fallback: int) -> int:
 
 def _parse_datetime(value: str) -> datetime:
     try:
-        return datetime.fromisoformat(value)
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized)
     except ValueError:
-        return datetime.utcnow() - timedelta(days=365)
+        return datetime.now(UTC) - timedelta(days=365)
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)

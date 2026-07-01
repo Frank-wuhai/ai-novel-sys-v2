@@ -478,6 +478,7 @@ def main() -> None:
     p = sub.add_parser("cancel-generation-task")
     p.add_argument("--task-id", type=int, required=True)
     p.add_argument("--reason", default="")
+    p.add_argument("--force", action="store_true")
 
     p = sub.add_parser("create-manual-chapter-version")
     p.add_argument("--book-id", type=int, required=True)
@@ -1474,7 +1475,7 @@ def main() -> None:
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
             elif args.cmd == "cancel-generation-task":
-                task = cancel_generation_queue_task(session, task_id=args.task_id, reason=args.reason)
+                task = cancel_generation_queue_task(session, task_id=args.task_id, reason=args.reason, force=args.force)
                 print(f"generation_task_id={task.id}")
                 print(f"status={task.status}")
             elif args.cmd == "create-manual-chapter-version":

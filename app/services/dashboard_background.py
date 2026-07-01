@@ -53,7 +53,7 @@ def background_runs_payload(runs: dict[str, dict[str, Any]], lock: Lock, *, now:
                 "result": run.get("result", {}),
                 "terminal_status": run.get("terminal_status", ""),
                 "terminal_message": run.get("terminal_message", ""),
-                "timeout_seconds": int(run.get("timeout_seconds") or 180),
+                "timeout_seconds": int(run.get("idle_timeout_seconds") or run.get("timeout_seconds") or 180),
             }
         )
     return payload
