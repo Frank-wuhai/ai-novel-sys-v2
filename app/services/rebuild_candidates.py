@@ -31,6 +31,31 @@ TASK_TYPE_REBUILD_CANDIDATES = "rebuild_chapter_candidates"
 
 
 @dataclass(frozen=True)
+class CandidateScore:
+    value: int
+    passed: bool
+    blocker_count: int
+    contract_preservation: int
+    sample_adoption_preservation: int
+    structural_divergence: int
+    readability_floor: int
+    canon_consistency: int
+
+    @property
+    def rank_tuple(self) -> tuple[int, int, int, int, int, int, int, int]:
+        return (
+            int(self.passed),
+            -self.blocker_count,
+            self.value,
+            self.contract_preservation,
+            self.sample_adoption_preservation,
+            self.structural_divergence,
+            self.readability_floor,
+            self.canon_consistency,
+        )
+
+
+@dataclass(frozen=True)
 class RebuildCandidateResult:
     task_id: int
     selected_version_id: int
@@ -172,7 +197,7 @@ def generate_rebuild_candidates(
             session.flush()
             raise ValueError("no rebuild candidates generated")
 
-        best = max(rows, key=lambda row: (int(row.get("score") or 0), int(row.get("version_id") or 0)))
+        best = max(rows, key=lambda row: (_candidate_score(row, session.get(QualityReport, int(row["quality_report_id"]))).rank_tuple, int(row.get("version_id") or 0)))
         incumbent = _best_incumbent_draft(session, chapter_id=chapter.id, exclude_task_id=task.id, exclude_version_id=source_version.id)
         best_version = session.get(ChapterVersion, int(best["version_id"]))
         best_quality = session.get(QualityReport, int(best["quality_report_id"]))
@@ -199,9 +224,10 @@ def generate_rebuild_candidates(
             report_data["selected_from_incumbent_version_id"] = best_version.id
             report_data["rejected_best_candidate_version_id"] = best.get("version_id")
             report_data["rejected_best_candidate_score"] = best.get("score")
-            report_data["selection_reason"] = "best_candidate_below_incumbent"
+            report_data["selection_reason"] = "incumbent_ranked_higher_than_candidates"
         else:
             report_data["selected_from_candidate_version_id"] = best.get("version_id")
+            report_data["selection_score"] = _candidate_score(best, best_quality).__dict__
         report_data["rebuild_candidate_task_id"] = task.id
         selected_quality = QualityReport(
             chapter_version_id=selected.id,
@@ -221,7 +247,7 @@ def generate_rebuild_candidates(
                 "selected_version_id": selected.id,
                 "selected_candidate_version_id": None if selected_from_incumbent else best.get("version_id"),
                 "selected_incumbent_version_id": best_version.id if selected_from_incumbent and best_version else None,
-                "selection_reason": "best_candidate_below_incumbent" if selected_from_incumbent else "best_candidate",
+                "selection_reason": "incumbent_ranked_higher_than_candidates" if selected_from_incumbent else "best_ranked_candidate",
                 "selected_score": selected_quality.score,
                 "selected_passed": selected_quality.passed,
                 "best_candidate_score": best.get("score"),
@@ -309,17 +335,51 @@ def _should_restore_incumbent_over_candidate(
 ) -> bool:
     if not incumbent:
         return False
-    candidate_score = int(candidate.get("score") or 0)
-    candidate_passed = bool(candidate.get("passed"))
-    incumbent_blockers = _quality_blockers(incumbent.quality)
-    candidate_blockers = _quality_blockers(candidate_quality)
-    if candidate_passed and not incumbent.passed:
-        return False
-    if incumbent_blockers and not candidate_blockers:
-        return False
-    if len(candidate_blockers) < len(incumbent_blockers):
-        return False
-    return incumbent.score > candidate_score
+    candidate_score = _candidate_score(candidate, candidate_quality)
+    incumbent_candidate = {"score": incumbent.score, "passed": incumbent.passed, "strategy": {"name": "incumbent"}}
+    incumbent_score = _candidate_score(incumbent_candidate, incumbent.quality)
+    return incumbent_score.rank_tuple > candidate_score.rank_tuple
+
+
+def _candidate_score(candidate: dict, quality: QualityReport | None) -> CandidateScore:
+    blockers = _quality_blockers(quality)
+    report = _quality_report_data(quality)
+    strategy = candidate.get("strategy") if isinstance(candidate.get("strategy"), dict) else {}
+    contract_preservation = _marker_score(report, ("revision_contract_preserved", "protected_rebuild_constraints", "修订方向", "保留"))
+    sample_adoption_preservation = _marker_score(report, ("sample_adoption", "小样", "本章已采用小样方向"))
+    structural_divergence = _strategy_divergence_score(strategy)
+    readability_floor = min(100, int(candidate.get("score") or 0)) if not blockers else max(0, int(candidate.get("score") or 0) - len(blockers) * 3)
+    canon_consistency = _marker_score(report, ("canon", "continuity", "承接", "设定"))
+    return CandidateScore(
+        value=int(candidate.get("score") or 0),
+        passed=bool(candidate.get("passed")),
+        blocker_count=len(blockers),
+        contract_preservation=contract_preservation,
+        sample_adoption_preservation=sample_adoption_preservation,
+        structural_divergence=structural_divergence,
+        readability_floor=readability_floor,
+        canon_consistency=canon_consistency,
+    )
+
+
+def _quality_report_data(quality: QualityReport | None) -> dict:
+    if not quality:
+        return {}
+    try:
+        data = json.loads(quality.report or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _marker_score(data: dict, markers: tuple[str, ...]) -> int:
+    text = json.dumps(data, ensure_ascii=False)
+    return sum(1 for marker in markers if marker in text)
+
+
+def _strategy_divergence_score(strategy: dict) -> int:
+    text = "\n".join(str(strategy.get(key, "")) for key in ("name", "opening", "middle", "ending"))
+    return min(4, sum(1 for marker in ("压力", "行动", "关系", "异常", "后果", "误判", "交易") if marker in text))
 
 
 def _quality_blockers(quality: QualityReport | None) -> list[str]:

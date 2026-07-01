@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 from sqlalchemy import func, select
 
 from app.db.session import session_scope
+import app.services.rebuild_candidates as rebuild_candidates
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, GenerationTask, PlatformFeedback, PublishJob, QualityReport, StoryArc, StoryBible, StoryFoundation
 from app.services.llm_queue import QUEUE_REBUILD_CANDIDATES, QUEUE_TYPES
 from app.services.planning import plan_chapters, run_next_action
@@ -37,6 +38,7 @@ def main() -> int:
         _case_frontend_backend_action_consistency(session, failures=failures)
         _case_done_is_terminal_completed(session, book_id=book.id, failures=failures)
         _case_rebuild_candidate_not_sync_execute(session, book_id=book.id, failures=failures)
+        _case_candidate_scoring_policy(failures=failures)
         _case_running_tasks_have_timeout_or_heartbeat(session, book_id=book.id, failures=failures)
 
     if failures:
@@ -170,6 +172,31 @@ def _case_rebuild_candidate_not_sync_execute(session, *, book_id: int, failures:
             failures.append(f"rebuild_queue_task_invalid:{result.object_id}")
     elif after_tasks == before_tasks:
         failures.append("rebuild_candidates_not_queued_or_tracked")
+
+
+def _case_candidate_scoring_policy(*, failures: list[str]) -> None:
+    class Quality:
+        def __init__(self, score: int, passed: bool, blockers: list[str]) -> None:
+            self.score = score
+            self.passed = passed
+            self.report = json.dumps({"issues": blockers, "reading_assessment": {"blockers": blockers}}, ensure_ascii=False)
+
+    incumbent = rebuild_candidates.IncumbentDraft(version=object(), quality=Quality(78, False, ["canon", "tone"]), score=78, passed=False)
+    better_candidate = {"score": 76, "passed": False}
+    if rebuild_candidates._should_restore_incumbent_over_candidate(
+        incumbent=incumbent,
+        candidate=better_candidate,
+        candidate_quality=Quality(76, False, []),
+    ):
+        failures.append("candidate_with_fewer_blockers_should_beat_higher_incumbent_score")
+
+    passing_candidate = {"score": 72, "passed": True}
+    if rebuild_candidates._should_restore_incumbent_over_candidate(
+        incumbent=incumbent,
+        candidate=passing_candidate,
+        candidate_quality=Quality(72, True, []),
+    ):
+        failures.append("passing_candidate_should_beat_nonpassing_incumbent")
 
 
 def _case_running_tasks_have_timeout_or_heartbeat(session, *, book_id: int, failures: list[str]) -> None:
