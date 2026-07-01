@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, StoryFoundation
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport, StoryFoundation
 
 QUALITY_DIAGNOSTIC_BRIEF_MARKERS = (
     "依据质检报告",
@@ -129,3 +129,33 @@ def brief_has_story_intent(text: str) -> bool:
 def next_version_number(session: Session, chapter_id: int) -> int:
     current = session.scalar(select(func.max(ChapterVersion.version_number)).where(ChapterVersion.chapter_id == chapter_id))
     return int(current or 0) + 1
+
+
+def collect_version_scores(session: Session, chapter_id: int) -> list["VersionScore"]:
+    """Build chronological (version_number, score, passed) history for early-stop.
+
+    Returned in ascending version_number order. A version without a quality
+    report contributes ``score=None, passed=False`` — the early-stop engine
+    treats those as unscored and non-passing.
+    """
+
+    from app.services.revision_early_stop import VersionScore  # local to avoid cycle
+
+    rows = session.execute(
+        select(ChapterVersion.version_number, QualityReport.score, QualityReport.passed)
+        .select_from(ChapterVersion)
+        .outerjoin(QualityReport, QualityReport.chapter_version_id == ChapterVersion.id)
+        .where(ChapterVersion.chapter_id == chapter_id)
+        .order_by(ChapterVersion.version_number.asc())
+    ).all()
+
+    scores: list[VersionScore] = []
+    for version_number, score, passed in rows:
+        scores.append(
+            VersionScore(
+                version_number=int(version_number),
+                score=int(score) if score is not None else None,
+                passed=bool(passed) if passed is not None else False,
+            )
+        )
+    return scores

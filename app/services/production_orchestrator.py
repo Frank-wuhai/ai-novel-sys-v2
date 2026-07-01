@@ -42,6 +42,17 @@ class ProductionSituation:
     strategy_category: str = ""
     strategy_confidence: int = 0
     strategy_evidence: tuple[str, ...] = field(default_factory=tuple)
+    # ---- early-stop signals (phase 2) -----------------------------------
+    # These are populated by planning.py from evaluate_early_stop() over the
+    # chapter's version history. When ``early_stop_should_stop`` is True the
+    # orchestrator preempts every ``revise_chapter`` branch and routes to
+    # ``accept_early_stop`` (best score >= threshold) or
+    # ``escalate_early_stop_ceiling`` (max_versions hit without a pass).
+    early_stop_should_stop: bool = False
+    early_stop_reason: str = ""
+    early_stop_best_version: int | None = None
+    early_stop_best_score: int | None = None
+    early_stop_triggered_rules: tuple[str, ...] = field(default_factory=tuple)
 
 
 def decide_production_route(situation: ProductionSituation) -> ProductionRouteDecision:
@@ -136,6 +147,54 @@ def _decide_revision_route(
             action=s.strategy_action,
             reason=s.strategy_reason or "生产策略层判定当前路径无效，自动切换下一步。",
             evidence=(*evidence, *s.strategy_evidence),
+            protected_inputs=protected_inputs,
+        )
+    # ---------------------------------------------------------------- early-stop
+    # phase 2/1b: preempt every ``revise_chapter`` branch below when the
+    # early-stop policy has decided the loop should halt. Two outcomes:
+    #   * best_score >= threshold  -> accept the best version we already have
+    #   * ceiling hit without pass -> escalate: kick rebuild candidates
+    # The strategy override above still wins because it encodes higher-order
+    # signals (comparison loops, budget recovery) that the pure early-stop
+    # policy can't see. Queue-in-flight also wins so we never preempt a
+    # revision that's already spending tokens.
+    if s.early_stop_should_stop:
+        best = s.early_stop_best_score
+        if best is not None and best >= 75:
+            reason = (
+                f"early-stop: {s.early_stop_reason}"
+                if s.early_stop_reason
+                else f"early-stop: best v{s.early_stop_best_version} score={best}"
+            )
+            return ProductionRouteDecision(
+                intent="accept_early_stop",
+                action="accept_early_stop",
+                reason=reason,
+                evidence=(
+                    *evidence,
+                    f"early_stop_rules={','.join(s.early_stop_triggered_rules) or 'unknown'}",
+                    f"best=v{s.early_stop_best_version}@{best}",
+                ),
+                protected_inputs=protected_inputs,
+            )
+        # No passing candidate — bail out of the linear revise loop and hand
+        # off to rebuild candidates. This mirrors the 'linear_revision_exhaustion'
+        # strategy rule but is triggered by the token-budget layer instead of
+        # score trends.
+        reason = (
+            f"early-stop ceiling: {s.early_stop_reason}"
+            if s.early_stop_reason
+            else "early-stop ceiling hit without any passing version"
+        )
+        return ProductionRouteDecision(
+            intent="escalate_early_stop_ceiling",
+            action="generate_rebuild_candidates",
+            reason=reason,
+            evidence=(
+                *evidence,
+                f"early_stop_rules={','.join(s.early_stop_triggered_rules) or 'unknown'}",
+                f"best={s.early_stop_best_version}@{best}" if best is not None else "best=none",
+            ),
             protected_inputs=protected_inputs,
         )
     if s.has_revision_brief and s.budget_blocker:

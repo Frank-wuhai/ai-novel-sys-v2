@@ -39,7 +39,7 @@ def main() -> int:
         ch2 = by_chapter.get(2)
         if not ch2:
             failures.append("book2_chapter2_missing_plan")
-        elif ch2.next_action not in {"generate_rebuild_candidates", "revise_chapter", "review_chapter"}:
+        elif ch2.next_action not in {"generate_rebuild_candidates", "revise_chapter", "review_chapter", "accept_early_stop"}:
             failures.append(f"book2_ch2_wrong_action:{ch2.next_action}:{ch2.reason}")
         if ch2 and ch2.next_action == "review_chapter" and ch2.latest_version_status != "draft":
             failures.append(f"book2_ch2_review_without_draft:{ch2.latest_version_status}:{ch2.reason}")

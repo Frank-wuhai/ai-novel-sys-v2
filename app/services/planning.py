@@ -448,6 +448,30 @@ def run_next_action(
             "当前策略已禁止未通过章节暂存后切下一章；请继续回炉修订或多候选重建，直到正式通过。",
             item.latest_version_id,
         )
+    if action == "accept_early_stop":
+        # Phase 2/1b: early-stop policy decided we've iterated enough. Promote
+        # the best passing version's chapter to ``needs_confirmation`` so the
+        # editor sees a clean handoff (same channel as approve_chapter). We do
+        # NOT flip the version row to 'approved' directly — the human still
+        # confirms, we just stop the automatic revise loop from burning more
+        # tokens. Downstream planning.next_action will pick up approve_chapter
+        # on the next tick because latest_quality.passed is True.
+        chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+        if chapter is not None and item.latest_version_id:
+            # Mark chapter as awaiting human confirmation to short-circuit the
+            # revision route. The revise-gate blocks revise once chapter.status
+            # is 'needs_confirmation'.
+            if chapter.status != "needs_confirmation":
+                chapter.status = "needs_confirmation"
+                session.add(chapter)
+                session.flush()
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "executed",
+            item.reason or "early-stop 已停止修订循环，等待作者确认最佳版本。",
+            item.latest_version_id,
+        )
     if action == "done":
         return RunNextActionResult(chapter_number, action, "completed", "chapter is complete", None)
     return RunNextActionResult(chapter_number, action, "blocked", item.reason, None)
@@ -900,6 +924,27 @@ def _plan_one(
             has_continuity_context=has_continuity_context,
         )
     publish_action, publish_reason = _publish_action(job) if version and version.status == "approved" else ("", "")
+    # ---- early-stop signal (phase 2/1b) -----------------------------------
+    # Only meaningful once a revision loop is actually in progress: a chapter
+    # with a revision_brief that is still iterating. For chapters that never
+    # reached revision (draft-only, brief-only), early-stop must not fire.
+    early_stop_should_stop = False
+    early_stop_reason = ""
+    early_stop_best_version = None
+    early_stop_best_score = None
+    early_stop_triggered_rules: tuple[str, ...] = ()
+    if revision_brief is not None:
+        from app.services.production_state import collect_version_scores
+        from app.services.revision_early_stop import evaluate_early_stop
+
+        version_scores = collect_version_scores(session, chapter.id)
+        if version_scores:
+            decision = evaluate_early_stop(version_scores)
+            early_stop_should_stop = decision.should_stop
+            early_stop_reason = decision.stop_reason
+            early_stop_best_version = decision.best_version_number
+            early_stop_best_score = decision.best_score
+            early_stop_triggered_rules = decision.triggered_rules
     route = decide_production_route(
         ProductionSituation(
             chapter_number=chapter_number,
@@ -930,6 +975,11 @@ def _plan_one(
             strategy_category=production_strategy.category if production_strategy else "",
             strategy_confidence=production_strategy.confidence if production_strategy else 0,
             strategy_evidence=production_strategy.evidence if production_strategy else (),
+            early_stop_should_stop=early_stop_should_stop,
+            early_stop_reason=early_stop_reason,
+            early_stop_best_version=early_stop_best_version,
+            early_stop_best_score=early_stop_best_score,
+            early_stop_triggered_rules=early_stop_triggered_rules,
         )
     )
     action, reason = route.action, route.reason

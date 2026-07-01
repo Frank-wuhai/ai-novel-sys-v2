@@ -20,6 +20,7 @@ AUTO_ACTIONS = {
     "publish_job_dry_run",
     "queue_publish_job",
     "retry_publish_job",
+    "accept_early_stop",
 }
 
 MANUAL_ACTIONS = {"approve_chapter", "mark_publish_job"}
