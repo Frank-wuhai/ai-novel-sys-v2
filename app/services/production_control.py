@@ -186,7 +186,12 @@ def build_production_control_report(
 
 def _summary(*, status: str, metrics: dict[str, int | bool | str]) -> str:
     if status in {"needs_author", "needs_confirmation"}:
-        return f"系统已把内容推到确认点；待确认 {metrics['approval_waiting']} 章。"
+        # ``human_waiting`` is derived from the same list that decides this
+        # branch (``confirmation_waiting``), so the wording matches the
+        # status label. Using ``approval_waiting`` here caused a "等待确认 /
+        # 待确认 0 章" contradiction because that metric comes from a
+        # different aggregate (decisions.approval_count).
+        return f"系统已把内容推到确认点；待确认 {metrics['human_waiting']} 章。"
     if status == "can_produce":
         return f"当前可自动推进；可生产章节 {metrics['auto_ready']} 章。"
     if status == "running":

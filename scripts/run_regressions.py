@@ -100,6 +100,7 @@ def main() -> int:
             ("skeleton_repair_dashboard", ["scripts/skeleton_repair_dashboard_regression.py"]),
             ("production_scaffold", ["scripts/production_scaffold_regression.py"]),
             ("production_gate", ["scripts/production_gate_regression.py"]),
+            ("production_control_summary_wording", ["scripts/production_control_summary_wording_regression.py"]),
             ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("production_invariants", ["scripts/production_invariants_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
