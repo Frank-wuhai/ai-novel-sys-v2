@@ -465,6 +465,23 @@ def run_next_action(
                 chapter.status = "needs_confirmation"
                 session.add(chapter)
                 session.flush()
+            # Phase 2/6: append a PlatformFeedback marker so the dashboard can
+            # tell "user manually approved" from "auto-stopped by policy".
+            # This is append-only and idempotent (repeated stops on the same
+            # chapter simply add more rows; describe_revision_progress reads
+            # the latest one).
+            from app.models.entities import PlatformFeedback  # local import — avoid cycle
+            session.add(
+                PlatformFeedback(
+                    book_id=book_id,
+                    chapter_id=chapter.id,
+                    platform="production_kernel",
+                    metric_name="revision_early_stop",
+                    metric_value=str(item.latest_version_id),
+                    raw_text=(item.reason or "early-stop triggered")[:1000],
+                )
+            )
+            session.flush()
         return RunNextActionResult(
             chapter_number,
             action,

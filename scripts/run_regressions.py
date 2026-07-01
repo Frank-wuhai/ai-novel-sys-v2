@@ -105,6 +105,7 @@ def main() -> int:
             ("early_stop_orchestrator", ["scripts/early_stop_orchestrator_regression.py"]),
             ("local_patch_default", ["scripts/local_patch_default_regression.py"]),
             ("quality_gate_tiers", ["scripts/quality_gate_tiers_regression.py"]),
+            ("revision_progress", ["scripts/revision_progress_regression.py"]),
             ("production_hardening", ["scripts/production_hardening_regression.py"]),
             ("production_invariants", ["scripts/production_invariants_regression.py"]),
             ("worker_stability", ["scripts/worker_stability_regression_test.py"]),
