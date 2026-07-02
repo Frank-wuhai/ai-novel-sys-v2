@@ -34,6 +34,31 @@ WATCHED_READING_DIMS = {
 READING_ASSESSMENT_POLICY_VERSION = "v6_hard_issue_acceptance"
 REVISION_ACTIONS = {"auto_polish", "auto_revise", "auto_rebuild"}
 APPROVAL_ACTIONS = {"approve_ready"}
+
+
+def _is_effective_approval(assessment) -> bool:
+    """Sprint 2 P0-1: recognise auto_polish@polish_ready with no blockers
+    as an *effective* approval.
+
+    Rationale: when the LLM chief editor returns action=auto_polish and
+    level=polish_ready with no outstanding blockers, the summary is literally
+    "主编认可，轻润色即可" — the draft is publishable, machine polish is a
+    nicety not a gate. Treating this as REVISION_ACTION would (a) flip
+    ``quality.passed`` back to False, (b) demote ``version.status`` from
+    reviewed_pass to needs_revision, and (c) trap the chapter in the
+    accept_early_stop → reviewed_pass → maybe_apply → needs_revision loop.
+
+    Callers use this to decide whether to promote to reviewed_pass or leave
+    it needing revision.
+    """
+    action = getattr(assessment, "action", None) if not isinstance(assessment, dict) else assessment.get("action")
+    if action in APPROVAL_ACTIONS:
+        return True
+    if action != "auto_polish":
+        return False
+    level = getattr(assessment, "level", None) if not isinstance(assessment, dict) else assessment.get("level")
+    blockers = getattr(assessment, "blockers", None) if not isinstance(assessment, dict) else assessment.get("blockers")
+    return level == "polish_ready" and not blockers
 MACHINE_APPROVAL_SCORE = 82
 MACHINE_APPROVAL_MIN_DIMENSION = 70
 MACHINE_APPROVAL_CORE_DIMENSIONS = {
@@ -99,6 +124,24 @@ def maybe_apply_reading_assessment(
         and existing.get("policy_version") == READING_ASSESSMENT_POLICY_VERSION
     ):
         assessment = _assessment_from_dict(existing)
+        if _is_effective_approval(assessment):
+            # Sprint 2 P0-1: existing approval-effective assessment — close
+            # any dangling revision briefs (they'd otherwise flip
+            # ``version.status`` back to needs_revision via
+            # ``_revision_brief_blocks_quality_reconcile`` on the next planner
+            # pass) and reconcile version state to reviewed_pass.
+            if chapter is not None:
+                _close_revision_briefs(session, chapter_id=chapter.id)
+            if (
+                version is not None
+                and version.status == "needs_revision"
+                and bool(quality.passed)
+            ):
+                version.status = move(
+                    "chapter_version", version.status, "reviewed_pass", "quality_pass"
+                )
+                session.flush()
+            return assessment
         if assessment.action in REVISION_ACTIONS and chapter and version:
             brief = _ensure_revision_brief(
                 session,
@@ -170,7 +213,7 @@ def maybe_apply_reading_assessment(
         stored = _store_assessment(quality, data, assessment, version=version)
         session.flush()
         return stored
-    if assessment.action in APPROVAL_ACTIONS:
+    if _is_effective_approval(assessment):
         _close_revision_briefs(session, chapter_id=chapter.id)
         if version.status == "needs_revision":
             version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
@@ -416,12 +459,34 @@ def _existing_assessment_matches_quality(existing: dict, *, quality_id: int | No
 
 def reading_assessment_requires_revision(report_data: dict) -> bool:
     assessment = report_data.get("reading_assessment") if isinstance(report_data.get("reading_assessment"), dict) else {}
-    return assessment.get("action") in REVISION_ACTIONS
+    if assessment.get("action") not in REVISION_ACTIONS:
+        return False
+    # Sprint 2 P0-1: effective approval doesn't require revision even if the
+    # raw action label is auto_polish.
+    if _is_effective_approval(assessment):
+        return False
+    return True
 
 
 def reading_assessment_approval_ready(report_data: dict) -> bool:
     assessment = report_data.get("reading_assessment") if isinstance(report_data.get("reading_assessment"), dict) else {}
-    return assessment.get("action") == "approve_ready"
+    if assessment.get("action") == "approve_ready":
+        return True
+    # Sprint 2 P0-1: an ``auto_polish`` verdict with level=polish_ready and
+    # no outstanding blockers means the LLM chief editor already endorsed
+    # the draft ("主编认可，轻润色即可"). Downstream planning must treat
+    # this as an approval-ready state — otherwise
+    # ``maybe_apply_reading_assessment`` re-runs on every planner pass and
+    # flips ``quality.passed`` back to False, defeating any earlier
+    # accept_early_stop promotion. Machine-polish is a downstream nicety,
+    # not a gate.
+    if (
+        assessment.get("action") == "auto_polish"
+        and assessment.get("level") == "polish_ready"
+        and not assessment.get("blockers")
+    ):
+        return True
+    return False
 
 
 def _ensure_revision_brief(
@@ -993,8 +1058,10 @@ def _apply_final_quality_decision(
     assessment: ReadingAssessment,
 ) -> None:
     base_passed = bool(data.get("base_quality_passed", data.get("passed", quality.passed)))
-    requires_revision = assessment.action in REVISION_ACTIONS
-    approval_ready = assessment.action in APPROVAL_ACTIONS
+    approval_ready = _is_effective_approval(assessment)
+    # Sprint 2 P0-1: effective approval (auto_polish@polish_ready no blockers)
+    # is NOT a revision requirement — machine polish downstream is optional.
+    requires_revision = (assessment.action in REVISION_ACTIONS) and not approval_ready
     final_passed = bool(base_passed and approval_ready)
     if assessment.action == "inspect":
         final_passed = False

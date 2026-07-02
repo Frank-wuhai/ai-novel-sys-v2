@@ -271,11 +271,29 @@ def _execute_accept_early_stop(
                 ChapterVersion.version_number == best_version_number,
             )
         )
-        if best_v is not None and best_v.status == "needs_revision":
+        if best_v is not None and best_v.status in ("needs_revision", "candidate"):
             best_v.status = "reviewed_pass"
             session.add(best_v)
             session.flush()
             promoted_version_id = best_v.id
+            # Sprint 2 P0-1: any later needs_revision/candidate versions
+            # (typically rebuild-candidate layers stacked on top of the
+            # best version) must be demoted so ``_latest_version`` — which
+            # picks by descending id — returns the promoted best_v. Without
+            # this, orchestrator keeps seeing latest.status=needs_revision
+            # and routes back into ``_decide_revision_route`` forever.
+            stale = session.scalars(
+                select(ChapterVersion).where(
+                    ChapterVersion.chapter_id == chapter.id,
+                    ChapterVersion.id > best_v.id,
+                    ChapterVersion.status.in_(("needs_revision", "candidate")),
+                )
+            ).all()
+            for v in stale:
+                v.status = "discarded"
+                session.add(v)
+            if stale:
+                session.flush()
 
     from app.models.entities import PlatformFeedback  # local import — avoid cycle
     session.add(
@@ -909,11 +927,18 @@ def _plan_one(
             version = _latest_version(session, chapter_id=chapter.id)
             quality = _latest_quality(session, version_id=version.id) if version else None
             active_revision_brief = _latest_revision_brief(session, chapter_id=chapter.id)
+    # Sprint 2 P0-1: revision-brief-blocks-quality-reconcile only flips a
+    # reviewed_pass version back to needs_revision if the quality report
+    # doesn't already carry a formal reading-assessment approval. When the
+    # LLM chief editor has endorsed the draft (approval_ready or effective
+    # approval), a dangling revision brief must NOT drag the state back —
+    # the brief is stale, not the endorsement.
     if (
         apply_state_repairs
         and version
         and version.status in {"reviewed_pass", "approved"}
         and _revision_brief_blocks_quality_reconcile(active_revision_brief)
+        and not _quality_has_formal_reading_approval(quality)
     ):
         version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
         quality = _latest_quality(session, version_id=version.id)
@@ -1111,6 +1136,23 @@ def _pre_chapter_creation_blocker(session: Session, *, book_id: int, chapter_num
     quality = _latest_quality(session, version_id=latest.id)
     if latest.status in {"reviewed_pass", "approved"} and not (quality and quality.passed is False):
         return "", ""
+    # Sprint 2 P0-1 fallback: an earlier version may have been promoted to
+    # reviewed_pass by ``_execute_accept_early_stop`` while the very last
+    # version stayed at needs_revision (e.g. rebuild candidates layered on
+    # top of the best version). If any earlier version is reviewed_pass and
+    # the chapter has been formally handed to human confirmation, downstream
+    # chapters may proceed.
+    if previous.status in {"needs_confirmation", "approved", "continuity_recorded"}:
+        has_reviewed_pass = session.scalar(
+            select(ChapterVersion.id)
+            .where(
+                ChapterVersion.chapter_id == previous.id,
+                ChapterVersion.status.in_(("reviewed_pass", "approved")),
+            )
+            .limit(1)
+        )
+        if has_reviewed_pass:
+            return "", ""
     score = f"，评分 {quality.score}" if quality and quality.score is not None else ""
     verdict = "未通过" if quality and quality.passed is False else "未定稿"
     return (
@@ -2004,7 +2046,17 @@ def _latest_revision_brief(session: Session, *, chapter_id: int) -> ChapterBrief
 
 
 def _latest_version(session: Session, *, chapter_id: int) -> ChapterVersion | None:
-    return session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id).order_by(ChapterVersion.id.desc()))
+    # Sprint 2 P0-1: discarded versions (rebuild layers demoted by
+    # accept_early_stop) must not shadow the promoted best version, so
+    # exclude them from the "latest" lookup used by orchestrator routing.
+    return session.scalar(
+        select(ChapterVersion)
+        .where(
+            ChapterVersion.chapter_id == chapter_id,
+            ChapterVersion.status != "discarded",
+        )
+        .order_by(ChapterVersion.id.desc())
+    )
 
 
 def _latest_quality(session: Session, *, version_id: int) -> QualityReport | None:
