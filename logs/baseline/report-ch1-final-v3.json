@@ -1,0 +1,128 @@
+{
+  "book": {
+    "id": 3,
+    "title": "基线测试书",
+    "platform": "番茄小说"
+  },
+  "model": "ark-code-latest",
+  "draft_model": "deepseek-v4-pro-260425",
+  "input_price_per_1m": 3.0,
+  "output_price_per_1m": 6.0,
+  "chapters": [
+    {
+      "chapter_number": 1,
+      "chapter_id": 16,
+      "versions": 18,
+      "first_pass_version": 11,
+      "final_score": 76,
+      "final_verdict": "pass",
+      "passed": true,
+      "early_stopped": false,
+      "final_chars": 4576,
+      "prompt_tokens": 48511,
+      "response_tokens": 25373,
+      "total_tokens": 73884,
+      "elapsed_seconds": 612.16,
+      "est_cost_cny": 0.2978,
+      "llm_requests": 7
+    },
+    {
+      "chapter_number": 2,
+      "chapter_id": 17,
+      "versions": 0,
+      "first_pass_version": null,
+      "final_score": null,
+      "final_verdict": "",
+      "passed": false,
+      "early_stopped": false,
+      "final_chars": 0,
+      "prompt_tokens": 0,
+      "response_tokens": 0,
+      "total_tokens": 0,
+      "elapsed_seconds": 0.0,
+      "est_cost_cny": 0.0,
+      "llm_requests": 0
+    },
+    {
+      "chapter_number": 3,
+      "chapter_id": 18,
+      "versions": 0,
+      "first_pass_version": null,
+      "final_score": null,
+      "final_verdict": "",
+      "passed": false,
+      "early_stopped": false,
+      "final_chars": 0,
+      "prompt_tokens": 0,
+      "response_tokens": 0,
+      "total_tokens": 0,
+      "elapsed_seconds": 0.0,
+      "est_cost_cny": 0.0,
+      "llm_requests": 0
+    }
+  ],
+  "aggregate": {
+    "chapters_with_versions": 1,
+    "versions": {
+      "n": 1,
+      "min": 18,
+      "avg": 18,
+      "p50": 18,
+      "max": 18
+    },
+    "first_pass_rate": 0.0,
+    "eventual_pass_rate": 1.0,
+    "final_score": {
+      "n": 1,
+      "min": 76,
+      "avg": 76,
+      "p50": 76,
+      "max": 76
+    },
+    "final_chars": {
+      "n": 1,
+      "min": 4576,
+      "avg": 4576,
+      "p50": 4576,
+      "max": 4576
+    },
+    "tokens_total": {
+      "n": 1,
+      "min": 73884,
+      "avg": 73884,
+      "p50": 73884,
+      "max": 73884
+    },
+    "elapsed_seconds": {
+      "n": 1,
+      "min": 612.16,
+      "avg": 612.16,
+      "p50": 612.16,
+      "max": 612.16
+    },
+    "est_cost_cny": {
+      "n": 1,
+      "min": 0.2978,
+      "avg": 0.3,
+      "p50": 0.3,
+      "max": 0.2978
+    },
+    "llm_requests": {
+      "n": 1,
+      "min": 7,
+      "avg": 7,
+      "p50": 7,
+      "max": 7
+    }
+  },
+  "projection": {
+    "target": "3 books × 10000 chars/day",
+    "chapters_per_book_per_day": 2,
+    "chapters_per_day_total": 6,
+    "cost_per_book_per_day_cny": 0.6,
+    "cost_per_day_total_cny": 1.8,
+    "cost_per_month_cny": 54.0,
+    "wall_seconds_per_book_per_day": 1224.3,
+    "tokens_per_day_total": 443304
+  }
+}
