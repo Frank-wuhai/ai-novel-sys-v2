@@ -560,6 +560,7 @@ def run_book_cycle(
 ) -> BookCycleResult:
     if max_steps < 1:
         raise ValueError("max_steps must be >= 1")
+    execution_mode = execution_mode_from_flags(dry_run=dry_run, preview_only=False, mode=None)
     executed: list[RunNextActionResult] = []
     for _ in range(max_steps):
         items = plan_chapters(session, book_id=book_id, start=start, count=count)
