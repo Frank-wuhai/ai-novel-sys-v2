@@ -102,6 +102,7 @@ def main() -> int:
             ("production_gate", ["scripts/production_gate_regression.py"]),
             ("production_control_summary_wording", ["scripts/production_control_summary_wording_regression.py"]),
             ("revision_early_stop", ["scripts/revision_early_stop_regression.py"]),
+            ("review_llm_escalation", ["scripts/review_llm_escalation_regression.py"]),
             ("early_stop_orchestrator", ["scripts/early_stop_orchestrator_regression.py"]),
             ("local_patch_default", ["scripts/local_patch_default_regression.py"]),
             ("quality_gate_tiers", ["scripts/quality_gate_tiers_regression.py"]),

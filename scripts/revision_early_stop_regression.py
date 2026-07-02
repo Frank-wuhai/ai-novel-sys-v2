@@ -219,6 +219,85 @@ def main() -> int:
         )
     )
 
+    # ---------------- plateau_stop (rule-flat guard, added 2026-07-02) ----------------
+    #
+    # Rationale: revise can spin forever when the rule scorer refuses to move.
+    # Stop when the last `plateau_window` versions drift by <= `plateau_delta`.
+    #
+    # Isolate from other rules by setting accept_score_threshold=100 (unreachable)
+    # and no_improvement_window=100 (unreachable), so only plateau can fire.
+    flat_policy = EarlyStopPolicy(
+        accept_score_threshold=100,
+        no_improvement_window=100,
+        min_versions_before_stop=3,
+        plateau_window=4,
+        plateau_delta=2,
+    )
+
+    # FIRE: 4 versions all 45 (delta 0 <= 2). Ties on score break by
+    # version_number DESC, so best is v4.
+    failures.append(
+        _check(
+            "plateau_stop_fires_flat_45",
+            _mk(4, [45, 45, 45, 45], [False] * 4),
+            expected_should_stop=True,
+            expected_rule="plateau_stop",
+            expected_best_version=4,
+            policy=flat_policy,
+        )
+    )
+
+    # FIRE: 4 versions with mild wiggle (44,45,45,46 -> delta 2).
+    failures.append(
+        _check(
+            "plateau_stop_fires_within_delta",
+            _mk(4, [44, 45, 45, 46], [False] * 4),
+            expected_should_stop=True,
+            expected_rule="plateau_stop",
+            policy=flat_policy,
+        )
+    )
+
+    # NO FIRE: delta 3 exceeds plateau_delta=2.
+    failures.append(
+        _check(
+            "plateau_stop_holds_wiggle_over_delta",
+            _mk(4, [44, 45, 45, 47], [False] * 4),
+            expected_should_stop=False,
+            expected_rule=None,
+            policy=flat_policy,
+        )
+    )
+
+    # NO FIRE: haven't accumulated `plateau_window` versions yet.
+    failures.append(
+        _check(
+            "plateau_stop_below_window",
+            _mk(3, [45, 45, 45], [False] * 3),
+            expected_should_stop=False,
+            expected_rule=None,
+            policy=flat_policy,
+        )
+    )
+
+    # NO FIRE: warm-up not met (min_versions_before_stop=5 blocks plateau at 4 versions).
+    warmup_block = EarlyStopPolicy(
+        accept_score_threshold=100,
+        no_improvement_window=100,
+        min_versions_before_stop=5,
+        plateau_window=4,
+        plateau_delta=2,
+    )
+    failures.append(
+        _check(
+            "plateau_stop_blocked_by_warmup",
+            _mk(4, [45, 45, 45, 45], [False] * 4),
+            expected_should_stop=False,
+            expected_rule=None,
+            policy=warmup_block,
+        )
+    )
+
     # ---------------- edge cases ----------------
 
     # Empty history — nothing to decide, do not stop.

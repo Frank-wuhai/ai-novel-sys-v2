@@ -77,6 +77,29 @@ def review_chapter(
         constraints=brief.constraints if brief else "",
         enforce_gate=not _is_dry_run_version(version),
     )
+    # Enrich report_data with per-chapter revision history so
+    # `_should_run_llm_review` can enforce the plateau_llm_skip guard.
+    prior_reports = session.execute(
+        select(QualityReport)
+        .join(ChapterVersion, QualityReport.chapter_version_id == ChapterVersion.id)
+        .where(ChapterVersion.chapter_id == chapter.id)
+        .order_by(QualityReport.id)
+    ).scalars().all()
+    if prior_reports:
+        recent_scores: list[int] = []
+        llm_review_history: list[dict] = []
+        for qr in prior_reports:
+            if qr.score is not None:
+                recent_scores.append(int(qr.score))
+            try:
+                prev_data = json.loads(qr.report or "{}")
+            except Exception:
+                prev_data = {}
+            if isinstance(prev_data.get("llm_review"), dict):
+                llm_review_history.append({"score": qr.score})
+        report_data.setdefault("recent_scores", recent_scores)
+        report_data.setdefault("llm_review_history", llm_review_history)
+
     should_llm_review, llm_skip_reason = _should_run_llm_review(result, report_data)
     if llm_review and should_llm_review:
         report_data["llm_review"] = _run_llm_chapter_review(
@@ -178,13 +201,40 @@ def _should_run_llm_review(rule_result, report_data: dict) -> tuple[bool, str]:
     severe_blockers = [str(item) for item in blockers if any(marker in str(item) for marker in ("contamination", "canon", "length", "min_chars"))]
     if passed:
         return True, "base_quality_passed"
-    if score >= 72 and hard_passed:
-        return True, "near_pass_needs_editorial_judgment"
     if score >= 78:
         return True, "high_score_rule_disagreement"
     if severe_blockers:
         return False, "hard_rule_blockers:" + ",".join(severe_blockers[:3])
+    if score >= 72 and hard_passed:
+        return True, "near_pass_needs_editorial_judgment"
+    # ------------------------------------------------------------------
+    # Editorial recovery window (added 2026-07-02).
+    #
+    # Rule-based scoring alone deadlocked the baseline chapter 1 run at
+    # score=45 for three consecutive revise rounds because rule scores are
+    # insensitive to revised prose content. Escalating to LLM review when
+    # (a) the hard gate PASSes and (b) score sits in [55, 72) unlocks the
+    # editorial layer so a human-style verdict can break the plateau.
+    if hard_passed and 55 <= score < 72:
+        # Plateau guard: if we're already flat AND we've spent an LLM review
+        # once, further LLM escalations rarely change the verdict — skip so
+        # we don't bleed tokens on a stuck chapter.
+        recent_scores = report_data.get("recent_scores") if isinstance(report_data.get("recent_scores"), list) else []
+        llm_history = report_data.get("llm_review_history") if isinstance(report_data.get("llm_review_history"), list) else []
+        if len(recent_scores) >= 3 and _plateau(recent_scores[-3:]) and llm_history:
+            return False, "plateau_llm_skip: 3 flat rule scores after >=1 LLM review"
+        return True, "editorial_recovery: hard_gate_pass_but_rule_score_low"
     return False, f"rule_score_too_low:{score}"
+
+
+def _plateau(scores: list[int]) -> bool:
+    """Return True when the given scores vary by <= 2 points (rule-flat)."""
+    if len(scores) < 2:
+        return False
+    numeric = [int(s) for s in scores if isinstance(s, (int, float))]
+    if len(numeric) < 2:
+        return False
+    return (max(numeric) - min(numeric)) <= 2
 
 
 def reconcile_existing_quality_report(

@@ -58,6 +58,12 @@ class EarlyStopPolicy:
     max_versions: int = 30
     min_versions_before_stop: int = 5
     no_improvement_window: int = 10
+    # Plateau detection (added 2026-07-02): stop when the last N versions
+    # (including failing ones) drift by <= `plateau_delta` total-score points.
+    # This catches the failure mode where revise is producing content but the
+    # rule scorer refuses to move — burning tokens with no signal.
+    plateau_window: int = 4
+    plateau_delta: int = 2
 
     def __post_init__(self) -> None:  # type: ignore[override]
         if self.accept_score_threshold < 0 or self.accept_score_threshold > 100:
@@ -68,6 +74,10 @@ class EarlyStopPolicy:
             raise ValueError(f"min_versions_before_stop must be >=0, got {self.min_versions_before_stop}")
         if self.no_improvement_window < 1:
             raise ValueError(f"no_improvement_window must be >=1, got {self.no_improvement_window}")
+        if self.plateau_window < 2:
+            raise ValueError(f"plateau_window must be >=2, got {self.plateau_window}")
+        if self.plateau_delta < 0:
+            raise ValueError(f"plateau_delta must be >=0, got {self.plateau_delta}")
 
 
 DEFAULT_POLICY = EarlyStopPolicy()
@@ -185,6 +195,48 @@ def evaluate_early_stop(
             passing_versions=len(passing),
             triggered_rules=("accept_score_threshold",),
         )
+
+    # ------------------------------------------------------------------ rule 2.5
+    # Plateau guard (added 2026-07-02):
+    # If the last `plateau_window` versions have rule-score drift <=
+    # `plateau_delta`, revise is producing content but not moving the needle.
+    # Stop before we burn more tokens; surface the best-so-far so an operator
+    # can decide (accept-as-best or manual rebuild).
+    #
+    # Uses ALL evaluated versions (not just passing), because a rule-flat run
+    # with zero passing versions is exactly the failure mode we saw on the
+    # 2026-07-02 baseline (three revises all at 45).
+    #
+    # Respect the min_versions_before_stop warm-up so a genuinely fast draft
+    # doesn't get cut short.
+    #
+    # Also require that the run has NOT been mostly passing — if >=50% of
+    # scored versions passed, we defer to the existing no_improvement_window
+    # rule (which surfaces the passing-version ceiling more precisely).
+    plateau_eligible = len(passing) * 2 < len(scored)  # passing < 50%
+    if (
+        plateau_eligible
+        and versions_evaluated >= max(policy.plateau_window, policy.min_versions_before_stop)
+        and len(scored) >= policy.plateau_window
+    ):
+        window = scored[-policy.plateau_window:]
+        window_scores = [int(v.score) for v in window if v.score is not None]
+        if len(window_scores) == policy.plateau_window:
+            drift = max(window_scores) - min(window_scores)
+            if drift <= policy.plateau_delta:
+                reason = (
+                    f"plateau_stop: last {policy.plateau_window} rule scores drift {drift}"
+                    f" <= {policy.plateau_delta} (scores={window_scores}); best_score={best_score}"
+                )
+                return EarlyStopDecision(
+                    should_stop=True,
+                    stop_reason=reason,
+                    best_version_number=best_version,
+                    best_score=best_score,
+                    versions_evaluated=versions_evaluated,
+                    passing_versions=len(passing),
+                    triggered_rules=("plateau_stop",),
+                )
 
     # ------------------------------------------------------------------ rule 3
     # No-improvement plateau: among the *passing* versions, if the best hasn't
