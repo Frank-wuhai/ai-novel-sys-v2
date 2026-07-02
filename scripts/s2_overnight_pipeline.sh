@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
-# Sprint 2 通宵串跑脚本
-# 用法: bash scripts/s2_overnight_pipeline.sh
-#
-# 逻辑：
-#   for ch in 4 5 6 7:
-#     跑一轮 drive_chapter.sh $ch 12
-#     检查 chapter.status
-#       - approved / needs_confirmation → 继续下一章
-#       - 卡住（needs_revision 且 accept_early_stop 未触发）→ 跑 s2_manual_promote 兜底
-#       - 兜底后再验一次；仍卡住 → 记录并 skip 到下一章
-#   最后输出综合报告 + git log
+# 在 Ch4 background 跑完后自动接续：
+# 1. 判断 Ch4 是否自动闭环
+# 2. 若否，走 s2_manual_promote_ch.py 4 兜底
+# 3. 串跑 Ch5→Ch6→Ch7（每章 12 轮 + 卡住兜底 + 再 4 轮确认）
+# 4. 生成综合 report
 set -uo pipefail
 cd /home/frank/ai-novel-system-v2
 
@@ -22,7 +16,7 @@ log() {
     echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG_DIR/pipeline.log"
 }
 
-check_chapter_status() {
+check_chapter() {
     local ch=$1
     venv/bin/python -c "
 from app.db.session import configure_database, session_scope
@@ -33,61 +27,65 @@ configure_database(settings.database_url)
 with session_scope() as s:
     ch = s.scalar(select(Chapter).where(Chapter.book_id==${BOOK_ID}, Chapter.chapter_number==${ch}))
     if not ch:
-        print('missing')
+        print('missing|missing|0|False')
     else:
-        v = s.scalars(select(ChapterVersion).where(ChapterVersion.chapter_id==ch.id).order_by(ChapterVersion.id.desc())).first()
+        v = s.scalars(select(ChapterVersion).where(ChapterVersion.chapter_id==ch.id, ChapterVersion.status!='discarded').order_by(ChapterVersion.id.desc())).first()
         q = s.scalar(select(QualityReport).where(QualityReport.chapter_version_id==v.id).order_by(QualityReport.id.desc())) if v else None
-        print(f'{ch.status}|{v.status if v else None}|{q.score if q else None}|{q.passed if q else None}')
-"
+        print(f'{ch.status}|{v.status if v else \"none\"}|{q.score if q else 0}|{q.passed if q else False}')
+" 2>/dev/null
 }
 
-manual_promote_fallback() {
-    local ch=$1
-    log "  fallback: 运行 s2_manual_promote for ch=${ch}"
-    venv/bin/python /tmp/s2_manual_promote_ch.py $ch > "$LOG_DIR/ch${ch}_fallback.log" 2>&1
-}
-
-echo "# S2 Overnight Pipeline Report" > "$REPORT"
+echo "# S2 Overnight Report" > "$REPORT"
 echo "" >> "$REPORT"
 echo "Started: $(date)" >> "$REPORT"
 echo "Branch: $(git branch --show-current) @ $(git rev-parse --short HEAD)" >> "$REPORT"
 echo "" >> "$REPORT"
-echo "| Ch | Rounds | Final Status | Version Status | Score | Passed | Fallback? |" >> "$REPORT"
-echo "|----|--------|--------------|----------------|-------|--------|-----------|" >> "$REPORT"
+echo "| Ch | Rounds | Chapter | Version | Score | Passed | Fallback |" >> "$REPORT"
+echo "|----|--------|---------|---------|-------|--------|----------|" >> "$REPORT"
 
-for CH in 4 5 6 7; do
+# Ch4 特殊：先看当前状态（可能之前 background 已跑）
+STATUS_RAW=$(check_chapter 4)
+IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
+log "Ch4 initial: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
+
+FALLBACK4="no"
+if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ]; then
+    log "Ch4 需人工兜底"
+    venv/bin/python scripts/s2_manual_promote_ch.py 4 > "$LOG_DIR/ch4_fallback.log" 2>&1
+    FALLBACK4="yes"
+    log "Ch4 兜底完成, 再跑 2 轮 drive 确认"
+    bash scripts/drive_chapter.sh $BOOK_ID 4 2 > "$LOG_DIR/ch4_confirm.log" 2>&1
+    STATUS_RAW=$(check_chapter 4)
+    IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
+fi
+echo "| 4 | N/A | $C_STATUS | $V_STATUS | $SCORE | $PASSED | $FALLBACK4 |" >> "$REPORT"
+
+for CH in 5 6 7; do
     log "=== Chapter $CH ==="
     LOGFILE="$LOG_DIR/ch${CH}.log"
     bash scripts/drive_chapter.sh $BOOK_ID $CH 12 > "$LOGFILE" 2>&1
 
-    STATUS_RAW=$(check_chapter_status $CH)
+    STATUS_RAW=$(check_chapter $CH)
     IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
     log "  after drive: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
 
-    FALLBACK="no"
+    FB="no"
     if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ]; then
-        if [ -f /tmp/s2_manual_promote_ch.py ]; then
-            manual_promote_fallback $CH
-            FALLBACK="yes"
-            # rerun 2 轮 drive to confirm
-            bash scripts/drive_chapter.sh $BOOK_ID $CH 4 >> "$LOGFILE" 2>&1
-            STATUS_RAW=$(check_chapter_status $CH)
-            IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
-            log "  after fallback: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
-        else
-            log "  no fallback script; skipping"
-        fi
+        venv/bin/python scripts/s2_manual_promote_ch.py $CH > "$LOG_DIR/ch${CH}_fallback.log" 2>&1
+        FB="yes"
+        bash scripts/drive_chapter.sh $BOOK_ID $CH 4 >> "$LOGFILE" 2>&1
+        STATUS_RAW=$(check_chapter $CH)
+        IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
+        log "  after fallback: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
     fi
 
-    ROUNDS=$(grep -c "^--- round " "$LOGFILE" || echo 0)
-    echo "| $CH | $ROUNDS | $C_STATUS | $V_STATUS | $SCORE | $PASSED | $FALLBACK |" >> "$REPORT"
+    ROUNDS=$(grep -c "^--- round " "$LOGFILE" 2>/dev/null || echo 0)
+    echo "| $CH | $ROUNDS | $C_STATUS | $V_STATUS | $SCORE | $PASSED | $FB |" >> "$REPORT"
 done
 
 echo "" >> "$REPORT"
-echo "" >> "$REPORT"
-echo "## Git log this session" >> "$REPORT"
+echo "## Git log" >> "$REPORT"
 git log --oneline -10 >> "$REPORT"
 
 log "=== DONE ==="
-log "Report: $REPORT"
 cat "$REPORT"
