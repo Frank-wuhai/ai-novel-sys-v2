@@ -78,6 +78,35 @@ def persistent_revision_budget(
 ) -> PersistentRevisionBudget:
     if max_full_revisions < 1:
         max_full_revisions = 1
+    # Sprint 2 P0-1: cutoff based on the latest chapter version.
+    # When a recovery-brief has been generated and is waiting for the worker
+    # to produce a fresh revise task (i.e. no new ChapterVersion exists past
+    # the current latest), we must not keep counting historical revise tasks
+    # forever — otherwise the planner deadlocks on `revision_budget_recovery`
+    # and never enqueues the follow-up revise task, freezing the chapter.
+    from app.models.entities import Chapter, ChapterBrief, ChapterVersion
+    chapter = session.scalar(
+        select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number)
+    )
+    cutoff_dt = None
+    if chapter:
+        recovery_brief = session.scalar(
+            select(ChapterBrief)
+            .where(
+                ChapterBrief.chapter_id == chapter.id,
+                ChapterBrief.status == "revision_ready",
+                ChapterBrief.required_beats.like("%system_revision_budget_recovery%"),
+            )
+            .order_by(ChapterBrief.id.desc())
+        )
+        if recovery_brief:
+            latest_version = session.scalar(
+                select(ChapterVersion)
+                .where(ChapterVersion.chapter_id == chapter.id)
+                .order_by(ChapterVersion.id.desc())
+            )
+            if latest_version is not None:
+                cutoff_dt = latest_version.created_at
     rows = list(
         session.scalars(
             select(GenerationTask)
@@ -98,6 +127,9 @@ def persistent_revision_budget(
         if int(input_data.get("chapter_number") or 0) != chapter_number:
             continue
         if input_data.get("dry_run") is True or output_data.get("dry_run") is True:
+            continue
+        # Sprint 2 P0-1: skip tasks older than the recovery-brief cutoff.
+        if cutoff_dt is not None and task.created_at is not None and task.created_at < cutoff_dt:
             continue
         strategy = str(output_data.get("strategy") or "")
         revision_mode = str(input_data.get("revision_mode") or "")
