@@ -229,17 +229,50 @@ def generate_rebuild_candidates(
             report_data["selected_from_candidate_version_id"] = best.get("version_id")
             report_data["selection_score"] = _candidate_score(best, best_quality).__dict__
         report_data["rebuild_candidate_task_id"] = task.id
-        selected_quality = QualityReport(
-            chapter_version_id=selected.id,
-            score=incumbent.score if selected_from_incumbent and incumbent else int(best.get("score") or 0),
-            passed=incumbent.passed if selected_from_incumbent and incumbent else bool(best.get("passed")),
-            report=json.dumps(report_data, ensure_ascii=False),
-        )
-        session.add(selected_quality)
-        session.flush()
         for active in session.scalars(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status == "revision_ready")):
             active.status = "superseded"
-        maybe_apply_reading_assessment(session, book_id=book_id, chapter_number=chapter_number, quality=selected_quality)
+        # Change C part 2 (2026-07-02): for freshly rebuilt candidates re-run
+        # full review_chapter on the selected version so it goes through LLM
+        # chief editor + editorial_gate + reading_assessment. Previously we
+        # copied best_quality.report into a hand-crafted QualityReport, which
+        # meant tier=None + llm_review=None in the stored report and Change C's
+        # LLM-override could never fire, keeping the planner routing selected
+        # drafts back through another expensive rebuild loop.
+        #
+        # Incumbent restore keeps the old copy-quality path: the incumbent
+        # already passed a full review previously and its stored quality
+        # (including LLM review results and reading_assessment) is authoritative;
+        # re-running review would waste tokens and could destabilize the score.
+        if selected_from_incumbent:
+            selected_quality = QualityReport(
+                chapter_version_id=selected.id,
+                score=incumbent.score if incumbent else int(best.get("score") or 0),
+                passed=incumbent.passed if incumbent else bool(best.get("passed")),
+                report=json.dumps(report_data, ensure_ascii=False),
+            )
+            session.add(selected_quality)
+            session.flush()
+            maybe_apply_reading_assessment(session, book_id=book_id, chapter_number=chapter_number, quality=selected_quality)
+        else:
+            from app.services.production_reviewing import review_chapter as _review_selected
+            selected_quality = _review_selected(
+                session,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                llm_review=True,
+                review_dry_run=dry_run,
+                auto_revision_brief=False,
+            )
+            # Merge candidate-selection metadata into the freshly generated report.
+            try:
+                fresh_report = json.loads(selected_quality.report or "{}")
+            except Exception:
+                fresh_report = {}
+            for key, value in report_data.items():
+                if key.startswith("selected_") or key.startswith("rejected_") or key in {"selection_reason", "selection_score", "rebuild_candidate_task_id"}:
+                    fresh_report[key] = value
+            selected_quality.report = json.dumps(fresh_report, ensure_ascii=False)
+            session.flush()
         task.status = "completed"
         task.output_json = json.dumps(
             {
