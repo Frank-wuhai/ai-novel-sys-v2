@@ -219,6 +219,85 @@ def _should_apply_reading_assessment(quality: QualityReport) -> bool:
     return score >= 70 and hard_gate_passed
 
 
+def _execute_accept_early_stop(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    item,
+) -> RunNextActionResult:
+    """Sprint 2 P0-1: promote the best passing version to reviewed_pass and
+    flip chapter.status to needs_confirmation. Extracted from run_next_action
+    so regressions can drive it directly without going through the state-repair
+    replan pass in ``_plan_one`` (which can flip quality.passed via
+    ``maybe_apply_reading_assessment`` and shadow the accept_early_stop
+    branch).
+
+    See scripts/accept_early_stop_advance_regression.py — before this fix,
+    accept_early_stop only mutated chapter.status. The best version stayed at
+    ``needs_revision`` and the next orchestrator tick routed straight back
+    into ``_decide_revision_route`` → ``accept_early_stop`` forever.
+    """
+    action = "accept_early_stop"
+    chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
+    if chapter is None or not item.latest_version_id:
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "executed",
+            item.reason or "early-stop triggered without chapter/version",
+            item.latest_version_id,
+        )
+    if chapter.status != "needs_confirmation":
+        chapter.status = "needs_confirmation"
+        session.add(chapter)
+        session.flush()
+
+    # Locate the version early-stop deemed acceptable.
+    from app.services.production_state import collect_version_scores
+    from app.services.revision_early_stop import evaluate_early_stop
+
+    version_scores = collect_version_scores(session, chapter.id)
+    best_version_number: int | None = None
+    if version_scores:
+        decision = evaluate_early_stop(version_scores)
+        if decision.should_stop and decision.best_version_number is not None:
+            best_version_number = decision.best_version_number
+    promoted_version_id: int | None = None
+    if best_version_number is not None:
+        best_v = session.scalar(
+            select(ChapterVersion).where(
+                ChapterVersion.chapter_id == chapter.id,
+                ChapterVersion.version_number == best_version_number,
+            )
+        )
+        if best_v is not None and best_v.status == "needs_revision":
+            best_v.status = "reviewed_pass"
+            session.add(best_v)
+            session.flush()
+            promoted_version_id = best_v.id
+
+    from app.models.entities import PlatformFeedback  # local import — avoid cycle
+    session.add(
+        PlatformFeedback(
+            book_id=book_id,
+            chapter_id=chapter.id,
+            platform="production_kernel",
+            metric_name="revision_early_stop",
+            metric_value=str(promoted_version_id or item.latest_version_id),
+            raw_text=(item.reason or "early-stop triggered")[:1000],
+        )
+    )
+    session.flush()
+    return RunNextActionResult(
+        chapter_number,
+        action,
+        "executed",
+        item.reason or "early-stop 已停止修订循环，等待作者确认最佳版本。",
+        item.latest_version_id,
+    )
+
+
 def run_next_action(
     session: Session,
     *,
@@ -449,45 +528,8 @@ def run_next_action(
             item.latest_version_id,
         )
     if action == "accept_early_stop":
-        # Phase 2/1b: early-stop policy decided we've iterated enough. Promote
-        # the best passing version's chapter to ``needs_confirmation`` so the
-        # editor sees a clean handoff (same channel as approve_chapter). We do
-        # NOT flip the version row to 'approved' directly — the human still
-        # confirms, we just stop the automatic revise loop from burning more
-        # tokens. Downstream planning.next_action will pick up approve_chapter
-        # on the next tick because latest_quality.passed is True.
-        chapter = _chapter(session, book_id=book_id, chapter_number=chapter_number)
-        if chapter is not None and item.latest_version_id:
-            # Mark chapter as awaiting human confirmation to short-circuit the
-            # revision route. The revise-gate blocks revise once chapter.status
-            # is 'needs_confirmation'.
-            if chapter.status != "needs_confirmation":
-                chapter.status = "needs_confirmation"
-                session.add(chapter)
-                session.flush()
-            # Phase 2/6: append a PlatformFeedback marker so the dashboard can
-            # tell "user manually approved" from "auto-stopped by policy".
-            # This is append-only and idempotent (repeated stops on the same
-            # chapter simply add more rows; describe_revision_progress reads
-            # the latest one).
-            from app.models.entities import PlatformFeedback  # local import — avoid cycle
-            session.add(
-                PlatformFeedback(
-                    book_id=book_id,
-                    chapter_id=chapter.id,
-                    platform="production_kernel",
-                    metric_name="revision_early_stop",
-                    metric_value=str(item.latest_version_id),
-                    raw_text=(item.reason or "early-stop triggered")[:1000],
-                )
-            )
-            session.flush()
-        return RunNextActionResult(
-            chapter_number,
-            action,
-            "executed",
-            item.reason or "early-stop 已停止修订循环，等待作者确认最佳版本。",
-            item.latest_version_id,
+        return _execute_accept_early_stop(
+            session, book_id=book_id, chapter_number=chapter_number, item=item
         )
     if action == "done":
         return RunNextActionResult(chapter_number, action, "completed", "chapter is complete", None)
