@@ -87,7 +87,18 @@ def generate_rebuild_candidates(
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
         raise ValueError(f"chapter not found: {chapter_number}")
-    source_version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    # Sprint 2 P0-1 stage-4: exclude discarded versions when finding latest.
+    # accept_early_stop / _execute_accept_early_stop discards stale versions
+    # after promoting a candidate; if the discarded version happens to be the
+    # highest id, the naive latest query returns it and the pre-check below
+    # rejects the rebuild attempt with "latest ... must be needs_revision".
+    # Observed on book=3 Ch7: v579 (discarded) shadowed v577 (needs_revision),
+    # blocking 3 subsequent rebuild rounds and stranding the chapter.
+    source_version = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id, ChapterVersion.status != "discarded")
+        .order_by(ChapterVersion.id.desc())
+    )
     if not source_version or source_version.status != "needs_revision":
         raise ValueError("latest chapter version must be needs_revision before candidate rebuild")
     brief = session.scalar(

@@ -49,7 +49,7 @@ IFS='|' read -r C_STATUS V_STATUS SCORE PASSED <<< "$STATUS_RAW"
 log "Ch4 initial: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
 
 FALLBACK4="no"
-if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ]; then
+if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ] && [ "$C_STATUS" != "continuity_recorded" ]; then
     log "Ch4 需人工兜底"
     venv/bin/python scripts/s2_manual_promote_ch.py 4 > "$LOG_DIR/ch4_fallback.log" 2>&1
     FALLBACK4="yes"
@@ -70,7 +70,7 @@ for CH in 5 6 7; do
     log "  after drive: chapter=$C_STATUS version=$V_STATUS score=$SCORE passed=$PASSED"
 
     FB="no"
-    if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ]; then
+    if [ "$C_STATUS" != "approved" ] && [ "$C_STATUS" != "needs_confirmation" ] && [ "$C_STATUS" != "published" ] && [ "$C_STATUS" != "continuity_recorded" ]; then
         venv/bin/python scripts/s2_manual_promote_ch.py $CH > "$LOG_DIR/ch${CH}_fallback.log" 2>&1
         FB="yes"
         bash scripts/drive_chapter.sh $BOOK_ID $CH 4 >> "$LOGFILE" 2>&1
