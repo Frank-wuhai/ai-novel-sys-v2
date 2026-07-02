@@ -28,7 +28,22 @@ FORCED_COST_PATTERNS = (
     ("救我家三日，不是救一世", "人情债表述过硬，需补角色为什么只敢给三日、三日后会发生什么。"),
 )
 CAUSAL_ANCHORS = ("因为", "所以", "于是", "因此", "这才", "这让", "逼得", "换来", "导致", "后果", "代价", "欠", "账", "按印")
-PAYOFF_ANCHORS = ("换", "抵", "保", "救", "拖", "三日", "账", "规矩", "凭据", "证据", "谁在乎", "会怎样")
+PAYOFF_ANCHORS = (
+    # 古风/传统 payoff anchors — 都市/悬疑/科幻都可复用的通用抽象词
+    "换", "抵", "保", "救", "拖", "三日", "账", "规矩", "凭据", "证据",
+    "谁在乎", "会怎样",
+    # Change A (2026-07-02): modern/urban prose anchors so contemporary
+    # settings (职场/都市/悬疑现代向) can register payoff-grounding hits
+    # instead of forever hitting the flat 40 baseline. These keywords mark
+    # (a) explicit trade/交换, (b) cost/代价, (c) commitment/承诺, and
+    # (d) supernatural/rule-based payoff markers (提问机会/忘掉/必须…)
+    # that make chapter-end hooks feel earned rather than dropped-in.
+    "交换", "交代", "交易", "承诺", "承担",
+    "代价", "抓住", "把柄", "秘密", "认账",
+    "会失去", "就没了", "换来", "换到",
+    "机会", "忘掉", "必须", "不敢",
+    "答应", "负责", "拿走", "算账",
+)
 ATMOSPHERE_SENSORY = ("雨", "风", "灯", "影", "味", "冷", "热", "潮", "血", "泥", "声", "疼", "汗")
 ATMOSPHERE_PRESSURE = ("怕", "慌", "疼", "逼", "躲", "债", "伤", "死", "追", "压", "不敢", "危险")
 

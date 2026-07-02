@@ -27,6 +27,29 @@ def main() -> int:
     if good_report.checks.get("cost_plausibility", 0) < 70:
         failures.append("plausible_cost_penalized")
 
+    # Change A regression: modern/urban payoff sentences must lift
+    # payoff_grounding above the hard-blocker threshold (>=50). Prior to
+    # this change the anchor set was古风-only (换/抵/三日/账/凭据/…),
+    # which meant urban prose scored a flat 40 and永远踩 blocker.
+    urban_grounded = (
+        "他把笔记本塞进抽屉，做了个交易：她保住那份合同，他会向她交代赵岩的秘密。"
+        "如果他今天不承诺这件事，明天林姐就会失去她想抓住的把柄，代价太大他承担不起。"
+    )
+    urban_report = evaluate_narrative_logic(urban_grounded)
+    if urban_report.checks.get("payoff_grounding", 0) < 50:
+        failures.append(
+            "urban_payoff_still_flat: "
+            f"score={urban_report.checks.get('payoff_grounding')}"
+        )
+
+    empty_payoff = "他坐在工位上想事情。窗外阳光很好。他打字。"
+    empty_report = evaluate_narrative_logic(empty_payoff)
+    if empty_report.checks.get("payoff_grounding", 100) >= 50:
+        failures.append(
+            "no_payoff_scored_as_grounded: "
+            f"score={empty_report.checks.get('payoff_grounding')}"
+        )
+
     print(
         json.dumps(
             {
@@ -34,6 +57,8 @@ def main() -> int:
                 "failures": failures,
                 "bad_report": report.to_dict(),
                 "good_report": good_report.to_dict(),
+                "urban_grounded_report": urban_report.to_dict(),
+                "empty_payoff_report": empty_report.to_dict(),
             },
             ensure_ascii=False,
             indent=2,

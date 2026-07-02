@@ -170,6 +170,7 @@ def main() -> int:
             ("editorial_stratification", ["scripts/editorial_stratification_regression.py"]),
             ("naming_governance", ["scripts/naming_governance_regression.py"]),
             ("narrative_logic", ["scripts/narrative_logic_regression.py"]),
+            ("reading_assessment_llm_override", ["scripts/reading_assessment_llm_override_regression.py"]),
             ("scene_expansion", ["scripts/scene_expansion_regression.py"]),
             ("production_llm_json_repair", ["scripts/production_llm_json_repair_regression.py"]),
             ("chapter_sample_json_repair", ["scripts/chapter_sample_json_repair_regression.py"]),

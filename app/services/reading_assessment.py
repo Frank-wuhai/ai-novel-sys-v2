@@ -229,6 +229,34 @@ def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) 
 
     if failure_class.get("category") == "structure_rewrite":
         reasons = [str(item) for item in failure_class.get("structural_reasons") or []]
+        # Change C (2026-07-02): if the LLM chief editor already reviewed and
+        # cleared the version — pass verdict, strong LLM score, hard_gate PASS,
+        # editorial tier B or above, and the editorial_gate applied a soft
+        # rule override — respect that judgement and downgrade to auto_polish
+        # instead of forcing another expensive rebuild. Rule-side
+        # brief_coverage/author_intent scores are known to lag behind actual
+        # prose quality, and rebuild loops on LLM-approved drafts bleed
+        # tokens without changing verdict.
+        editorial_gate = report_data.get("editorial_gate") if isinstance(report_data.get("editorial_gate"), dict) else {}
+        llm_override_qualifies = (
+            editor_verdict == "pass"
+            and editor_score >= 78
+            and hard_gate_passed
+            and editorial.get("tier") in {"A_approve", "B_solid_draft", "C_polish"}
+            and bool(editorial_gate.get("soft_rule_override"))
+        )
+        if llm_override_qualifies:
+            return ReadingAssessment(
+                "polish_ready",
+                "auto_polish",
+                "主编认可，轻润色即可",
+                "主编复核判定 pass 且硬门禁通过；规则侧结构分数偏低但正文已达合格底稿，只需按主编建议做轻润色，无需重建。",
+                "machine_polish",
+                preserve,
+                improve or reasons,
+                [],
+                quality_id=quality_id,
+            )
         return ReadingAssessment(
             "structure_rebuild_required",
             "auto_rebuild",
