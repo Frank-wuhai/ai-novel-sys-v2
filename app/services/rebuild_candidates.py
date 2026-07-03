@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.llm.providers import get_provider
+from app.llm.schemas import StructuredOutputError
 from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, GenerationTask, QualityReport
 from app.services.canon import format_canon_context
 from app.services.chapter_standards import extract_max_chars
+from app.services.readability import chinese_chars
 from app.services.production_blueprint import classify_quality_failure
 from app.services.production_optimization import enrich_quality_report_with_optimization
 from app.services.production_context import sanitize_quality_report
@@ -170,29 +172,43 @@ def generate_rebuild_candidates(
 
     try:
         rows: list[dict] = []
+        _skip_reasons: list[dict] = []
         for index, strategy in enumerate(_candidate_strategies(chapter_number)[:candidate_count], start=1):
-            candidate = _generate_one_candidate(
-                session,
-                provider=provider,
-                book=book,
-                chapter=chapter,
-                chapter_number=chapter_number,
-                source_version=source_version,
-                brief=brief,
-                quality=quality,
-                foundation_premise=foundation.premise,
-                reader_promise=foundation.reader_promise,
-                template=template,
-                model=model,
-                max_tokens=max_tokens,
-                temperature=min(0.9, temperature + (index - 1) * 0.04),
-                strategy=strategy,
-                task_id=task.id,
-                candidate_index=index,
-                dry_run=dry_run,
-            )
-            rows.append(candidate)
-            session.flush()
+            savepoint = session.begin_nested()
+            try:
+                candidate = _generate_one_candidate(
+                    session,
+                    provider=provider,
+                    book=book,
+                    chapter=chapter,
+                    chapter_number=chapter_number,
+                    source_version=source_version,
+                    brief=brief,
+                    quality=quality,
+                    foundation_premise=foundation.premise,
+                    reader_promise=foundation.reader_promise,
+                    template=template,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=min(0.9, temperature + (index - 1) * 0.04),
+                    strategy=strategy,
+                    task_id=task.id,
+                    candidate_index=index,
+                    dry_run=dry_run,
+                )
+                rows.append(candidate)
+                session.flush()
+                savepoint.commit()
+            except StructuredOutputError as candidate_exc:
+                # Sprint 2 P1-3: skip empty / malformed candidates instead of
+                # failing the whole rebuild task.  A nested savepoint drops
+                # the half-written ChapterVersion for this candidate without
+                # touching earlier successful candidates or the outer task.
+                savepoint.rollback()
+                _skip_reasons.append({
+                    "candidate_index": index,
+                    "error": str(candidate_exc),
+                })
     except Exception as exc:
         _mark_rebuild_task_failed(
             session,
@@ -297,6 +313,7 @@ def generate_rebuild_candidates(
                 "selected_passed": selected_quality.passed,
                 "best_candidate_score": best.get("score"),
                 "candidates": rows,
+                "skipped_candidates": _skip_reasons,
             },
             ensure_ascii=False,
         )
@@ -542,6 +559,24 @@ def _generate_one_candidate(
         model=model,
         task_label=f"候选重建{candidate_index}",
     )
+    # Sprint 2 P1-3: guard against empty / near-empty candidate content.
+    # Observed on book=3 Ch8 (v639) / Ch9 (v665): LLM occasionally returns a
+    # syntactically-valid but empty-body draft (title fine, content=""). The
+    # candidate was persisted with content_len=0 and evaluate_chapter scored
+    # it 30 (basic_publishability floor). When such a candidate becomes the
+    # selector's best, the selected version inherits the empty content and
+    # the 30-score outlier destroys plateau_stop's drift window (Ch8/9 could
+    # not converge because scores swung 30→77 across rounds).
+    #
+    # Raise instead of persisting — the outer loop already treats candidate
+    # generation exceptions as fatal (rebuild task marked failed, next
+    # planner round issues a fresh rebuild).  Losing one candidate is
+    # strictly better than poisoning the plateau window.
+    if not (draft.content or "").strip() or chinese_chars(draft.content) < 300:
+        raise StructuredOutputError(
+            f"rebuild candidate {candidate_index} produced empty/near-empty draft "
+            f"(content_chars={chinese_chars(draft.content or '')}); refusing to persist"
+        )
     version = ChapterVersion(
         chapter_id=chapter.id,
         version_number=next_version_number(session, chapter.id),
