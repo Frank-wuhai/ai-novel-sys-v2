@@ -154,6 +154,23 @@ def maybe_apply_editorial_stratification(
     if not stratification.should_auto_revise:
         session.flush()
         return stratification
+    # Sprint 2 P1-3 stage-8: honor accept_early_stop terminal state.
+    # If the chapter is already in a post-accept state (needs_confirmation,
+    # approved, continuity_recorded, published), the revision loop has been
+    # closed by early-stop — auto-elevating here would (a) create a new
+    # revision brief the operator never asked for and (b) demote the just-
+    # promoted reviewed_pass version back to needs_revision via
+    # submit_revision_suggestion, silently unwinding accept_early_stop's
+    # promote. Root-caused on book=3 Ch10/Ch12 where 56 accept feedbacks
+    # fired but v722 never stayed reviewed_pass.
+    from app.models.entities import Chapter as _Chapter
+    _chapter_row = session.scalar(
+        select(_Chapter).where(_Chapter.book_id == book_id, _Chapter.chapter_number == chapter_number)
+    )
+    _CLOSED_STATES = {"needs_confirmation", "approved", "continuity_recorded", "published"}
+    if _chapter_row is not None and _chapter_row.status in _CLOSED_STATES:
+        session.flush()
+        return stratification
     brief = _latest_brief_for_chapter(session, book_id=book_id, chapter_number=chapter_number)
     active_text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""]) if brief else ""
     marker = f"editorial_elevation_quality#{quality.id}"
