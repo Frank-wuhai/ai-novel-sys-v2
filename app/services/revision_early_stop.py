@@ -219,14 +219,25 @@ def evaluate_early_stop(
         and versions_evaluated >= max(policy.plateau_window, policy.min_versions_before_stop)
         and len(scored) >= policy.plateau_window
     ):
-        window = scored[-policy.plateau_window:]
-        window_scores = [int(v.score) for v in window if v.score is not None]
-        if len(window_scores) == policy.plateau_window:
+        # Sprint 2 P1-3 stage-7: sticky plateau — scan every sliding window
+        # (not just the last one). Rationale: if revise once entered a
+        # rule-flat plateau and then subsequent revisions bounce back out,
+        # we've already proven the model can't push past this score band on
+        # this chapter — burning more tokens is waste. Prefer the earliest
+        # plateau hit so the accepted best_version stays close to the flat
+        # segment rather than a later low-scored bounce.
+        min_window_end = max(policy.plateau_window, policy.min_versions_before_stop)
+        for end_idx in range(min_window_end, len(scored) + 1):
+            window = scored[end_idx - policy.plateau_window : end_idx]
+            window_scores = [int(v.score) for v in window if v.score is not None]
+            if len(window_scores) != policy.plateau_window:
+                continue
             drift = max(window_scores) - min(window_scores)
             if drift <= policy.plateau_delta:
                 reason = (
-                    f"plateau_stop: last {policy.plateau_window} rule scores drift {drift}"
-                    f" <= {policy.plateau_delta} (scores={window_scores}); best_score={best_score}"
+                    f"plateau_stop: window[{end_idx - policy.plateau_window}:{end_idx}] "
+                    f"rule scores drift {drift} <= {policy.plateau_delta} "
+                    f"(scores={window_scores}); best_score={best_score}"
                 )
                 return EarlyStopDecision(
                     should_stop=True,
