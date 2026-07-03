@@ -12,6 +12,7 @@ from app.models.entities import Book, Chapter, ChapterBrief, ChapterVersion, Gen
 from app.services.canon import format_canon_context
 from app.services.chapter_standards import extract_max_chars
 from app.services.production_blueprint import classify_quality_failure
+from app.services.production_optimization import enrich_quality_report_with_optimization
 from app.services.production_context import sanitize_quality_report
 from app.services.production_llm import (
     expand_short_draft_output,
@@ -564,6 +565,24 @@ def _generate_one_candidate(
     )
     report_data = json.loads(result.report)
     report_data["production_failure_classification"] = classify_quality_failure(report_data)
+    # Sprint 2 P0-1 stage-5: apply chapter_type_gate to candidates so the
+    # selector uses the same passed/score that review_chapter would later
+    # compute on the selected version.  Previously candidates were scored
+    # without the gate — selector could pick a candidate with passed=True
+    # that immediately flipped to passed=False after the selected-version
+    # re-review ran enrich_quality_report_with_optimization(enforce_gate=True),
+    # stranding the chapter (observed on book=3 Ch8: v603 candidate score
+    # 78/passed=True → v605 selected re-review score 75/passed=False, same
+    # content, brief_coverage=47<60).
+    report_data.setdefault("passed", bool(result.passed))
+    report_data = enrich_quality_report_with_optimization(
+        report_data,
+        chapter_number=chapter_number,
+        goal=brief.goal or "",
+        required_beats=required_beats,
+        constraints=packet.constraints,
+        enforce_gate=not dry_run,
+    )
     report_data["rebuild_candidate"] = {
         "task_id": task_id,
         "index": candidate_index,
@@ -571,10 +590,14 @@ def _generate_one_candidate(
         "length_repair": length_repair,
         "unit_flow_repair": unit_flow_repair,
     }
+    # Sprint 2 P0-1 stage-5: gate-adjusted passed becomes authoritative for
+    # both the DB row and the selector-facing return payload.
+    gate_passed = bool(report_data.get("passed", result.passed))
+    gate_score = int(report_data.get("score") or result.score)
     quality = QualityReport(
         chapter_version_id=version.id,
-        score=result.score,
-        passed=result.passed,
+        score=gate_score,
+        passed=gate_passed,
         report=json.dumps(report_data, ensure_ascii=False),
     )
     session.add(quality)
@@ -583,8 +606,8 @@ def _generate_one_candidate(
         "index": candidate_index,
         "version_id": version.id,
         "quality_report_id": quality.id,
-        "score": result.score,
-        "passed": result.passed,
+        "score": gate_score,
+        "passed": gate_passed,
         "strategy": strategy,
         "provider": response.provider,
         "model": response.model,
