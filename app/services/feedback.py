@@ -408,7 +408,24 @@ def submit_revision_suggestion(
         .where(ChapterVersion.chapter_id == brief.chapter_id)
         .order_by(ChapterVersion.id.desc())
     )
-    if latest_version and latest_version.status in {"draft", "reviewed_pass", "approved"}:
+    # Sprint 2 P1-3 stage-9: never demote a reviewed_pass version when the
+    # chapter has entered a post-accept terminal state. accept_early_stop
+    # promotes the best_version_number to reviewed_pass and flips
+    # chapter.status to needs_confirmation; if we still ran the demote
+    # below (feedback_reopen), the just-promoted version would silently
+    # slide back to needs_revision and continuity gates on Ch+1 would
+    # block indefinitely. This wraps every submit_revision_suggestion
+    # caller (editorial_stratification, reading_assessment,
+    # chapter_samples, revision_supervisor), not just the one gated in
+    # stage-8. Root-caused on book=3 Ch10/Ch12/Ch15.
+    _CLOSED_STATES = {"needs_confirmation", "approved", "continuity_recorded", "published"}
+    _chapter_row = session.get(Chapter, brief.chapter_id)
+    _chapter_closed = _chapter_row is not None and _chapter_row.status in _CLOSED_STATES
+    if (
+        latest_version
+        and not _chapter_closed
+        and latest_version.status in {"draft", "reviewed_pass", "approved"}
+    ):
         latest_version.status = move("chapter_version", latest_version.status, "needs_revision", "feedback_reopen")
     session.flush()
     return feedback, adjustment, brief, latest_version
