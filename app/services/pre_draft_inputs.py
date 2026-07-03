@@ -182,6 +182,23 @@ def _previous_chapter_stability_blocker(session: Session, *, book_id: int, chapt
     quality = session.scalar(select(QualityReport).where(QualityReport.chapter_version_id == latest.id).order_by(QualityReport.id.desc()))
     if _is_stable_previous_version(latest, quality):
         return ""
+    # Sprint 2 P1-3 stage-6: align with planning._pre_chapter_creation_blocker.
+    # accept_early_stop can leave the best version at reviewed_pass while its
+    # QualityReport.passed stays False (we accepted the score plateau, not a
+    # gate-pass). In that case the chapter has already been handed to human
+    # confirmation (needs_confirmation / approved / continuity_recorded) and
+    # downstream production should proceed.
+    if chapter.status in {"needs_confirmation", "approved", "continuity_recorded"}:
+        has_reviewed_pass = session.scalar(
+            select(ChapterVersion.id)
+            .where(
+                ChapterVersion.chapter_id == chapter.id,
+                ChapterVersion.status.in_(("reviewed_pass", "approved")),
+            )
+            .limit(1)
+        )
+        if has_reviewed_pass:
+            return ""
     score = f"，评分 {quality.score}" if quality and quality.score is not None else ""
     verdict = "未通过" if quality and quality.passed is False else "未定稿"
     return (
