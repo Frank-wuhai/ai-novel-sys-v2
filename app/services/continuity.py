@@ -31,7 +31,21 @@ def record_chapter_continuity(
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
         raise ValueError("chapter not found")
-    latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    # Sprint 2 P2-Ch29: prefer the promoted reviewed_pass/approved version
+    # over the id-max version. accept_early_stop can promote an earlier
+    # version (v26) while later versions (v27..v31) remain needs_revision;
+    # the id-max lookup would then trip the "quality pass or approval" gate
+    # even though the chapter has a legitimate promoted version.
+    latest = session.scalar(
+        select(ChapterVersion)
+        .where(
+            ChapterVersion.chapter_id == chapter.id,
+            ChapterVersion.status.in_(["reviewed_pass", "approved"]),
+        )
+        .order_by(ChapterVersion.id.desc())
+    )
+    if not latest:
+        latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
     if not latest:
         raise ValueError("chapter version not found")
     if latest.status not in {"reviewed_pass", "approved"}:
