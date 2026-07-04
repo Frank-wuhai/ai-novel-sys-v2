@@ -216,7 +216,12 @@ def maybe_apply_editorial_stratification(
         ]
     )
     if version and version.status != "needs_revision":
-        version.status = "needs_revision"
+        # Sprint 2 P2-Ch27: skip demote when chapter is already closed.
+        from sqlalchemy.orm import object_session
+        from app.services.chapter_state import chapter_is_in_closed_state
+        _s = object_session(version)
+        if _s is None or not chapter_is_in_closed_state(_s, version.chapter_id):
+            version.status = "needs_revision"
     sanitize_existing_chapter_brief(session, book_id=book_id, brief=new_brief)
     session.flush()
     return stratification

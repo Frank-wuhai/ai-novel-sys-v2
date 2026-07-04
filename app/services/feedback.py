@@ -408,19 +408,17 @@ def submit_revision_suggestion(
         .where(ChapterVersion.chapter_id == brief.chapter_id)
         .order_by(ChapterVersion.id.desc())
     )
-    # Sprint 2 P1-3 stage-9: never demote a reviewed_pass version when the
-    # chapter has entered a post-accept terminal state. accept_early_stop
-    # promotes the best_version_number to reviewed_pass and flips
-    # chapter.status to needs_confirmation; if we still ran the demote
-    # below (feedback_reopen), the just-promoted version would silently
-    # slide back to needs_revision and continuity gates on Ch+1 would
-    # block indefinitely. This wraps every submit_revision_suggestion
-    # caller (editorial_stratification, reading_assessment,
-    # chapter_samples, revision_supervisor), not just the one gated in
-    # stage-8. Root-caused on book=3 Ch10/Ch12/Ch15.
-    _CLOSED_STATES = {"needs_confirmation", "approved", "continuity_recorded", "published"}
-    _chapter_row = session.get(Chapter, brief.chapter_id)
-    _chapter_closed = _chapter_row is not None and _chapter_row.status in _CLOSED_STATES
+    # Sprint 2 P1-3 stage-9 (unified via chapter_state helper P2-Ch27):
+    # never demote a reviewed_pass version when the chapter has entered a
+    # post-accept terminal state. accept_early_stop promotes the
+    # best_version_number to reviewed_pass and flips chapter.status to
+    # needs_confirmation; if we still ran the demote below
+    # (feedback_reopen), the just-promoted version would silently slide
+    # back to needs_revision and continuity gates on Ch+1 would block
+    # indefinitely. Root-caused on book=3 Ch10/Ch12/Ch15 (stage-9)
+    # and Ch27 (P2-Ch27, where 4 sibling demote paths were still open).
+    from app.services.chapter_state import chapter_is_in_closed_state
+    _chapter_closed = chapter_is_in_closed_state(session, brief.chapter_id)
     if (
         latest_version
         and not _chapter_closed

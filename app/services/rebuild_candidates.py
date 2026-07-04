@@ -150,7 +150,15 @@ def generate_rebuild_candidates(
         )
         session.add(task)
         session.flush()
-        session.commit()
+        # Sprint 2 P2-Ch27 fix: previously we called ``session.commit()`` here
+        # so the ``running`` task row survives a crash. But that closes the
+        # outer transaction, and the retry loop below uses ``begin_nested()``
+        # which requires an active tx (otherwise SAVEPOINT->commit fails with
+        # ``ResourceClosedError: This transaction is closed``). Since the
+        # caller manages its own transaction lifecycle via ``session_scope``,
+        # a bare ``flush()`` is enough — the row is visible to this session
+        # and will be persisted by the outer commit. Crash-recovery for the
+        # ``running`` marker moves to the ``_mark_rebuild_task_failed`` path.
     else:
         input_data = json.loads(task.input_json or "{}")
         input_data.update(
@@ -185,14 +193,6 @@ def generate_rebuild_candidates(
             last_error: Exception | None = None
             for attempt in range(1, MAX_ATTEMPTS_PER_CANDIDATE + 1):
                 attempts_used = attempt
-                # Sprint 2 P1-4 A1 fix: after the earlier task-creation
-                # `session.commit()` (line ~153), the outer transaction is
-                # closed. `begin_nested()` requires an active transaction,
-                # otherwise SAVEPOINT->commit fails with
-                # `ResourceClosedError: This transaction is closed`.
-                # Autobegin a new outer tx here if needed.
-                if not session.in_transaction():
-                    session.begin()
                 savepoint = session.begin_nested()
                 try:
                     # bump temperature slightly per retry to escape a
@@ -362,7 +362,17 @@ def generate_rebuild_candidates(
 
 
 def _mark_rebuild_task_failed(session: Session, *, task_id: int, exc: Exception, payload: dict) -> None:
-    session.rollback()
+    # Sprint 2 P2-Ch27 fix: after removing the eager ``session.commit()`` in
+    # ``generate_rebuild_candidates`` (task-creation section), we no longer
+    # own a committed ``running`` task row here — the outer session_scope
+    # holds the whole tx. A bare ``session.rollback()`` would erase the task
+    # itself. Instead, drop any in-flight nested state via
+    # ``in_nested_transaction`` rollback and re-mark the task ``failed`` on
+    # the same outer tx. The caller's ``raise`` re-raises the underlying
+    # exception; the outer session_scope decides commit vs rollback.
+    if session.in_nested_transaction():
+        # rollback the innermost SAVEPOINT so partial candidate rows are gone.
+        session.rollback()
     task = session.get(GenerationTask, task_id)
     if not task:
         return
@@ -376,7 +386,6 @@ def _mark_rebuild_task_failed(session: Session, *, task_id: int, exc: Exception,
         ensure_ascii=False,
     )
     session.flush()
-    session.commit()
 
 
 def _best_incumbent_draft(

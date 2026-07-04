@@ -971,12 +971,20 @@ def _plan_one(
     # LLM chief editor has endorsed the draft (approval_ready or effective
     # approval), a dangling revision brief must NOT drag the state back —
     # the brief is stale, not the endorsement.
+    # Sprint 2 P1-3 stage-9 (extended P2-Ch27): never demote a promoted version
+    # when the chapter is already in a closed state. accept_early_stop can be
+    # followed by planner passes that pick up stale revision briefs; without
+    # this guard reading_assessment / planning apply_state_repairs / editorial
+    # would flip the just-promoted version back to needs_revision, breaking
+    # continuity_ready gates. This mirrors feedback.py:_CLOSED_STATES.
+    from app.services.chapter_state import chapter_is_in_closed_state
     if (
         apply_state_repairs
         and version
         and version.status in {"reviewed_pass", "approved"}
         and _revision_brief_blocks_quality_reconcile(active_revision_brief)
         and not _quality_has_formal_reading_approval(quality)
+        and not chapter_is_in_closed_state(session, chapter.id)
     ):
         version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
         quality = _latest_quality(session, version_id=version.id)

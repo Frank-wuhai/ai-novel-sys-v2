@@ -208,7 +208,9 @@ def maybe_apply_reading_assessment(
             quality_id=quality.id,
             revision_brief_id=external_brief.id,
         )
-        if version.status == "reviewed_pass":
+        # Sprint 2 P2-Ch27: skip demote when chapter is already closed.
+        from app.services.chapter_state import chapter_is_in_closed_state
+        if version.status == "reviewed_pass" and not chapter_is_in_closed_state(session, chapter.id):
             version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
         stored = _store_assessment(quality, data, assessment, version=version)
         session.flush()
@@ -239,7 +241,9 @@ def maybe_apply_reading_assessment(
             quality_id=quality.id,
             revision_brief_id=brief.id,
         )
-        if version.status == "reviewed_pass":
+        # Sprint 2 P2-Ch27: skip demote when chapter is already closed.
+        from app.services.chapter_state import chapter_is_in_closed_state
+        if version.status == "reviewed_pass" and not chapter_is_in_closed_state(session, chapter.id):
             version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
     stored = _store_assessment(quality, data, assessment, version=version)
     session.flush()
@@ -1078,9 +1082,26 @@ def _apply_final_quality_decision(
         "base_quality_passed": base_passed,
         "source": "unified_quality_verdict@v1",
     }
-    quality.passed = final_passed
-    quality.report = json.dumps(data, ensure_ascii=False)
+    # Sprint 2 P2-Ch27: skip quality mutation entirely when chapter is closed.
+    # Otherwise a stale reading_assessment pass writes final_passed=False into
+    # the QR, unblocking the planner's fresh revision loop even though
+    # accept_early_stop has already promoted the best version. We keep the
+    # in-memory ``final_verdict`` dict for other callers but do not persist it.
+    from sqlalchemy.orm import object_session
+    from app.services.chapter_state import chapter_is_in_closed_state
+    _s = object_session(quality)
+    _closed = (
+        _s is not None
+        and version is not None
+        and chapter_is_in_closed_state(_s, version.chapter_id)
+    )
+    if not _closed:
+        quality.passed = final_passed
+        quality.report = json.dumps(data, ensure_ascii=False)
     if not version:
+        return
+    if _closed:
+        # Closed chapters must not have version status flipped by state repair.
         return
     if requires_revision and version.status in {"reviewed_pass", "approved"}:
         version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
