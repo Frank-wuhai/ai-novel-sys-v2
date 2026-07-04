@@ -173,41 +173,60 @@ def generate_rebuild_candidates(
     try:
         rows: list[dict] = []
         _skip_reasons: list[dict] = []
+        # Sprint 2 P1-4 A1: retry empty/malformed candidate up to 2 times
+        # (total 3 attempts) with jittered temperature before giving up.
+        # Prior behaviour skipped on first failure, wasting a full candidate
+        # slot on transient LLM issues (empty body / structured-output parse
+        # failure).  Retry preserves candidate diversity while making the
+        # rebuild step robust to transient provider misfires.
+        MAX_ATTEMPTS_PER_CANDIDATE = 3
         for index, strategy in enumerate(_candidate_strategies(chapter_number)[:candidate_count], start=1):
-            savepoint = session.begin_nested()
-            try:
-                candidate = _generate_one_candidate(
-                    session,
-                    provider=provider,
-                    book=book,
-                    chapter=chapter,
-                    chapter_number=chapter_number,
-                    source_version=source_version,
-                    brief=brief,
-                    quality=quality,
-                    foundation_premise=foundation.premise,
-                    reader_promise=foundation.reader_promise,
-                    template=template,
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=min(0.9, temperature + (index - 1) * 0.04),
-                    strategy=strategy,
-                    task_id=task.id,
-                    candidate_index=index,
-                    dry_run=dry_run,
-                )
-                rows.append(candidate)
-                session.flush()
-                savepoint.commit()
-            except StructuredOutputError as candidate_exc:
-                # Sprint 2 P1-3: skip empty / malformed candidates instead of
-                # failing the whole rebuild task.  A nested savepoint drops
-                # the half-written ChapterVersion for this candidate without
-                # touching earlier successful candidates or the outer task.
-                savepoint.rollback()
+            attempts_used = 0
+            last_error: Exception | None = None
+            for attempt in range(1, MAX_ATTEMPTS_PER_CANDIDATE + 1):
+                attempts_used = attempt
+                savepoint = session.begin_nested()
+                try:
+                    # bump temperature slightly per retry to escape a
+                    # deterministic empty-body state
+                    retry_bump = (attempt - 1) * 0.06
+                    candidate = _generate_one_candidate(
+                        session,
+                        provider=provider,
+                        book=book,
+                        chapter=chapter,
+                        chapter_number=chapter_number,
+                        source_version=source_version,
+                        brief=brief,
+                        quality=quality,
+                        foundation_premise=foundation.premise,
+                        reader_promise=foundation.reader_promise,
+                        template=template,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=min(0.95, temperature + (index - 1) * 0.04 + retry_bump),
+                        strategy=strategy,
+                        task_id=task.id,
+                        candidate_index=index,
+                        dry_run=dry_run,
+                    )
+                    rows.append(candidate)
+                    session.flush()
+                    savepoint.commit()
+                    last_error = None
+                    break  # success — exit retry loop
+                except StructuredOutputError as candidate_exc:
+                    # rollback this attempt's half-written ChapterVersion;
+                    # earlier successful candidates and the outer task are
+                    # untouched.
+                    savepoint.rollback()
+                    last_error = candidate_exc
+                    # keep retrying up to MAX_ATTEMPTS_PER_CANDIDATE
+            if last_error is not None:
                 _skip_reasons.append({
                     "candidate_index": index,
-                    "error": str(candidate_exc),
+                    "error": str(last_error),
+                    "attempts": attempts_used,
                 })
     except Exception as exc:
         _mark_rebuild_task_failed(
