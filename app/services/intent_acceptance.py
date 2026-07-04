@@ -86,6 +86,64 @@ CONCEPT_ALIASES = (
     (("新线索", "章末新线索"), ("浮出", "名字", "梅字", "信物", "账纸", "证人", "旧印", "无灯小船")),
 )
 
+# Sprint 2 P1-4 stage-2: URBAN_CONCEPT_ALIASES — map review-language keywords
+# to concrete urban-scene tokens so `_point_covered` no longer fails when the
+# brief says "外部压力" and the prose actually shows "刘芸站在他工位入口".
+# Extends CONCEPT_ALIASES for `is_urban` book profiles (see book_profile.py
+# URBAN archetype).  See docs/sprint2/p1_optimization_plan.md for the full
+# analysis of the 45-pt intent_underfulfilled root cause.
+URBAN_CONCEPT_ALIASES = (
+    # Review-language "外部压力/威胁" → 都市场景压力词
+    (("外部压力", "压力", "威胁", "危险", "紧张", "被逼", "被迫"),
+     ("堵", "逼", "催", "威胁", "警告", "责问", "质问", "冷笑", "冷声", "站在", "拦", "盯着", "拉", "推", "锁上", "关上",
+      "邮件", "微信", "短信", "电话", "监控", "刘芸", "老板", "上司", "同事", "领导", "客户", "债主", "警察", "陌生人",
+      "催款", "追债", "解雇", "开除", "辞退", "开单", "扣钱", "扣分")),
+
+    # Review-language "主角主动选择/破局" → 都市主动动作
+    (("主角", "主动", "破局", "选择", "决定", "行动"),
+     ("站起来", "站直", "站稳", "推开", "拿起", "打开", "关掉", "拨通", "点开", "翻开", "翻抽屉", "掏出", "捡起", "放下",
+      "决定", "选择", "开口", "主动", "抢先", "先", "反问", "回问", "转身", "走过去", "上前", "拒绝", "同意")),
+
+    # Review-language "核心能力/触发/回报" → 都市异能触发词
+    (("核心能力", "能力", "触发", "回报", "收获", "启动", "运转"),
+     ("笔记本", "本子", "本册", "字迹", "笔迹", "文字", "预知", "看见", "读到", "感应", "浮现", "翻到", "打开",
+      "情绪", "念头", "命运", "未来", "画面", "闪回", "记忆", "碎片", "细节", "线索")),
+
+    # Review-language "代价/承担/后果" → 都市能力代价词
+    (("代价", "承担", "后果", "损失", "失去", "牺牲", "付出"),
+     ("忘记", "忘掉", "记不起", "想不起", "空白", "抽走", "掉了", "丢失", "少了", "碎裂", "裂痕", "裂缝", "破了",
+      "疼", "痛", "刺", "划伤", "血", "伤口", "淤青", "指尖", "指腹", "手指", "手心",
+      "透支", "透不过气", "喘", "眩晕", "苍白", "疲惫", "冷汗")),
+
+    # Review-language "章末/局面变化/下一章" → 都市章末动作/悬念
+    (("章末", "章尾", "结尾", "下一章", "局面", "变化", "改变", "推进", "转折"),
+     ("下一步", "下一个", "接下来", "第二天", "明天", "凌晨", "深夜", "现在", "此刻", "转身", "关门", "锁门", "离开",
+      "拉黑", "已读", "未读", "对话框", "屏幕", "消息", "陌生号码", "回拨", "挂断", "陌生地址",
+      "追", "跑", "逃", "赶", "冲出", "楼下", "电梯", "门外", "走廊", "楼梯", "路口")),
+
+    # Review-language "命运/身边人/改变" → 都市人际影响
+    (("命运", "身边人", "身边的人", "改变", "影响", "关系"),
+     ("同事", "朋友", "家人", "母亲", "父亲", "妹妹", "弟弟", "妻子", "丈夫", "女友", "男友", "室友",
+      "刘敏", "陈渡", "周远", "赵岩", "赵立诚", "陈末",  # 常见人名兜底（多章会复用）
+      "帮", "救", "劝", "拉住", "陪", "陪着", "牵", "接住", "留住", "推开", "赶走", "隔开")),
+
+    # Review-language "冲突/矛盾/张力" → 都市冲突场景词
+    (("冲突", "矛盾", "对峙", "对立", "张力", "紧张"),
+     ("盯着", "沉默", "对视", "对峙", "顶", "顶回去", "怼", "反驳", "质问", "冷笑", "皱眉", "咬牙",
+      "拳头", "攥紧", "攥", "手心出汗", "后退", "上前", "堵", "拦", "推开", "拽")),
+
+    # Review-language "追读/钩子/悬念" → 都市悬念词
+    (("追读", "钩子", "悬念", "期待", "好奇"),
+     ("到底", "究竟", "为什么", "怎么会", "怎么可能", "陌生", "从没", "第一次", "从来没", "突然", "忽然",
+      "陌生号码", "未接来电", "未读消息", "陌生地址", "陌生笔迹", "谁", "什么人", "什么时候")),
+
+    # Review-language "生活细节/画面感/氛围" → 都市感官描写词
+    (("画面", "画面感", "氛围", "细节", "场景", "空间"),
+     ("阳光", "灯", "灯光", "日光灯", "屏幕", "键盘", "抽屉", "桌面", "工位", "隔板", "地板", "地砖", "窗帘", "窗户",
+      "咖啡", "豆浆", "油条", "包子", "水杯", "纸巾", "笔", "手机", "电脑",
+      "嗡", "咔", "嘀", "叮", "响", "声音", "脚步声", "键盘声", "呼吸声")),
+)
+
 
 @dataclass(frozen=True)
 class IntentAcceptanceReport:
@@ -128,6 +186,19 @@ def evaluate_author_intent(
     if revision_mode in LOCAL_REVISION_MODES:
         return _evaluate_local_revision_intent(content=content, revision_mode=revision_mode, bias=bias)
     points = _intent_points(goal, required_beats)
+    # Sprint 2 P1-4 stage-2: compute profile once from full brief context
+    # (goal + required_beats + constraints + canon) so `_point_covered` can
+    # dispatch to URBAN_CONCEPT_ALIASES for urban books.  Per-point inference
+    # in `_coverage_units` misclassifies review-language points ("外部压力/
+    # 核心能力/章末") as generic because they lack domain keywords.
+    profile = infer_book_profile_from_context(
+        goal or "",
+        required_beats or "",
+        constraints or "",
+        author_preferences or "",
+        canon_context or "",
+        content or "",
+    )
     if not points:
         blockers = list(bias.blockers)
         return IntentAcceptanceReport(
@@ -138,7 +209,7 @@ def evaluate_author_intent(
             blockers=blockers,
             recommendations=["下一份章节 brief 应显式写入“本章剧情承诺”。"],
         )
-    covered = [point for point in points if _point_covered(content, point)]
+    covered = [point for point in points if _point_covered(content, point, profile=profile)]
     missing = [point for point in points if point not in covered]
     total = len(points) or 1
     score = round((len(covered) / total) * 100)
@@ -243,7 +314,12 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
 
 
 def _marked_story_points(raw: str) -> list[str]:
-    markers = ("本章剧情承诺:", "本章剧情承诺：", "剧情基线:", "剧情基线：")
+    # Sprint 2 P1-4 stage-3: only extract "本章剧情承诺" (per-chapter goals);
+    # skip "剧情基线" because 剧情基线 is book-level background/style guide,
+    # not per-chapter deliverables.  Prior behaviour dragged background lines
+    # into intent_points where they were nearly guaranteed to miss on any
+    # given chapter (~10% of 45-pt fires on Ch1-15 stemmed from this alone).
+    markers = ("本章剧情承诺:", "本章剧情承诺：")
     points: list[str] = []
     for line in (raw or "").splitlines():
         text = " ".join(line.split())
@@ -258,12 +334,12 @@ def _marked_story_points(raw: str) -> list[str]:
     return points
 
 
-def _point_covered(content: str, point: str) -> bool:
+def _point_covered(content: str, point: str, profile=None) -> bool:
     if point in content:
         return True
     if _negative_point_satisfied(content, point):
         return True
-    units = _coverage_units(point)
+    units = _coverage_units(point, profile=profile)
     if not units:
         tokens = [item.strip() for item in point.replace("/", "；").replace("、", "；").split("；") if len(item.strip()) >= 2]
         hits = sum(1 for token in tokens if token in content)
@@ -342,13 +418,20 @@ def _negative_point_satisfied(content: str, point: str) -> bool:
     return not any(term and term in content for term in set(forbidden))
 
 
-def _coverage_units(point: str) -> list[tuple[str, ...]]:
+def _coverage_units(point: str, profile=None) -> list[tuple[str, ...]]:
     units: list[tuple[str, ...]] = []
-    profile = infer_book_profile_from_context(point)
+    # Sprint 2 P1-4 stage-2: prefer caller-supplied profile (evaluated with
+    # full brief context), fall back to per-point inference for callers that
+    # don't have context.  Per-point inference can misclassify urban books as
+    # generic because review-language points ("外部压力/核心能力/章末") lack
+    # domain keywords.
+    if profile is None:
+        profile = infer_book_profile_from_context(point)
     for marker in profile.core_markers:
         if marker in point:
             units.append((marker,))
-    for needles, aliases in CONCEPT_ALIASES:
+    alias_table = URBAN_CONCEPT_ALIASES if profile.is_urban else CONCEPT_ALIASES
+    for needles, aliases in alias_table:
         if any(needle in point for needle in needles):
             units.append(tuple(dict.fromkeys(aliases)))
     marker_tokens = [token for token in INTENT_KEYWORDS if token in point]
