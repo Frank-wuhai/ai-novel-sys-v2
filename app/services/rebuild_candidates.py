@@ -185,6 +185,14 @@ def generate_rebuild_candidates(
             last_error: Exception | None = None
             for attempt in range(1, MAX_ATTEMPTS_PER_CANDIDATE + 1):
                 attempts_used = attempt
+                # Sprint 2 P1-4 A1 fix: after the earlier task-creation
+                # `session.commit()` (line ~153), the outer transaction is
+                # closed. `begin_nested()` requires an active transaction,
+                # otherwise SAVEPOINT->commit fails with
+                # `ResourceClosedError: This transaction is closed`.
+                # Autobegin a new outer tx here if needed.
+                if not session.in_transaction():
+                    session.begin()
                 savepoint = session.begin_nested()
                 try:
                     # bump temperature slightly per retry to escape a

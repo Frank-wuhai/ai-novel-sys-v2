@@ -285,7 +285,7 @@ def main() -> int:
             session,
             book_id=book.id,
             chapter_number=3,
-            dry_run=True,
+            mode="sandbox",
             queue_generation=False,
         )
         if recovery_result.action != "revision_trend_recovery" or recovery_result.status != "executed":
@@ -323,7 +323,7 @@ def main() -> int:
             session,
             book_id=book.id,
             chapter_number=3,
-            dry_run=True,
+            mode="sandbox",
             queue_generation=False,
         )
         if stale_recovery.action != "revision_trend_recovery" or stale_recovery.status != "executed":
@@ -428,7 +428,11 @@ def main() -> int:
         ):
             failures.append("budget_recovery_not_idempotent")
         budget_plan = plan_chapters(session, book_id=book.id, start=4, count=1)[0]
-        if budget_plan.next_action != "revise_chapter":
+        # Sprint 2 P0-1: after budget_recovery, planner routes to
+        # generate_rebuild_candidates (multi-candidate re-generation) instead
+        # of the old single-track revise_chapter loop. Both actions are
+        # acceptable "recovery in progress" states.
+        if budget_plan.next_action not in {"revise_chapter", "generate_rebuild_candidates"}:
             failures.append(f"author_runner_budget_recovery_not_pending:{budget_plan.next_action}:{budget_plan.reason}")
         fallback_quality = (
             _fallback_quality_for_recovery_revision(

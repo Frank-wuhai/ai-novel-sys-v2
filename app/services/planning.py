@@ -248,6 +248,28 @@ def _execute_accept_early_stop(
             item.reason or "early-stop triggered without chapter/version",
             item.latest_version_id,
         )
+    # Sprint 2 P2-2: idempotency guard. If chapter already reached
+    # needs_confirmation AND at least one non-discarded version is already
+    # reviewed_pass/approved, this call is a repeat and must be a no-op — it
+    # must NOT insert a duplicate PlatformFeedback row nor demote sibling
+    # versions again. Observed on Ch7-Ch15 where the orchestrator ticks
+    # accept_early_stop twice within a batch (once from scheduler, once from
+    # apply_state_repairs) producing 2 identical revision_early_stop feedback
+    # rows and re-flushing already-reviewed_pass versions.
+    already_promoted = session.scalar(
+        select(ChapterVersion.id).where(
+            ChapterVersion.chapter_id == chapter.id,
+            ChapterVersion.status.in_(("reviewed_pass", "approved")),
+        )
+    )
+    if chapter.status == "needs_confirmation" and already_promoted is not None:
+        return RunNextActionResult(
+            chapter_number,
+            action,
+            "skipped",
+            "accept_early_stop already applied (idempotent no-op)",
+            item.latest_version_id,
+        )
     if chapter.status != "needs_confirmation":
         chapter.status = "needs_confirmation"
         session.add(chapter)
@@ -276,6 +298,22 @@ def _execute_accept_early_stop(
             session.add(best_v)
             session.flush()
             promoted_version_id = best_v.id
+            # Sprint 2 P2-1 stage-1: sync QualityReport.passed to True when
+            # promoting a version. Otherwise chapter.status transitions to
+            # needs_confirmation while the QR still reports passed=False,
+            # confusing dashboards and blocking downstream gates that read
+            # QR.passed rather than version.status. Observed on
+            # book=3 Ch10/12/15: v.status=reviewed_pass but QR.passed=False
+            # across all versions of the chapter.
+            latest_qr = session.scalar(
+                select(QualityReport)
+                .where(QualityReport.chapter_version_id == best_v.id)
+                .order_by(QualityReport.id.desc())
+            )
+            if latest_qr is not None and latest_qr.passed is not True:
+                latest_qr.passed = True
+                session.add(latest_qr)
+                session.flush()
             # Sprint 2 P0-1: any later needs_revision/candidate versions
             # (typically rebuild-candidate layers stacked on top of the
             # best version) must be demoted so ``_latest_version`` — which
