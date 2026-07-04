@@ -141,6 +141,32 @@ def _decide_revision_route(
             evidence=evidence,
             protected_inputs=protected_inputs,
         )
+    # Sprint 2 P2-Ch28 fix: early-stop with an accept-worthy best version must
+    # win over strategy_action overrides. Otherwise a lingering
+    # ``generate_rebuild_candidates`` strategy signal keeps burning tokens
+    # even after we've already produced a >=75 candidate that early-stop is
+    # willing to accept. Symptom on Ch28: 31 versions, best v26 score=77
+    # (early-stop says should_stop=True), planner still routed to
+    # generate_rebuild_candidates because strategy_action short-circuited
+    # at the top. Now: if early-stop has surfaced an accept-worthy score,
+    # take it immediately.
+    if s.early_stop_should_stop and s.early_stop_best_score is not None and s.early_stop_best_score >= 75:
+        reason = (
+            f"early-stop preempts strategy: {s.early_stop_reason}"
+            if s.early_stop_reason
+            else f"early-stop preempts strategy: best v{s.early_stop_best_version} score={s.early_stop_best_score}"
+        )
+        return ProductionRouteDecision(
+            intent="accept_early_stop",
+            action="accept_early_stop",
+            reason=reason,
+            evidence=(
+                *evidence,
+                f"early_stop_rules={','.join(s.early_stop_triggered_rules) or 'unknown'}",
+                f"best=v{s.early_stop_best_version}@{s.early_stop_best_score}",
+            ),
+            protected_inputs=protected_inputs,
+        )
     if s.strategy_action in {"generate_rebuild_candidates", "revision_budget_recovery", "revision_trend_recovery"}:
         return ProductionRouteDecision(
             intent=s.strategy_intent or "production_strategy_override",
