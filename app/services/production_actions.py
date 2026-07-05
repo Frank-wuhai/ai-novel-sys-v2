@@ -16,6 +16,7 @@ AUTO_ACTIONS = {
     "revise_chapter",
     "enqueue_revise_chapter",
     "record_chapter_continuity",
+    "approve_chapter",
     "create_publish_job",
     "publish_job_dry_run",
     "queue_publish_job",
@@ -23,6 +24,6 @@ AUTO_ACTIONS = {
     "accept_early_stop",
 }
 
-MANUAL_ACTIONS = {"approve_chapter", "mark_publish_job"}
+MANUAL_ACTIONS = {"mark_publish_job"}
 
 LEGACY_AUTO_ACTIONS = {"reading_assessment_review"}
