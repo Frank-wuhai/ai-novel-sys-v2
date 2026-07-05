@@ -22,6 +22,7 @@ from app.services.production_actions import AUTO_ACTIONS, MANUAL_ACTIONS
 from app.services.production_orchestrator import ProductionSituation, decide_production_route
 from app.services.production_strategy import assess_production_strategy
 from app.services.production import (
+    approve_chapter,
     create_chapter_brief,
     create_publish_job,
     create_revision_brief,
@@ -524,6 +525,19 @@ def run_next_action(
         summary = default_chapter_continuity_summary(session, book_id=book_id, chapter_number=chapter_number)
         result = record_chapter_continuity(session, book_id=book_id, chapter_number=chapter_number, summary=summary)
         return RunNextActionResult(chapter_number, action, "executed", "recorded chapter continuity", result.chapter_id)
+    if action == "approve_chapter":
+        # Sprint 2 Phase E: auto-approve when every automated gate is green.
+        # Manual "confirmation required" is retained as the fallback for any
+        # chapter that fails an automated check. See
+        # scripts/auto_approve_eligible_regression.py.
+        version_id = item.latest_version_id
+        if version_id and _is_auto_approve_eligible(session, version_id=version_id):
+            try:
+                approved = approve_chapter(session, version_id=version_id, reviewer="auto:phase_e")
+                return RunNextActionResult(chapter_number, action, "executed", "auto-approved (all gates green)", approved.id)
+            except ValueError as exc:
+                return RunNextActionResult(chapter_number, action, "blocked", f"auto-approve refused: {exc}", None)
+        return RunNextActionResult(chapter_number, action, "blocked", "confirmation required", None)
     if action in MANUAL_ACTIONS:
         return RunNextActionResult(chapter_number, action, "blocked", "confirmation required", None)
     if action == "revision_budget_recovery":
@@ -1246,6 +1260,60 @@ def _quality_has_formal_reading_approval(quality: QualityReport | None) -> bool:
     from app.services.reading_assessment import reading_assessment_approval_ready
 
     return reading_assessment_approval_ready(_loads_json(quality.report))
+
+
+_HARD_BLOCKING_ISSUE_PREFIXES = (
+    "bias_blocker",
+    "forbidden_marker",
+    "setting_contradiction",
+    "too_short",
+    "too_long",
+)
+
+
+def _is_auto_approve_eligible(session: Session, *, version_id: int) -> bool:
+    """Sprint 2 Phase E: gate for auto-approving a chapter version without
+    human sign-off. Conservative — every automated check must be green.
+
+    Criteria:
+      - version.status in {reviewed_pass, approved}
+      - chapter.status == "continuity_recorded" (or already approved)
+      - latest QR: passed=True
+      - hard_gate.passed=True
+      - chapter_type_gate.passed=True OR chapter_type_gate.soft_pass=True
+        OR chapter_type_gate missing (legacy)
+      - no HARD-blocking issues (bias/forbidden/too_short/too_long/setting)
+
+    Anything else → fall back to manual "confirmation required".
+    """
+    version = session.get(ChapterVersion, version_id)
+    if not version:
+        return False
+    if version.status not in {"reviewed_pass", "approved"}:
+        return False
+    chapter = session.get(Chapter, version.chapter_id)
+    if not chapter:
+        return False
+    if chapter.status not in {"continuity_recorded", "approved", "published"}:
+        return False
+    quality = session.scalar(
+        select(QualityReport)
+        .where(QualityReport.chapter_version_id == version.id)
+        .order_by(QualityReport.id.desc())
+    )
+    if not quality or not quality.passed:
+        return False
+    data = _loads_json(quality.report)
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    if hard_gate and not (bool(hard_gate.get("passed")) or hard_gate.get("status") == "PASS"):
+        return False
+    gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else None
+    if gate and not (bool(gate.get("passed")) or bool(gate.get("soft_pass"))):
+        return False
+    issues = [str(item) for item in data.get("issues") or []]
+    if any(any(issue.startswith(prefix) for prefix in _HARD_BLOCKING_ISSUE_PREFIXES) for issue in issues):
+        return False
+    return True
 
 
 def _defer_chapter_for_later(session: Session, *, book_id: int, chapter_number: int, reason: str) -> int:
