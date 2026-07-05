@@ -130,6 +130,39 @@ def enrich_quality_report_with_optimization(
         constraints=constraints,
     )
     type_gate_passed = base_score >= profile.pass_score and not gate_failures
+    # Sprint 2 P2-Ch44 soft-pass: architectural fix for the "LLM says pass but
+    # structural gate blocks" trap. When base quality + editorial gate agree
+    # the draft is acceptable AND every failing structural dimension is within
+    # a small gap of its threshold (<=15pt), promote to soft-pass. Preserves
+    # the audit trail (gate.passed stays False, failures preserved) but stops
+    # the pipeline from burning 20+ revisions on drafts the LLM already
+    # accepted. Matches the user's manual open-loop policy exactly:
+    # editorial pass + base pass + gap<=15 -> soft accept. See
+    # scripts/chapter_type_gate_soft_pass_regression.py for the invariant set.
+    soft_pass_gap_ceiling = 15
+    soft_pass_active = False
+    soft_pass_reason: str | None = None
+    if not type_gate_passed and gate_failures:
+        # Compute the max single-dimension gap; blocking condition is any
+        # single dim >soft_pass_gap_ceiling from threshold OR score too low.
+        max_gap = 0
+        try:
+            for name, threshold in profile.required_dimensions.items():
+                actual = int(dimensions.get(name) or 0)
+                if actual < threshold:
+                    max_gap = max(max_gap, threshold - actual)
+        except Exception:
+            max_gap = soft_pass_gap_ceiling + 1  # fail-closed on shape errors
+        hard_gate_ok = bool((report_data.get("hard_gate") or {}).get("passed", True))
+        editorial_ok = bool((report_data.get("editorial_gate") or {}).get("passed", False))
+        base_ok = bool(report_data.get("base_quality_passed", report_data.get("passed", False)))
+        score_ok = base_score >= profile.pass_score
+        if hard_gate_ok and editorial_ok and base_ok and score_ok and max_gap <= soft_pass_gap_ceiling:
+            soft_pass_active = True
+            soft_pass_reason = (
+                f"soft_pass:editorial+base agree,max_gap={max_gap}pt<="
+                f"{soft_pass_gap_ceiling}pt,failures={','.join(gate_failures[:3])}"
+            )
     report_data["chapter_type_gate"] = {
         "schema": "chapter_type_gate_v1",
         "chapter_type": profile.code,
@@ -139,6 +172,8 @@ def enrich_quality_report_with_optimization(
         "required_dimensions": profile.required_dimensions,
         "failures": gate_failures,
         "passed": type_gate_passed,
+        "soft_pass": soft_pass_active,
+        "soft_pass_reason": soft_pass_reason,
     }
     report_data["revision_pass_prediction"] = {
         "schema": "revision_pass_prediction_v1",
@@ -149,7 +184,7 @@ def enrich_quality_report_with_optimization(
         "should_rebuild": predicted.should_rebuild,
         "reasons": list(predicted.reasons),
     }
-    if report_data.get("passed") and enforce_gate and not type_gate_passed:
+    if report_data.get("passed") and enforce_gate and not type_gate_passed and not soft_pass_active:
         report_data["passed"] = False
         report_data["status"] = "FAIL"
         issues = [str(item) for item in report_data.get("issues") or []]
