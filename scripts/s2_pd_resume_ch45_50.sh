@@ -2,7 +2,7 @@
 # Phase D resume: Ch45-Ch50 after manual Ch44 fix (open-loop chapter_type_gate override).
 set -u
 BOOK=3
-BUDGET=10
+BUDGET=40
 OUTDIR="logs/baseline/s2_pd_batch_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTDIR"
 

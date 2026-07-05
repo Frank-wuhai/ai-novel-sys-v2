@@ -171,11 +171,13 @@ def _quality_has_unresolved_gate_blocker(quality: QualityReport | None) -> bool:
         data = json.loads(quality.report or "{}")
     except json.JSONDecodeError:
         return False
-    issues = [str(item) for item in data.get("issues") or []]
-    if any(item.startswith("chapter_type_gate_failed") for item in issues):
-        return True
     chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
-    if chapter_type_gate and not bool(chapter_type_gate.get("passed")):
+    # Sprint 2 P2-Ch44 soft-pass: same rationale as planning.py mirror.
+    soft_pass_active = bool(chapter_type_gate.get("soft_pass"))
+    issues = [str(item) for item in data.get("issues") or []]
+    if any(item.startswith("chapter_type_gate_failed") for item in issues) and not soft_pass_active:
+        return True
+    if chapter_type_gate and not bool(chapter_type_gate.get("passed")) and not soft_pass_active:
         return True
     hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
     if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
