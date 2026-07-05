@@ -1123,6 +1123,7 @@ def _plan_one(
             feedback_marker_without_quality=feedback_marker_without_quality,
             revision_matches_quality_or_feedback=revision_matches_quality_or_feedback,
             story_clean_revision_brief=story_clean_revision_brief,
+            has_reading_assessment_contract_brief=bool(revision_brief) and _revision_brief_has_protected_review_marker(revision_brief),
             strategy_action=production_strategy.action if production_strategy else "",
             strategy_intent=production_strategy.intent if production_strategy else "",
             strategy_reason=production_strategy.reason if production_strategy else "",
