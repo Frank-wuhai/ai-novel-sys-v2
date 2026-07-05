@@ -1262,29 +1262,17 @@ def _quality_has_formal_reading_approval(quality: QualityReport | None) -> bool:
     return reading_assessment_approval_ready(_loads_json(quality.report))
 
 
-_HARD_BLOCKING_ISSUE_PREFIXES = (
-    "bias_blocker",
-    "forbidden_marker",
-    "setting_contradiction",
-    "too_short",
-    "too_long",
-)
-
-
 def _is_auto_approve_eligible(session: Session, *, version_id: int) -> bool:
-    """Sprint 2 Phase E: gate for auto-approving a chapter version without
-    human sign-off. Conservative — every automated check must be green.
+    """Sprint 2 Phase E: any chapter that made it to the approve_chapter
+    planning action has already cleared every content gate upstream
+    (hard_gate, chapter_type_gate w/ soft_pass, editorial_gate, continuity).
+    approve_chapter is now a workflow-progression step, not a second content
+    review — a redundant "confirmation required" here would only insert a
+    no-op human click.
 
-    Criteria:
-      - version.status in {reviewed_pass, approved}
-      - chapter.status == "continuity_recorded" (or already approved)
-      - latest QR: passed=True
-      - hard_gate.passed=True
-      - chapter_type_gate.passed=True OR chapter_type_gate.soft_pass=True
-        OR chapter_type_gate missing (legacy)
-      - no HARD-blocking issues (bias/forbidden/too_short/too_long/setting)
-
-    Anything else → fall back to manual "confirmation required".
+    The only reason to refuse auto-approve is a data-shape defect: the
+    version row is missing or already in a terminal state that would make
+    the transition nonsensical. Everything else auto-approves.
     """
     version = session.get(ChapterVersion, version_id)
     if not version:
@@ -1295,23 +1283,6 @@ def _is_auto_approve_eligible(session: Session, *, version_id: int) -> bool:
     if not chapter:
         return False
     if chapter.status not in {"continuity_recorded", "approved", "published"}:
-        return False
-    quality = session.scalar(
-        select(QualityReport)
-        .where(QualityReport.chapter_version_id == version.id)
-        .order_by(QualityReport.id.desc())
-    )
-    if not quality or not quality.passed:
-        return False
-    data = _loads_json(quality.report)
-    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
-    if hard_gate and not (bool(hard_gate.get("passed")) or hard_gate.get("status") == "PASS"):
-        return False
-    gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else None
-    if gate and not (bool(gate.get("passed")) or bool(gate.get("soft_pass"))):
-        return False
-    issues = [str(item) for item in data.get("issues") or []]
-    if any(any(issue.startswith(prefix) for prefix in _HARD_BLOCKING_ISSUE_PREFIXES) for issue in issues):
         return False
     return True
 

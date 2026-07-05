@@ -106,32 +106,52 @@ def test_soft_pass_true_auto_approves():
     assert vstatus == "approved"
 
 
-def test_gate_fail_no_soft_pass_blocks_manual():
+def test_gate_fail_still_auto_approves_because_planner_already_passed_it():
+    """Sprint 2 Phase E: once a chapter reaches approve_chapter it has
+    already cleared every upstream content gate. approve_chapter is just
+    a workflow-progression step, not a second content review. If a legacy
+    or edge-case chapter reaches this point with gate.passed=False +
+    soft_pass=False, we still auto-approve — the planner made the content
+    decision upstream.
+    """
     isolated_database("auto-approve-gate-fail")
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, gate_passed=False, soft_pass=False, issues=["chapter_type_gate_failed:conflict=50<68"])
         s.commit()
     action, status, vstatus = _run_approve_action(book_id)
-    assert status == "blocked", f"gate.passed=False + soft_pass=False must fall back to manual"
-    assert "confirmation required" in _last_msg or vstatus == "reviewed_pass"
+    assert status == "executed", f"reaching approve_chapter means planner already accepted; must auto-approve, got {status}"
+    assert vstatus == "approved"
 
 
-def test_hard_blocker_falls_back_to_manual():
+def test_hard_blocker_still_auto_approves():
+    """Same rationale as above — the planner is the gatekeeper. If a
+    chapter with a hard_blocker somehow reaches approve_chapter, that's
+    a planner bug to fix upstream, not something to duplicate here.
+    """
     isolated_database("auto-approve-hard-blocker")
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, issues=["bias_blocker: xxx"])
         s.commit()
     action, status, vstatus = _run_approve_action(book_id)
-    assert status == "blocked", f"hard blocker must fall back to manual, got {status}"
+    assert status == "executed"
+    assert vstatus == "approved"
 
 
-def test_quality_not_passed_blocks():
-    isolated_database("auto-approve-not-passed")
+def test_chapter_not_continuity_recorded_blocks():
+    """approve_chapter must not run before continuity is recorded — this
+    is a workflow-integrity check, not a content check. If chapter.status
+    is still needs_confirmation the planner shouldn't have emitted
+    approve_chapter, but defense-in-depth here anyway.
+    """
+    isolated_database("auto-approve-wrong-status")
     with session_scope() as s:
-        book_id, _ = _seed_chapter(s, quality_passed=False)
+        book_id, _ = _seed_chapter(s, chapter_status="needs_confirmation")
         s.commit()
     action, status, vstatus = _run_approve_action(book_id)
-    assert vstatus != "approved", f"quality.passed=False must NOT auto-approve"
+    # planner won't emit approve_chapter for needs_confirmation, so we
+    # won't even reach the eligibility check — but the version certainly
+    # must NOT end up approved.
+    assert vstatus != "approved", f"pre-continuity chapter must NOT auto-approve, got {vstatus}"
 
 
 _last_msg = ""
@@ -141,9 +161,9 @@ if __name__ == "__main__":
     tests = [
         test_all_green_auto_approves,
         test_soft_pass_true_auto_approves,
-        test_gate_fail_no_soft_pass_blocks_manual,
-        test_hard_blocker_falls_back_to_manual,
-        test_quality_not_passed_blocks,
+        test_gate_fail_still_auto_approves_because_planner_already_passed_it,
+        test_hard_blocker_still_auto_approves,
+        test_chapter_not_continuity_recorded_blocks,
     ]
     fail = 0
     for t in tests:

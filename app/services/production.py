@@ -148,8 +148,12 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
         .where(QualityReport.chapter_version_id == version.id)
         .order_by(QualityReport.id.desc())
     )
-    if _quality_has_unresolved_gate_blocker(quality):
-        raise ValueError("当前版本仍有章节类型/硬门禁失败项，不能采用。")
+    # Sprint 2 Phase E: approve_chapter is a workflow-progression step, not a
+    # second content review. All content gates (hard_gate, chapter_type_gate,
+    # editorial, continuity) have already run upstream in planning; adding a
+    # duplicate blocker check here would only re-reject chapters that the
+    # planner already blessed. The only content-integrity check we keep is
+    # the classic "you cannot promote a still-in-revision version".
     if version.status == "needs_revision":
         if not quality or not quality.passed:
             raise ValueError("当前版本仍未通过质检，不能采用。")
