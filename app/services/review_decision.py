@@ -38,8 +38,26 @@ def apply_review_decision(rule_result: ReviewRuleResult, report_data: dict) -> N
     # The chief editor already ruled; blocking on a 3-6 point gap is over-strict.
     editorial_slack = 6 if editor_passed else 0
     soft_blockers = soft_override_blockers(dimensions, slack=editorial_slack)
-    soft_rule_override = bool(editor_passed and hard_gate_passed and not blocking_issues and not soft_blockers)
-    final_passed = bool(editor_passed and (rule_result.passed or soft_rule_override))
+    # Sprint 2 P2-Ch45: chapter_type_gate has priority over editorial soft-override.
+    # chapter_type_gate measures structural dimensions (conflict_pressure,
+    # choice_and_cost, earned_payoff, brief_coverage) that the editorial gate's
+    # dimension whitelist does not cover. If chapter_type_gate blocks AND no
+    # soft_pass was granted (i.e. gap > 15pt), editorial gate must not flip
+    # passed back to True — the LLM chief editor doesn't see structural gaps.
+    chapter_type_gate = report_data.get("chapter_type_gate") if isinstance(report_data.get("chapter_type_gate"), dict) else {}
+    type_gate_veto = bool(
+        chapter_type_gate
+        and not bool(chapter_type_gate.get("passed"))
+        and not bool(chapter_type_gate.get("soft_pass"))
+    )
+    soft_rule_override = bool(
+        editor_passed
+        and hard_gate_passed
+        and not blocking_issues
+        and not soft_blockers
+        and not type_gate_veto
+    )
+    final_passed = bool(editor_passed and (rule_result.passed or soft_rule_override) and not type_gate_veto)
 
     report_data["editorial_gate"] = {
         "status": "completed",
