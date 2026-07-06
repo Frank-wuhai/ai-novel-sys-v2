@@ -48,6 +48,17 @@ class ProductionSituation:
     # This flag routes RA-contract briefs to revise_chapter regardless of
     # the QR's flags — the contract itself is the routing signal.
     has_reading_assessment_contract_brief: bool = False
+    # Sprint 2 Phase E.3 (exhaustion escalation): when linear revise + N
+    # rebuild-candidate batches (>=2) have all failed to produce a passing
+    # version, force accept_early_stop on the best-scoring version and log
+    # a QA backlog entry. Prevents the "no terminal state" dead loop where
+    # Ch4 kept spawning rebuild batches without converging (6+ batches, 31+
+    # versions, 645 briefs). See
+    # scripts/rebuild_exhaustion_escalation_regression.py.
+    rebuild_and_revision_exhausted: bool = False
+    exhausted_best_version_number: int | None = None
+    exhausted_best_score: int = 0
+    exhausted_rebuild_batch_count: int = 0
     strategy_action: str = ""
     strategy_intent: str = ""
     strategy_reason: str = ""
@@ -145,6 +156,32 @@ def _decide_revision_route(
     evidence: tuple[str, ...],
     protected_inputs: tuple[str, ...],
 ) -> ProductionRouteDecision:
+    # Sprint 2 Phase E.3 exhaustion escalation: MUST run before the queue-wait
+    # short-circuit. Otherwise a lingering pending revision/rebuild task
+    # forever blocks the exhaustion path — the very dead loop we're trying
+    # to break. Exhaustion signal being True already means ≥2 rebuild
+    # batches have COMPLETED, so short-circuiting on a fresh pending task
+    # (spawned from the same dead loop) is what kept Ch4 stuck.
+    if s.rebuild_and_revision_exhausted and s.exhausted_best_version_number is not None:
+        reason = (
+            f"exhaustion escalation: revise+rebuild exhausted after "
+            f"{s.exhausted_rebuild_batch_count} rebuild batches; "
+            f"soft-pass best v{s.exhausted_best_version_number} "
+            f"score={s.exhausted_best_score} (QA backlog logged)"
+        )
+        return ProductionRouteDecision(
+            intent="accept_early_stop_soft_pass",
+            action="accept_early_stop",
+            reason=reason,
+            evidence=(
+                *evidence,
+                f"rebuild_batch_count={s.exhausted_rebuild_batch_count}",
+                f"best=v{s.exhausted_best_version_number}@{s.exhausted_best_score}",
+                "soft_pass=True",
+                "qa_backlog=escalated",
+            ),
+            protected_inputs=protected_inputs,
+        )
     if s.revision_queue_status:
         return ProductionRouteDecision(
             intent="wait_revision_queue",

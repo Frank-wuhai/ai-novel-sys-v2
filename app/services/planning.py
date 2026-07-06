@@ -249,6 +249,21 @@ def _execute_accept_early_stop(
             item.reason or "early-stop triggered without chapter/version",
             item.latest_version_id,
         )
+    # Sprint 2 Phase E.3 (exhaustion escalation): detect soft-pass branch by
+    # scanning item.reason for the "exhaustion escalation:" marker planted by
+    # the orchestrator. In that mode we bypass evaluate_early_stop (which may
+    # not fire when best_score < threshold) and promote the exhaustion-picked
+    # best version directly, then set QR.notes / write a QA backlog marker
+    # so downstream dashboards know this chapter was soft-passed.
+    is_exhaustion_soft_pass = "exhaustion escalation:" in (item.reason or "")
+    exhaustion_best_number: int | None = None
+    exhaustion_best_score: int = 0
+    if is_exhaustion_soft_pass:
+        import re as _re
+        m = _re.search(r"soft-pass best v(\d+)\s+score=(\d+)", item.reason or "")
+        if m:
+            exhaustion_best_number = int(m.group(1))
+            exhaustion_best_score = int(m.group(2))
     # Sprint 2 P2-2: idempotency guard. If chapter already reached
     # needs_confirmation AND at least one non-discarded version is already
     # reviewed_pass/approved, this call is a repeat and must be a no-op — it
@@ -282,7 +297,12 @@ def _execute_accept_early_stop(
 
     version_scores = collect_version_scores(session, chapter.id)
     best_version_number: int | None = None
-    if version_scores:
+    if is_exhaustion_soft_pass and exhaustion_best_number is not None:
+        # Trust the orchestrator's exhaustion-picked best directly. evaluate_early_stop
+        # may not fire here because best_score is intentionally below the 75-threshold
+        # (that's precisely why we soft-pass instead of hard-accept).
+        best_version_number = exhaustion_best_number
+    elif version_scores:
         decision = evaluate_early_stop(version_scores)
         if decision.should_stop and decision.best_version_number is not None:
             best_version_number = decision.best_version_number
@@ -345,6 +365,45 @@ def _execute_accept_early_stop(
             raw_text=(item.reason or "early-stop triggered")[:1000],
         )
     )
+    # Sprint 2 Phase E.3 (exhaustion escalation): record a QA-backlog marker
+    # for chapters accepted via soft-pass so a human reviewer can revisit.
+    # We piggyback on PlatformFeedback with a distinct metric_name so no
+    # schema migration is needed. Also mark the QR with soft_pass=True in
+    # chapter_type_gate so downstream gates that read this flag treat the
+    # chapter as passed (rather than blocking approve).
+    if is_exhaustion_soft_pass and promoted_version_id is not None:
+        session.add(
+            PlatformFeedback(
+                book_id=book_id,
+                chapter_id=chapter.id,
+                platform="production_kernel",
+                metric_name="qa_backlog_soft_pass",
+                metric_value=str(promoted_version_id),
+                raw_text=(item.reason or "exhaustion-escalation soft-pass")[:1000],
+            )
+        )
+        # Mark chapter_type_gate.soft_pass=True on the promoted QR so
+        # downstream approve_chapter workflow gate doesn't reject.
+        promoted_qr = session.scalar(
+            select(QualityReport)
+            .where(QualityReport.chapter_version_id == promoted_version_id)
+            .order_by(QualityReport.id.desc())
+        )
+        if promoted_qr is not None:
+            try:
+                report_data = json.loads(promoted_qr.report or "{}") if isinstance(promoted_qr.report, str) else (promoted_qr.report or {})
+            except Exception:
+                report_data = {}
+            if not isinstance(report_data, dict):
+                report_data = {}
+            gate = report_data.get("chapter_type_gate")
+            if not isinstance(gate, dict):
+                gate = {}
+            gate["soft_pass"] = True
+            gate["soft_pass_reason"] = "exhaustion_escalation"
+            report_data["chapter_type_gate"] = gate
+            promoted_qr.report = json.dumps(report_data, ensure_ascii=False)
+            session.add(promoted_qr)
     session.flush()
     return RunNextActionResult(
         chapter_number,
@@ -1099,6 +1158,16 @@ def _plan_one(
             early_stop_best_version = decision.best_version_number
             early_stop_best_score = decision.best_score
             early_stop_triggered_rules = decision.triggered_rules
+    # Sprint 2 Phase E.3 exhaustion detection: count rebuild-candidate batches
+    # already spent on this chapter's post-override history. If ≥2 batches
+    # AND no gate-passing version exists, orchestrator will escalate to
+    # accept_early_stop(soft_pass) instead of firing yet another rebuild.
+    (
+        rebuild_and_revision_exhausted,
+        exhausted_best_version_number,
+        exhausted_best_score,
+        exhausted_rebuild_batch_count,
+    ) = _compute_exhaustion_signals(session, chapter_id=chapter.id, revision_brief=revision_brief)
     route = decide_production_route(
         ProductionSituation(
             chapter_number=chapter_number,
@@ -1124,6 +1193,10 @@ def _plan_one(
             revision_matches_quality_or_feedback=revision_matches_quality_or_feedback,
             story_clean_revision_brief=story_clean_revision_brief,
             has_reading_assessment_contract_brief=bool(revision_brief) and _revision_brief_has_protected_review_marker(revision_brief),
+            rebuild_and_revision_exhausted=rebuild_and_revision_exhausted,
+            exhausted_best_version_number=exhausted_best_version_number,
+            exhausted_best_score=exhausted_best_score,
+            exhausted_rebuild_batch_count=exhausted_rebuild_batch_count,
             strategy_action=production_strategy.action if production_strategy else "",
             strategy_intent=production_strategy.intent if production_strategy else "",
             strategy_reason=production_strategy.reason if production_strategy else "",
@@ -1575,6 +1648,78 @@ def _revision_budget_blocker(
         max_full_revisions=settings.revision_persistent_max_full_revisions,
     )
     return budget.reason if budget.exceeded else ""
+
+
+def _compute_exhaustion_signals(
+    session: Session,
+    *,
+    chapter_id: int,
+    revision_brief: ChapterBrief | None,
+) -> tuple[bool, int | None, int, int]:
+    """Sprint 2 Phase E.3: detect the linear-revise + rebuild-batches
+    exhaustion terminal state.
+
+    Returns (exhausted, best_version_number, best_score, rebuild_batch_count).
+
+    ``exhausted`` is True when ALL of:
+      * revision_brief exists (loop is in revision mode)
+      * ≥2 rebuild_chapter_candidates tasks have already completed for this
+        chapter (post any manual override baseline)
+      * no version of the chapter has quality.passed=True
+
+    In that case the orchestrator soft-passes the highest-scoring version and
+    a QA backlog entry is recorded when accept_early_stop executes. Prevents
+    the "rebuild every round forever" dead loop seen on Book2 Ch4.
+    """
+    if revision_brief is None:
+        return False, None, 0, 0
+    from app.services.revision_manual_override import find_active_override_baseline
+
+    override_baseline = find_active_override_baseline(session, chapter_id=chapter_id) or 0
+    # Count completed rebuild_chapter_candidates tasks for this chapter, keyed
+    # by input_json.chapter_number match on task_type. Chapter fk lives on
+    # the chapter (task references book+chapter_number in its input_json).
+    chapter = session.get(Chapter, chapter_id)
+    if chapter is None:
+        return False, None, 0, 0
+    rebuild_batch_count = 0
+    tasks = list(
+        session.scalars(
+            select(GenerationTask).where(
+                GenerationTask.book_id == chapter.book_id,
+                GenerationTask.task_type == QUEUE_REBUILD_CANDIDATES,
+                GenerationTask.status == "completed",
+            )
+        )
+    )
+    for task in tasks:
+        try:
+            raw = task.input_json or "{}"
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            continue
+        if int(data.get("chapter_number") or 0) == chapter.chapter_number:
+            rebuild_batch_count += 1
+    if rebuild_batch_count < 2:
+        return False, None, 0, rebuild_batch_count
+    # Any gate-passing version? If so, not exhausted (early-stop will pick it).
+    passing = session.scalar(
+        select(ChapterVersion.id).where(
+            ChapterVersion.chapter_id == chapter_id,
+            ChapterVersion.status.in_(("reviewed_pass", "approved")),
+        )
+    )
+    if passing is not None:
+        return False, None, 0, rebuild_batch_count
+    # Pick the best-scoring version among non-discarded ones AFTER override baseline.
+    from app.services.production_state import collect_version_scores
+
+    scores = collect_version_scores(session, chapter_id)
+    scores = [vs for vs in scores if vs.version_number > override_baseline]
+    if not scores:
+        return False, None, 0, rebuild_batch_count
+    best = max(scores, key=lambda s: (s.score or 0, s.version_number))
+    return True, best.version_number, int(best.score or 0), rebuild_batch_count
 
 
 def _should_generate_rebuild_candidates(

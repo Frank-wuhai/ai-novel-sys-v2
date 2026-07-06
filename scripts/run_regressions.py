@@ -146,6 +146,7 @@ def main() -> int:
             ("production_action_consistency", ["scripts/production_action_consistency_regression.py"]),
             ("agent_plan_utilization", ["scripts/agent_plan_utilization_regression.py"]),
             ("rebuild_candidates", ["scripts/rebuild_candidates_regression.py"]),
+            ("rebuild_exhaustion_escalation", ["scripts/rebuild_exhaustion_escalation_regression.py"]),
             ("reading_assessment_rebind", ["scripts/reading_assessment_rebind_regression.py"]),
             ("reading_assessment_state", ["scripts/reading_assessment_state_regression.py"]),
             ("dashboard_current_chapter_guard", ["scripts/dashboard_current_chapter_guard_regression.py"]),
