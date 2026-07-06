@@ -91,7 +91,9 @@ def main() -> int:
     if route.action != "wait_generation_task":
         failures.append(f"case3: queue-in-flight must win over early-stop, got {route.action!r}")
 
-    # 4. Strategy override wins.
+    # 4. Sprint 2 Phase 2 P2-Ch28 (bfae946): early-stop with best_score>=75
+    #    preempts strategy_action (rationale: score-passing draft should
+    #    accept, not detour into budget recovery). Verify preempt.
     situation = _base_situation(
         strategy_action="revision_budget_recovery",
         strategy_intent="recover_revision_budget",
@@ -101,8 +103,22 @@ def main() -> int:
         early_stop_best_version=27,
     )
     route = decide_production_route(situation)
+    if route.action != "accept_early_stop":
+        failures.append(f"case4: early-stop best>=75 must preempt strategy, got {route.action!r}")
+
+    # 4b. When early-stop best_score<75, strategy_action wins (strategy is
+    #     still authoritative for below-threshold scores).
+    situation = _base_situation(
+        strategy_action="revision_budget_recovery",
+        strategy_intent="recover_revision_budget",
+        strategy_reason="budget exceeded",
+        early_stop_should_stop=True,
+        early_stop_best_score=45,
+        early_stop_best_version=27,
+    )
+    route = decide_production_route(situation)
     if route.action != "revision_budget_recovery":
-        failures.append(f"case4: strategy override must win over early-stop, got {route.action!r}")
+        failures.append(f"case4b: strategy must win when early-stop best<75, got {route.action!r}")
 
     # 5. early_stop_should_stop=False leaves the classic revise route.
     situation = _base_situation(

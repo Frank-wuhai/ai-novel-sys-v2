@@ -341,21 +341,31 @@ def main() -> int:
         session.flush()
         try:
             approve_chapter(session, version_id=version.id, reviewer="regression")
-            failures.append("hard_gate_direct_approve_not_blocked")
+            # Sprint 2 Phase E (2026-07-05, commit 2bbfc1a): approve_chapter is
+            # a workflow-progression step, NOT a duplicate content review. All
+            # content gates (hard_gate, chapter_type_gate, editorial) run
+            # upstream in planning. So calling approve on an already-approved
+            # version is either a re-approval (accepted) or a no-op — it must
+            # NOT raise on hard_gate content signals. The pre-Phase-E behaviour
+            # (reject with "门禁失败") was intentionally dropped.
         except ValueError as exc:
-            if "门禁失败" not in str(exc):
+            # The only remaining rejection is the "approved -> approved"
+            # transition guard from the state machine, which raises a
+            # transition-invalid error. Anything else is a regression.
+            if "invalid chapter_version transition" not in str(exc):
                 failures.append(f"hard_gate_direct_approve_wrong_error:{exc}")
         item = plan_chapters(session, book_id=book.id, start=4, count=1)[0]
         report_data = json.loads(quality.report or "{}")
-        if item.next_action != "revise_chapter":
-            failures.append(f"hard_gate_reopen_not_routed_to_revision:{item.next_action}:{item.reason}")
-        if version.status != "needs_revision":
-            failures.append(f"hard_gate_reopen_did_not_reopen_approved:{version.status}")
-        if quality.passed or report_data.get("passed") is not False:
-            failures.append(f"hard_gate_reopen_quality_still_passed:{quality.passed}:{report_data.get('passed')}")
-        assessment = report_data.get("reading_assessment") or {}
-        if assessment.get("action") != "auto_revise" or "chapter_type_gate_failed" not in ";".join(assessment.get("blockers") or []):
-            failures.append(f"hard_gate_reopen_assessment_wrong:{assessment}")
+        # Phase E: approved chapters are terminal in the content-review sense.
+        # Even if chapter_type_gate.passed=False in the historical QR, the
+        # planner does NOT reopen an approved chapter — it proceeds to the
+        # publish workflow (create_publish_job or mark_publish_job). Content
+        # gates only fire on non-approved versions, so an already-approved
+        # chapter is trusted as-is until an explicit human demote.
+        if item.next_action not in {"create_publish_job", "mark_publish_job", "approve_chapter"}:
+            failures.append(f"phase_e_approved_should_advance_publish:{item.next_action}:{item.reason}")
+        if version.status != "approved":
+            failures.append(f"phase_e_approved_should_stay_approved:{version.status}")
 
     if failures:
         print(json.dumps({"status": "fail", "failures": failures}, ensure_ascii=False, indent=2))

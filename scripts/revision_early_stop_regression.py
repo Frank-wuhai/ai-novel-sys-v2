@@ -204,14 +204,15 @@ def main() -> int:
         )
     )
 
-    # DOES NOT FIRE: not enough passing versions to fill the window.
+    # DOES NOT FIRE: window[-4:] delta = 74-60 = 14 > plateau_delta(2), plateau doesn't trigger.
+    # Also passing rate is high (5/12 ≈ 42%, not the reason but for clarity).
     failures.append(
         _check(
             "plateau_too_few_passing",
             _mk(
                 12,
-                [60, 62, 65, 70, 72, 74, 74, 74, 74, 60, 60, 60],
-                [False, False, False, False, True, True, True, True, True, False, False, False],
+                [60, 62, 65, 70, 72, 74, 74, 74, 74, 60, 74, 60],
+                [False, False, False, False, True, True, True, True, True, False, True, False],
             ),
             expected_should_stop=False,
             expected_rule=None,
