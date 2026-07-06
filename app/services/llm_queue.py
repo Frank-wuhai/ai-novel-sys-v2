@@ -501,6 +501,10 @@ def _execute_generation_task_body(
             }
         )
         session.flush()
+        # Bug #4 fix: persist failure state immediately so the outer session_scope
+        # crashing (SIGTERM, unrelated raise, etc.) can't rollback the task back
+        # to 'running' and leak an orphan lease.
+        session.commit()
         return QueueRunResult(task=task, version_id=None, child_generation_task_id=None)
 
     child_task = _latest_child_generation_task(session, after_id=before_task_id, version_id=version_id)
@@ -520,6 +524,15 @@ def _execute_generation_task_body(
         },
     )
     session.flush()
+    # Bug #4 fix: persist the success terminal state (task.completed +
+    # version_id + child task chain) immediately. Historically this handler
+    # only flushed and relied on the outer session_scope() at the CLI worker
+    # loop to eventually commit; but that outer scope only commits at loop
+    # exit, so a SIGTERM/kill/crash after the handler returned would rollback
+    # everything the handler produced, leaving the DB with the earlier
+    # 'running' commit and no downstream state -- exactly what happened to
+    # E.4 Book2 Ch6 (task 1447 orphan lease).
+    session.commit()
     return QueueRunResult(
         task=task,
         version_id=version_id,
