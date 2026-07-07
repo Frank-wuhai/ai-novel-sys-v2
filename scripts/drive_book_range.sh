@@ -86,9 +86,19 @@ while : ; do
   fi
 
   echo "=== cycle-iter=$ITER $(date -Iseconds) ===" | tee -a "$CYCLE_LOG"
+  # cycle 内部偶尔会撞 SQLite 瞬时锁 (database is locked) 或其他瞬时异常。
+  # 不能因为一次瞬时错误就整个 driver 挂掉（旧 inline loop 没 set -e 所以自愈）。
+  # 用 || true 吞掉非零退出，下一 iter 60s 后重试；连续失败会在 terminal_count
+  # 长时间不动时被 deadline 兜底掉。
+  set +e
   venv/bin/python -m app.cli --database-url "$DB" run-book-cycle \
     --book-id "$BOOK_ID" --start "$START" --count "$COUNT" --max-steps 60 \
-    2>&1 | tee -a "$CYCLE_LOG"
+    >> "$CYCLE_LOG" 2>&1
+  CYCLE_RC=$?
+  set -e
+  if [[ $CYCLE_RC -ne 0 ]]; then
+    echo "cycle-iter=$ITER exited rc=$CYCLE_RC (transient? retry next iter)" | tee -a "$CYCLE_LOG"
+  fi
 
   DONE=$(count_terminal)
   echo "terminal_count=$DONE / target=$COUNT" | tee -a "$CYCLE_LOG"
