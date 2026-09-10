@@ -59,6 +59,41 @@ class DryRunProvider(BaseLLMProvider):
         model: str | None = None,
     ) -> LLMResponse:
         started = time.perf_counter()
+        if "prose_judgement_json_schema" in prompt:
+            # 成文判据判卷罐头回复 (2026-09-10 第3步): 结构示例，供 dry-run 回归断言
+            # 报告节结构；非真实判卷结果。
+            text = json.dumps(
+                {
+                    "gaps": [
+                        {
+                            "criterion": "J1",
+                            "anchor": "dry-run 示例锚点：任务词来源不可见",
+                            "explanation": "dry-run 罐头回复，仅验证结构，非真实判卷",
+                            "fix_direction": "正式使用时请启用 live 判卷获取真实缺口表",
+                        },
+                        {
+                            "criterion": "J5",
+                            "anchor": "dry-run 示例锚点：表达不自然",
+                            "explanation": "dry-run 罐头回复，仅验证结构，非真实判卷",
+                            "fix_direction": "正式使用时请启用 live 判卷获取真实缺口表",
+                        },
+                    ],
+                    "summary": "dry-run 罐头回复：结构验证通过，未执行真实判卷",
+                },
+                ensure_ascii=False,
+            )
+            return LLMResponse(
+                text=text,
+                provider=self.name,
+                model="dry-run",
+                prompt_chars=len(prompt),
+                response_chars=len(text),
+                estimated_prompt_tokens=estimate_tokens(prompt),
+                estimated_response_tokens=estimate_tokens(text),
+                elapsed_ms=_elapsed_ms(started),
+                usage=None,
+                request_id="dry-run",
+            )
         if "reviewer_json_schema" in prompt:
             text = json.dumps(
                 {

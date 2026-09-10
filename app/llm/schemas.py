@@ -165,3 +165,87 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         raise StructuredOutputError("review output list fields must be arrays")
     return [str(item) for item in value]
+
+
+# ---------------------------------------------------------------------------
+# 成文判据 (prose_judgement_v1 J1-J5) 判卷输出
+#
+# 与 ReviewOutput 的分工：ReviewOutput 是主编审稿 (打分+放行判断，接 editorial_gate)；
+# ProseJudgementOutput 是缺口表 (只列缺口，不打分、不放行/拦截) —— prose_judgement_v1
+# 明确规定成文判据"无自动 FAIL，不自动拦稿"，所以这里没有 verdict/score 字段。
+# 判据有效性规则：判不出原文锚点的判定无效 (解析时丢弃并计数 dropped_no_anchor)。
+# ---------------------------------------------------------------------------
+
+PROSE_JUDGEMENT_CRITERIA = ("J1", "J2", "J3", "J4", "J5")
+
+
+@dataclass
+class ProseJudgementGap:
+    criterion: str  # J1-J5
+    anchor: str  # 原文锚点 (verbatim 引用，必填，空则该条无效)
+    explanation: str = ""  # 白话解释
+    fix_direction: str = ""  # 修法方向 (不代写正文)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "criterion": self.criterion,
+            "anchor": self.anchor,
+            "explanation": self.explanation,
+            "fix_direction": self.fix_direction,
+        }
+
+
+@dataclass
+class ProseJudgementOutput:
+    gaps: list[ProseJudgementGap] = field(default_factory=list)
+    summary: str = ""
+    dropped_no_anchor: int = 0  # 因缺原文锚点被判无效的条数
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gaps": [gap.to_dict() for gap in self.gaps],
+            "gap_count": len(self.gaps),
+            "dropped_no_anchor": self.dropped_no_anchor,
+            "summary": self.summary,
+        }
+
+
+def _normalize_criterion(value: Any) -> str | None:
+    """容忍 'J1' / 'j1' / 'J1 读者入口' 等写法，归一到 J1-J5；无法识别返回 None。"""
+    text = str(value or "").strip().upper()
+    match = re.match(r"^J([1-5])\b", text)
+    if not match:
+        return None
+    return f"J{match.group(1)}"
+
+
+def parse_prose_judgement_output(text: str) -> ProseJudgementOutput:
+    data = _extract_json(text)
+    raw_gaps = data.get("gaps")
+    if not isinstance(raw_gaps, list):
+        raise StructuredOutputError("prose judgement output gaps must be an array")
+    gaps: list[ProseJudgementGap] = []
+    dropped = 0
+    for item in raw_gaps:
+        if not isinstance(item, dict):
+            dropped += 1
+            continue
+        criterion = _normalize_criterion(item.get("criterion"))
+        anchor = str(item.get("anchor") or "").strip()
+        if criterion is None or not anchor:
+            # prose_judgement_v1：判不出锚点的判定无效
+            dropped += 1
+            continue
+        gaps.append(
+            ProseJudgementGap(
+                criterion=criterion,
+                anchor=anchor,
+                explanation=str(item.get("explanation") or "").strip(),
+                fix_direction=str(item.get("fix_direction") or "").strip(),
+            )
+        )
+    return ProseJudgementOutput(
+        gaps=gaps,
+        summary=str(data.get("summary") or "").strip(),
+        dropped_no_anchor=dropped,
+    )

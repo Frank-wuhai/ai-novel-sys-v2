@@ -75,6 +75,11 @@ class Settings:
     llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 5000)
     llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 5000)
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
+    # 成文判据判卷 (2026-09-10 第3步): prose_judgement_v1 要求温度 0、固定判卷 prompt、
+    # 固定模型，产出缺口表 (无 verdict/score，不自动 FAIL)。
+    prose_judge_model: str = os.getenv("PROSE_JUDGE_MODEL", os.getenv("MODEL_NAME", "deepseek-v4-flash"))
+    prose_judge_temperature: float = _float_env("PROSE_JUDGE_TEMPERATURE", 0.0)
+    prose_judge_max_tokens: int = _int_env("PROSE_JUDGE_MAX_TOKENS", 2600)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
     llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 300)
     llm_revision_prompt_max_chars: int = _int_env("LLM_REVISION_PROMPT_MAX_CHARS", 9000)

@@ -19,6 +19,7 @@ from app.services.production_llm import (
     record_generation_llm_log,
 )
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
+from app.services.prose_judgement import run_prose_judgement
 from app.services.production_optimization import enrich_quality_report_with_optimization
 from app.services.quality import evaluate_chapter
 from app.services.quality_evidence import build_quality_evidence_chain
@@ -38,6 +39,7 @@ def review_chapter(
     llm_review: bool = False,
     review_dry_run: bool = True,
     auto_revision_brief: bool = False,
+    prose_judge: bool = False,
 ) -> QualityReport:
     assert_production_gate(session, book_id=book_id, action="review_chapter")
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
@@ -205,6 +207,17 @@ def review_chapter(
             "reason": llm_skip_reason,
             "source": "rule_precondition",
         }
+    # 成文判据判卷 (2026-09-10 第3步): prose_judgement_v1 J1-J5 缺口表, 与 llm_review
+    # (主编审稿) 物理分开。不打分、不给 verdict、不碰 passed/score/editorial_gate——
+    # 判据规范明确"无自动 FAIL, 不自动拦稿", 缺口表仅供人工裁决退修或放行。
+    if prose_judge:
+        report_data["prose_judgement"] = run_prose_judgement(
+            session,
+            book=book,
+            version=version,
+            chapter_number=chapter_number,
+            dry_run=review_dry_run,
+        )
     report_data["evidence_chain"] = build_quality_evidence_chain(version.content or "", report_data)
     if was_approved and not bool(report_data.get("passed", result.passed)):
         existing_pass = session.scalar(

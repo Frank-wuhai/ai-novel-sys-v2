@@ -884,6 +884,56 @@ STYLE_REVIEW_BASE_TEMPLATE_V1 = """你是网文主编"基础节奏专员", 专�
 直接输出 JSON:"""
 
 
+# 成文判据判卷模板 (2026-09-10 · 第3步接线)
+# 判据原文: review_exports 沉淀的 prose_judgement_v1 (J1-J5)。
+# 定位: 缺口表，不打分、不放行/拦截 (prose_judgement_v1 明确规定无自动 FAIL)，
+# 输出交人工裁决退修或放行。每条缺口必须能落到原文具体句子 (锚点)，判不出锚点的判定无效。
+PROSE_JUDGEMENT_TEMPLATE_V1 = """你是中文网文成文判据判卷人。你的任务不是打分、不是决定放行，而是按五条成文判据 (J1-J5) 逐条检查章节正文，产出缺口表供人工裁决。
+
+任务类型：prose_judgement_json_schema
+
+请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
+
+JSON 字段：
+- gaps: 缺口数组，每条缺口是一个对象，含四个字段：
+  - criterion: 判据编号，J1 / J2 / J3 / J4 / J5 之一
+  - anchor: 原文锚点，从章节正文中逐字摘录的句子或短语 (必须是正文原句，不得改写、不得概括)
+  - explanation: 白话解释这条缺口为什么成立 (一两句，说人话)
+  - fix_direction: 修法方向 (位置+一句信息即可，不代写正文)
+- summary: 一句话总结本章成文层面的总体状况
+
+五条判据：
+
+J1 读者入口 —— 读者是否知道主角为什么这样行动？
+正文前 300 字内出现的每个"任务/订单/流程/期限/违约/押金/身份目标"类词，必须同时满足：(a) 来源可见——读者已在正文中看到该词的现实来源 (一两句可读信息即可)；(b) 因果可见——主角当前动作与该词之间有可见因果。两条缺一即 J1 缺口。
+
+J2 信息释放顺序 —— 正常秩序是否先于异常偏离？
+开头凡出现"异常/偏离/错位"，读者必须在异常出现前已经知道：(a) 这里的正常秩序是什么；(b) 主角对正常秩序的预期。异常先于秩序即 J2 缺口——读者能回答"哪里不对"才算离奇成立，只会问"这是哪/他在干嘛"就是缺口。
+
+J3 追读链 —— 每 500 字，读者的问题、半步答案、状态变化是否成立？
+对每 500 字窗口 (约每 3-5 段) 依次回答三问：读者此刻最可能的问题是什么；正文是否在这 500 字内给了半步答案 (半步=够读者往下走一步；全解释也算缺口)；主角状态是否变化 (信息增量/位置推进/关系推进/目标损益，任一)。任何一问无解即 J3 缺口。anchor 写该窗口的起始句。
+
+J4 物性逻辑 —— 物件状态是否连续？
+每个实体 (物件/器物/环境物) 的状态在同一场景内必须自洽，重点四类：状态机互斥 (黑屏不能同时显示时间/信号；灭了的炉膛不能冒烟)；物性动作 (起球不能被"拍掉"；纸不能"拧干")；物件生命周期 (合上的册子不能"还摊着")；感官来源 (气味/声音/光线必须有来源、路径或接收位置)。
+
+J5 表达自然度 —— 是否出现压缩句、生硬搭配、内部语言、清单感？
+子项：(a) 压缩句——为省字数压出来的非自然语序；(b) 生硬搭配——动宾/修饰搭配超出自然中文；(c) 内部语言泄漏——只有作者/主角看得懂、读者需要外部知识才能解的短语；(d) 清单感——同段 3 个以上并列短句同构堆叠。文艺明喻、内心播报、整句重复不归你管，J5 只管"这句中文自然不自然"。
+
+判卷纪律：
+- 每条缺口必须有 anchor 且 anchor 是正文原句；判不出锚点的判定不要写进 gaps。
+- 不重复报告同一句子在同一判据下的缺口；同一句子命中多条判据时选最主要的一条。
+- 拿不准的不报；缺口表贵精不贵多。
+- 不打分、不评价好坏、不给 verdict，只列缺口。
+
+作品：{book_title}
+题材：{genre}
+
+章节正文：
+{chapter_content}
+
+直接输出 JSON:"""
+
+
 def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
     templates: list[PromptTemplate] = []
     for version, body in (
@@ -970,6 +1020,8 @@ def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
         ("style_review_logic", "v1", STYLE_REVIEW_LOGIC_TEMPLATE_V1),
         ("style_review_comfort", "v1", STYLE_REVIEW_COMFORT_TEMPLATE_V1),
         ("style_review_base", "v1", STYLE_REVIEW_BASE_TEMPLATE_V1),
+        # 2026-09-10 第3步: 成文判据判卷模板 (prose_judgement_v1 J1-J5)
+        ("prose_judgement", "v1", PROSE_JUDGEMENT_TEMPLATE_V1),
     ):
         existing_style = session.scalar(
             select(PromptTemplate).where(

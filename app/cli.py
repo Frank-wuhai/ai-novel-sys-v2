@@ -504,6 +504,9 @@ def main() -> None:
     p.add_argument("--llm-review", action="store_true")
     p.add_argument("--live-llm", action="store_true")
     p.add_argument("--auto-revision-brief", action="store_true")
+    # 成文判据判卷 (2026-09-10 第3步): 报告 JSON 增加 prose_judgement 缺口表节,
+    # 不影响 passed/score (prose_judgement_v1: 无自动 FAIL, 人工裁决)
+    p.add_argument("--prose-judge", action="store_true")
 
     p = sub.add_parser("create-revision-brief")
     p.add_argument("--book-id", type=int, required=True)
@@ -1533,10 +1536,17 @@ def main() -> None:
                     llm_review=args.llm_review,
                     review_dry_run=not args.live_llm,
                     auto_revision_brief=args.auto_revision_brief,
+                    prose_judge=args.prose_judge,
                 )
                 print(f"quality_report_id={report.id}")
                 print(f"passed={report.passed}")
                 print(f"score={report.score}")
+                if args.prose_judge:
+                    import json as _json
+
+                    _pj = (_json.loads(report.report or "{}").get("prose_judgement") or {})
+                    print(f"prose_judgement_status={_pj.get('status')}")
+                    print(f"prose_judgement_gaps={_pj.get('gap_count', 0)}")
                 print(f"report={report.report}")
                 if args.auto_revision_brief and not report.passed:
                     chapter = session.scalar(select(Chapter).where(Chapter.book_id == args.book_id, Chapter.chapter_number == args.chapter_number))
