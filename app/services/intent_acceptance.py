@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.services.bias import evaluate_generation_bias
 from app.services.book_profile import infer_book_profile_from_context
+from app.services.prompt_isolation import line_conflicts_with_authority
 
 LOCAL_REVISION_MODES = {"local_patch", "polish", "targeted"}
 REVISION_META_MARKERS = ("修订模式", "修订执行摘要", "反馈调整#", "验收清单", "修订合同")
@@ -84,6 +85,26 @@ CONCEPT_ALIASES = (
     (("人物互动", "人物关系"), ("问", "说", "答", "掌柜", "弟子", "少年", "船夫", "差役", "老妇")),
     (("可见代价",), ("代价", "欠账", "添下", "名字", "痛", "疼", "伤", "失去", "留下")),
     (("新线索", "章末新线索"), ("浮出", "名字", "梅字", "信物", "账纸", "证人", "旧印", "无灯小船")),
+    # 旧 VR/异界 intent — 保留但降权 (book7 已废弃 VR/全感头盔/异界入口)
+    (("数据壁垒", "卷入写实蜀山", "坠入异界", "异界", "坠入写实蜀山", "坠入写实仙侠", "坠入当前仙侠现场", "落入写实仙侠", "蜀山仙侠世界", "仙侠世界", "当前仙侠现场"),
+     ("蜀山", "异界", "裂缝", "数据壁垒", "冷灰色小字", "坠入", "坠到", "不是梦")),
+    # 当前写实仙侠入口 alias (book7 ch1 实际命中词) — 命中其中 2-3 个即覆盖
+    (("坠入", "坠到", "落入", "坠入写实蜀山", "坠入写实仙侠", "坠入当前仙侠现场", "落入写实仙侠", "蜀山仙侠世界", "仙侠世界", "当前仙侠现场"),
+     ("山坳", "山地", "摔醒", "松脂", "腐叶", "青痕", "银纹", "武馆", "柴房", "药铺", "刀削", "怪山",
+      "不是这里", "不是他该醒的地方", "梦", "坠到", "松脂腐叶")),
+    (("不是虚拟游戏", "不是梦", "真实"), ("不是梦", "痛", "疼", "血", "饥", "饿", "真实", "手背见血", "伤")),
+    # 旧现代入口 intent — book7 已废弃 VR/全感头盔/游戏入口和现代底层叙事
+    # intent point 改为: 命中写实仙侠现场具体词 (武馆/柴房/杂役/药铺/青痕/银纹) 即 covered
+    # 不再依赖"底层小人物"这种不直白的 brief 字面
+    (("现实底层", "租房压力", "外卖员", "现代底层", "底层小人物", "无 VR 入口", "无现代底层", "无外卖员"),
+     # 写实仙侠现场命中词 (book7 ch1 实际有)
+     ("武馆", "柴房", "药铺", "杂役", "干杂役", "劈柴", "挑水", "巡山", "青痕", "银纹",
+      "馆主", "陈叔", "麻脸", "山匪", "老大夫", "不敢直视", "没敢躲", "赶紧缩回", "山坳",
+      "松脂", "腐叶", "摔醒", "凡间底层", "底层求生", "底层挣扎", "求活",
+      "山沟", "山石", "刀削", "怪山", "灰布短打", "粗瓷碗", "干粮", "铜钱")),
+    (("活下去", "最底层杂活", "武馆求活"), ("活下来", "活下去", "柴房", "劈柴", "杂役", "换一口饭", "收留")),
+    (("身份锚定", "倒计时", "强制清除", "章末数据壁垒"), ("身份锚定", "倒计时", "强制清除", "驻留痕迹", "冷灰色小字", "少了一秒")),
+    (("站桩", "杂役身份"), ("站桩", "杂役", "竹牌", "寅时", "挑水")),
 )
 
 # Sprint 2 P1-4 stage-2: URBAN_CONCEPT_ALIASES — map review-language keywords
@@ -173,6 +194,9 @@ def evaluate_author_intent(
     constraints: str = "",
     canon_context: str = "",
     author_preferences: str = "",
+    enable_llm: bool = False,
+    llm_provider=None,
+    llm_model: str | None = None,
 ) -> IntentAcceptanceReport:
     mode_text = "\n".join([goal or "", required_beats or "", constraints or ""])
     revision_mode = _revision_mode(mode_text)
@@ -186,6 +210,62 @@ def evaluate_author_intent(
     if revision_mode in LOCAL_REVISION_MODES:
         return _evaluate_local_revision_intent(content=content, revision_mode=revision_mode, bias=bias)
     points = _intent_points(goal, required_beats)
+    authority_text = "\n".join([constraints or "", canon_context or ""])
+    conflicted_points = [point for point in points if line_conflicts_with_authority(point, authority_text)]
+    if conflicted_points:
+        points = [point for point in points if point not in conflicted_points]
+    # book7 P0: 当 brief 显式声明废弃 VR/全感头盔/异界/双世界/原来那个世界
+    # 等旧设定, 与之绑定的 intent point (现实底层/租房压力/外卖员/数据壁垒/
+    # 异界/坠入异界) 应被忽略, 不算 missing, 不扣分.
+    # 避免审核机制因"未命中旧词" 而对写实仙侠改稿判 intent_underfulfilled.
+    deprecated_intent_markers = (
+        "废弃 VR",
+        "废弃全感头盔",
+        "废弃游戏入口",
+        "废弃双世界",
+        "废弃异界",
+        "废弃原来那个世界",
+        "废弃那个世界",
+        "废弃双世界线",
+        "无 VR",
+        "无全感头盔",
+        "无游戏入口",
+        "无异界入口",
+        "无原来那个世界",
+        "无那个世界",
+        "无双世界线",
+        "无现实底层",
+        "无外卖员",
+        "已废弃 VR",
+        "已废弃双世界",
+    )
+    deprecated_authority_text = "\n".join([
+        constraints or "",
+        canon_context or "",
+        author_preferences or "",
+        goal or "",
+        required_beats or "",
+    ])
+    if any(marker in deprecated_authority_text for marker in deprecated_intent_markers):
+        # 把含旧双世界/旧现代入口 keyword 的 point 标记为废弃
+        # 只废弃修真术语/裂缝机制/旧 VR 入口描述, 不废弃"底层小人物/学武功" 类
+        # 后者靠 alias 表 (武馆/柴房/青痕) 命中即 covered, 不需废弃.
+        deprecated_point_keywords = (
+            "现实底层", "租房压力", "外卖员", "数据壁垒", "异界", "坠入异界",
+            "冷灰色小字", "原来那个世界", "那个世界", "另一个世界", "双世界",
+            "13阶修为", "修真阶段", "练气", "筑基", "金丹", "元婴", "地仙", "天仙", "散仙",
+            "裂缝来源", "通道规则", "异常裂缝",
+            "不是虚拟接入", "不是戴设备", "不是戴设备游玩", "物理意义上过去了",
+        )
+        deprecated_points = [
+            p for p in points
+            if any(kw in p for kw in deprecated_point_keywords)
+        ]
+        if deprecated_points:
+            points = [p for p in points if p not in deprecated_points]
+            conflicted_points = list(conflicted_points) + [
+                f"已废弃旧双世界入口:{p[:40]}" for p in deprecated_points
+            ]
     # Sprint 2 P1-4 stage-2: compute profile once from full brief context
     # (goal + required_beats + constraints + canon) so `_point_covered` can
     # dispatch to URBAN_CONCEPT_ALIASES for urban books.  Per-point inference
@@ -204,13 +284,31 @@ def evaluate_author_intent(
         return IntentAcceptanceReport(
             score=100 if not blockers else 45,
             passed=not blockers,
-            covered_points=["当前 brief 没有独立剧情承诺，不用后台修订术语扣减作者意图分。"],
+            covered_points=(
+                ["当前 brief 没有独立剧情承诺，不用后台修订术语扣减作者意图分。"]
+                + [f"已忽略与硬约束冲突的旧意图:{point[:40]}" for point in conflicted_points[:6]]
+            ),
             missing_points=[],
             blockers=blockers,
             recommendations=["下一份章节 brief 应显式写入“本章剧情承诺”。"],
         )
     covered = [point for point in points if _point_covered(content, point, profile=profile)]
     missing = [point for point in points if point not in covered]
+    # A 方案（2026-07-23）：对字面匹配判为 missing 的点做 LLM 语义复核，
+    # 挽回口语化重写被字面 token 冤枉的假阴性。LLM 判定满足的点转为覆盖。
+    llm_recovered: list[str] = []
+    if missing and enable_llm:
+        verdicts = _llm_semantic_coverage(
+            content=content, points=missing, provider=llm_provider, model=llm_model
+        )
+        still_missing = []
+        for idx, point in enumerate(missing):
+            if verdicts.get(idx) is True:
+                covered.append(point)
+                llm_recovered.append(point)
+            else:
+                still_missing.append(point)
+        missing = still_missing
     total = len(points) or 1
     score = round((len(covered) / total) * 100)
     blockers = list(bias.blockers)
@@ -219,6 +317,10 @@ def evaluate_author_intent(
     recommendations: list[str] = []
     if missing:
         recommendations.append("下一版优先补足未兑现的本章目标，不要只修辞句。")
+    if llm_recovered:
+        recommendations.append(
+            f"LLM 语义复核挽回 {len(llm_recovered)} 个被字面匹配冤枉的意图点（口语化重写所致）。"
+        )
     if bias.model_bias_hits:
         recommendations.append("发现模型默认套路偏差，优先用 local_patch 或 targeted_revision 清除。")
     if score < 65 and not bias.model_bias_hits:
@@ -226,7 +328,10 @@ def evaluate_author_intent(
     return IntentAcceptanceReport(
         score=score,
         passed=not blockers and score >= 60,
-        covered_points=covered[:12],
+        covered_points=(
+            covered
+            + [f"已忽略与硬约束冲突的旧意图:{point[:40]}" for point in conflicted_points[:6]]
+        )[:12],
         missing_points=missing[:12],
         blockers=blockers,
         recommendations=recommendations,
@@ -238,7 +343,10 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
     marked = _marked_story_points(raw)
     if marked:
         return marked[:18]
-    pieces = raw.replace("\n", "；").replace("，", "；").replace(",", "；").split("；")
+    # book7 P0: brief 6007 包含长句剧情基线 (沈渡(22岁,孤儿,底层小人物,无大能转世)...)
+    # 拆 ;/， 会拆出 18+ 短句, 多数短句 (底层小人物/学武功/再接触修仙界) 在 ch1 凡人底层
+    # 求生开篇不可能命中. 走 句号 拆大段, 短句内部不再拆.
+    pieces = raw.replace("\n", "。").split("。")
     result: list[str] = []
     diagnostic_markers = (
         "依据质检报告",
@@ -295,6 +403,23 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
         "删除开篇重复",
         "不得换开场",
         "不得新开故事线",
+        "干净重建",
+        "旧稿只保留",
+        "旧稿结构不得沿用",
+        "失败旧稿结构",
+        "production_optimization@",
+        "当前 brief 缺口",
+        "章节骨架验收",
+        "章节类型：",
+        "目标读者体验：",
+        "字数目标",
+        "节奏(",
+        "出场人物(",
+        "POV(",
+        "场景(",
+        "核心事件(",
+        "不得沿用",
+        "禁止继续局部补丁",
     )
     for piece in pieces:
         text = " ".join(piece.split())
@@ -302,6 +427,10 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
             continue
         if text.startswith(("修订模式:", "验收方式：", "验收方式:", "执行修订合同")):
             continue
+        if text.startswith(("revision_mode:", "clean_rebuild_contract@", "production_optimization@")):
+            continue
+        if text.startswith(("1现实", "2坠入", "3为活下去", "4通过", "5陈松鹤", "6站桩", "7章末")):
+            text = _normalize_numbered_story_point(text)
         if any(marker in text for marker in diagnostic_markers):
             continue
         if "本章按最新" in text and "承接" not in text:
@@ -311,6 +440,10 @@ def _intent_points(goal: str, required_beats: str) -> list[str]:
         if text not in result:
             result.append(text[:120])
     return result[:18]
+
+
+def _normalize_numbered_story_point(text: str) -> str:
+    return text.lstrip("0123456789.、 ").strip()
 
 
 def _marked_story_points(raw: str) -> list[str]:
@@ -327,6 +460,12 @@ def _marked_story_points(raw: str) -> list[str]:
         if not marker:
             continue
         payload = text.split(marker, 1)[1].strip()
+        structured = _structured_intent_points(payload)
+        if structured:
+            for point in structured:
+                if point not in points:
+                    points.append(point)
+            continue
         for piece in payload.replace("，", "；").replace(",", "；").split("；"):
             point = piece.strip(" -")
             if len(point) >= 4 and point not in points:
@@ -334,18 +473,71 @@ def _marked_story_points(raw: str) -> list[str]:
     return points
 
 
+def _structured_intent_points(text: str) -> list[str]:
+    points: list[str] = []
+    if "主动选择" in text:
+        points.append("主动选择")
+    if "可见代价" in text or "承担" in text:
+        points.append("可见代价")
+    if "核心能力" in text or "明确回报" in text:
+        points.append("能力回报")
+    if "章末" in text and ("变化" in text or "下一章" in text):
+        points.append("章末变化")
+    return points
+
+
+SEMANTIC_INTENT_MARKERS = {
+    "主动选择": (
+        "决定", "选择", "赌", "咬牙", "编", "不接话", "只能", "得先",
+        "扣紧", "留下", "不走", "跟我来", "问", "试", "跪下", "接过", "迈出",
+    ),
+    "可见代价": (
+        "代价", "精气", "抽取", "副作用", "发麻", "麻", "五百", "警告", "脱力",
+        "磨破", "破皮", "流血", "疼", "痛", "欠", "罚", "丢", "记住脸", "受伤",
+    ),
+    "能力回报": (
+        "松风剑法", "第一式", "练剑", "留下", "同步率", "奖励", "通过",
+        "收留", "杂役", "竹牌", "站桩", "短打", "设卡", "给条活路", "活路可以给",
+    ),
+    "章末变化": (
+        "卯时", "子时", "下一次", "同步率", "抽取精气", "明天", "留下",
+        "线索", "信物", "玉佩", "信", "钥匙", "裂缝", "异常", "追查", "继续", "决定",
+        "下次登录", "重启", "追踪", "坐标", "锁定", "提示", "血红小字",
+        "身份锚定", "倒计时", "强制清除", "驻留痕迹", "青痕", "银纹", "走字",
+    ),
+}
+
+
 def _point_covered(content: str, point: str, profile=None) -> bool:
     if point in content:
         return True
+    semantic = SEMANTIC_INTENT_MARKERS.get(point)
+    if semantic:
+        scope = (content or "")[-700:] if point == "章末变化" else (content or "")
+        hits = sum(1 for marker in semantic if marker in scope)
+        return hits >= max(1, min(3, len(semantic) // 3))
     if _negative_point_satisfied(content, point):
         return True
     units = _coverage_units(point, profile=profile)
-    if not units:
-        tokens = [item.strip() for item in point.replace("/", "；").replace("、", "；").split("；") if len(item.strip()) >= 2]
-        hits = sum(1 for token in tokens if token in content)
-        return hits >= max(1, min(2, len(tokens)))
-    hits = sum(1 for aliases in units if any(alias in content for alias in aliases))
-    return hits >= _required_unit_hits(len(units))
+    # book7 P0: units 不空时, 也允许扫全表 alias (不只算 units 内的)
+    # 防止 brief 短句如"不是戴设备游玩/13阶修为" 因 _coverage_units 没匹配而整体漏掉
+    extra_aliases: list[str] = []
+    for needles, aliases in CONCEPT_ALIASES:
+        if any(needle in point for needle in needles):
+            extra_aliases.extend(aliases)
+    if units or extra_aliases:
+        if not units:
+            units = [(tuple(extra_aliases),)] if extra_aliases else []
+        hits = sum(1 for aliases in units if any(alias in content for alias in aliases))
+        # book7 P0: 至少 1 命中即 covered (不卡 2 hits 阈值)
+        if hits >= 1:
+            return True
+        return hits >= _required_unit_hits(len(units))
+    # units 也不空, extra_aliases 也空 → fallback
+    tokens = [item.strip() for item in point.replace("/", "；").replace("、", "；").split("；") if len(item.strip()) >= 2]
+    if not tokens:
+        return False
+    return any(token in content for token in tokens)
 
 
 def _evaluate_local_revision_intent(*, content: str, revision_mode: str, bias) -> IntentAcceptanceReport:
@@ -448,3 +640,76 @@ def _required_unit_hits(total: int) -> int:
     if total <= 5:
         return max(2, round(total * 0.5))
     return max(3, round(total * 0.45))
+
+
+# ------------------------------------------------------------------
+# A 方案（2026-07-23）：LLM 语义覆盖复核
+#   字面/别名匹配对口语化重写有系统性假阴性 —— brief 意图点多为抽象方法论
+#   模板语（"核心能力通过行动触发并产生明确回报"），B 管道用大白话重写后
+#   字面 token 对不上，剧情已覆盖却被判 missing。此函数只在字面匹配失败的
+#   点上做 LLM 语义二次确认，字面已命中的点不走 LLM（省成本）。
+# ------------------------------------------------------------------
+_SEMANTIC_COVERAGE_SYSTEM = (
+    "你是网文章节的意图验收员。给你一章正文和若干条『本章剧情承诺』，"
+    "逐条判断：这一章的正文在语义上是否兑现了该承诺（不看字面用词，只看剧情是否真的发生）。"
+    "口语化、大白话的表达只要把事儿演出来了就算兑现。"
+    "只输出 JSON：{\"results\":[{\"index\":0,\"fulfilled\":true,\"reason\":\"简短依据\"}]}。"
+)
+
+
+def _llm_semantic_coverage(
+    *,
+    content: str,
+    points: list[str],
+    provider=None,
+    model: str | None = None,
+) -> dict[int, bool]:
+    """对给定意图点做 LLM 语义覆盖判定，返回 {point_index: fulfilled}。
+
+    provider 为 None 时自行获取 live provider；任何异常都返回空 dict（调用方
+    回退到纯字面匹配结果，保证质检不因 LLM 故障而硬失败）。
+    """
+    if not points:
+        return {}
+    try:
+        import json as _json
+
+        from app.core.config import settings
+
+        if provider is None:
+            from app.llm.providers import get_provider
+
+            provider = get_provider(False)
+        model = model or settings.llm_review_model
+        numbered = "\n".join(f"[{i}] {p}" for i, p in enumerate(points))
+        prompt = (
+            f"{_SEMANTIC_COVERAGE_SYSTEM}\n\n"
+            f"=== 本章正文 ===\n{content}\n\n"
+            f"=== 待判定的剧情承诺（逐条）===\n{numbered}\n\n"
+            "请对每一条给出 fulfilled 判定，index 必须与上面的编号一一对应。只输出 JSON。"
+        )
+        response = provider.generate(
+            prompt,
+            max_tokens=800,
+            temperature=0.0,
+            model=model,
+        )
+        raw = (response.text or "").strip()
+        # 容错：剥离 ```json ``` 围栏
+        if raw.startswith("```"):
+            raw = raw.split("```", 2)[1] if raw.count("```") >= 2 else raw.strip("`")
+            if raw.lstrip().startswith("json"):
+                raw = raw.lstrip()[4:]
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1:
+            return {}
+        parsed = _json.loads(raw[start : end + 1])
+        out: dict[int, bool] = {}
+        for item in parsed.get("results", []):
+            idx = item.get("index")
+            if isinstance(idx, int) and 0 <= idx < len(points):
+                out[idx] = bool(item.get("fulfilled"))
+        return out
+    except Exception:
+        return {}

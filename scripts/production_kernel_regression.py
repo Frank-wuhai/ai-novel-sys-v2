@@ -54,7 +54,10 @@ def main() -> int:
 
         calls: list[dict] = []
 
+        plan_kwargs: list[dict] = []
+
         def revise_plan(*args, **kwargs):
+            plan_kwargs.append(dict(kwargs))
             return [_item("revise_chapter")]
 
         def fake_run_next_action(*args, **kwargs):
@@ -99,11 +102,24 @@ def main() -> int:
             failures.append(f"kernel_run_until_terminal_wrong_status:{run.terminal_status}")
 
         calls.clear()
+        kernel.plan_chapters = sequence_plan
+        kernel.run_next_action = fake_sequence_run
+        single_step = kernel.ProductionKernel(object(), book_id=1, chapter_number=1).run_until_terminal(dry_run=False, max_steps=1)
+        single_actions = [item.get("action") for item in single_step.executed]
+        if single_actions != ["review_chapter", "single_step_completed"]:
+            failures.append(f"kernel_single_step_wrong_actions:{single_actions}")
+        if single_step.terminal_status != "completed":
+            failures.append(f"kernel_single_step_wrong_status:{single_step.terminal_status}")
+
+        calls.clear()
+        plan_kwargs.clear()
         kernel.plan_chapters = revise_plan
         kernel.run_next_action = fake_run_next_action
         result = kernel.ProductionKernel(object(), book_id=1, chapter_number=1).step(dry_run=True)
         if result.status != "preview" or result.action != "revise_chapter":
             failures.append(f"dry_run_step_should_preview:{result}")
+        if not plan_kwargs or plan_kwargs[0].get("apply_state_repairs") is not False:
+            failures.append(f"preview_step_applied_state_repairs:{plan_kwargs}")
         if (
             not calls
             or calls[-1].get("mode") != "preview"

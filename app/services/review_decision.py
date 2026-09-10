@@ -24,7 +24,10 @@ def apply_review_decision(rule_result: ReviewRuleResult, report_data: dict) -> N
 
     editor_score = int(review.get("score") or 0)
     editor_verdict = str(review.get("verdict") or "")
-    editor_passed = editor_score >= 75 and editor_verdict == "pass"
+    # 2026-07-26: 多次采样后，中位数分数已稳定(波动≤3分)，verdict 标签仍易抖。
+    # 改为以分数为主判据——中位数 ≥75 即 editor_passed，verdict 仅作参考不做一票否决。
+    # hard_gate + chapter_type_gate + blocking_issues 仍独立生效，结构硬伤不会被放过。
+    editor_passed = editor_score >= 75
     hard_gate = report_data.get("hard_gate") or {}
     hard_gate_passed = bool(hard_gate.get("passed"))
     blocking_issues = _blocking_issues(report_data, hard_gate)
@@ -115,6 +118,12 @@ def soft_override_blockers(dimensions: dict, *, slack: int = 0) -> list[str]:
         "dialogue_fullness": 50,
         "character_voice": 60,
         "anti_ai_flavor": 60,
+        "prose_naturalness": 75,
+        "natural_sentence_glue": 60,
+        "non_checklist_narration": 62,
+        "diction_fit": 60,
+        "decorative_restraint": 58,
+        "dialogue_particle_flow": 58,
         "expression_precision": 60,
         "object_verb_collocation": 60,
         "observation_logic": 60,
@@ -149,6 +158,7 @@ def _blocking_issues(report_data: dict, hard_gate: dict) -> list[str]:
                 "too_short",
                 "too_long",
                 "bias_blocker",
+                "prose_naturalness_blocker",
             )
         )
     ]

@@ -45,7 +45,7 @@ def main() -> int:
     exit_code = 0
     for loop_index in range(1, args.max_supervisor_loops + 1):
         _append(log_file, f"supervisor_loop={loop_index} started_at={_timestamp()}")
-        health = _run_cli(["generation-queue-health"], database_url=args.database_url)
+        health = _run_cli(["generation-queue-health"], database_url=args.database_url, timeout_seconds=60)
         _append_command(log_file, "generation-queue-health", health)
         if health.returncode != 0:
             exit_code = health.returncode
@@ -55,6 +55,7 @@ def main() -> int:
             recovery = _run_cli(
                 ["recover-stale-generation-tasks", "--timeout-seconds", str(args.task_timeout_seconds)],
                 database_url=args.database_url,
+                timeout_seconds=max(60, args.task_timeout_seconds + 30),
             )
             _append_command(log_file, f"recover-stale-generation-tasks --timeout-seconds {args.task_timeout_seconds}", recovery)
             if recovery.returncode != 0:
@@ -76,7 +77,7 @@ def main() -> int:
             worker_args.extend(["--book-id", str(args.book_id)])
         if args.token_budget:
             worker_args.extend(["--token-budget", str(args.token_budget)])
-        worker = _run_cli(worker_args, database_url=args.database_url)
+        worker = _run_cli(worker_args, database_url=args.database_url, timeout_seconds=max(60, args.task_timeout_seconds + 30))
         _append_command(log_file, " ".join(worker_args), worker)
         if worker.returncode != 0:
             exit_code = worker.returncode
@@ -88,12 +89,22 @@ def main() -> int:
     return exit_code
 
 
-def _run_cli(args: list[str], *, database_url: str) -> subprocess.CompletedProcess[str]:
+def _run_cli(args: list[str], *, database_url: str, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
     cmd = [sys.executable, "-m", "app.cli"]
     if database_url:
         cmd.extend(["--database-url", database_url])
     cmd.extend(args)
-    return subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True)
+    try:
+        return subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        stderr = (stderr + "\n" if stderr else "") + f"command timed out after {timeout_seconds}s"
+        return subprocess.CompletedProcess(cmd, 124, stdout, stderr)
 
 
 def _append_command(log_file: Path, command: str, result: subprocess.CompletedProcess[str]) -> None:

@@ -16,6 +16,7 @@ def main() -> int:
         "active_budget_recovery",
         "active_trend_recovery",
         "pending_trend_recovery_contract",
+        "restored_incumbent_world_logic_blocked",
         "narrow_repairable_gate",
         "regressed_rebuild_candidate",
         "active_rebuild_candidate",

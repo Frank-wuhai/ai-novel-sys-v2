@@ -99,6 +99,11 @@ def main() -> int:
         if ordinary.new_terms:
             failures.append("ordinary_terms_misread_as_names:" + ",".join(ordinary.new_terms[:6]))
 
+        ordinary_place_text = "陈默进了青石镇，镇口有茶摊，雨水顺着木棚往下滴。他没停，转身又往临江村方向走。"
+        ordinary_place = evaluate_naming_governance(ordinary_place_text, allowed_terms=allowed)
+        if ordinary_place.score < 80 or any(issue.startswith("ungrounded_new_names") for issue in ordinary_place.issues):
+            failures.append("ordinary_place_names_over_penalized:" + ",".join(ordinary_place.issues[:4]))
+
         dialogue_text = "原来是镇远镖局的兄弟。就当你是黑风寨的探子。你就是黑风寨留下的人？而且镖局里都认这块牌。咱们镖局的印在纸上。"
         dialogue = evaluate_naming_governance(dialogue_text, allowed_terms=allowed)
         if any(term.startswith(("原来是", "就当你是", "你就是", "咱们", "而且")) for term in dialogue.new_terms):

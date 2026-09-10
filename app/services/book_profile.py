@@ -244,11 +244,69 @@ def build_book_profile(session: Session, *, book_id: int) -> BookProfile:
             bible.style_guide if bible else "",
         ]
     )
-    return infer_book_profile(book_id=book.id, title=book.title, genre=book.genre, context=context)
+    profile = infer_book_profile(book_id=book.id, title=book.title, genre=book.genre, context=context)
+    # book#4 都市抽奖系统爽文·覆写 urban guard 让系统抽奖不被判为"滑向系统任务"
+    if book.id == 4 and profile.archetype == "urban":
+        profile = _override_urban_system_book(profile)
+    return profile
+
+
+def _override_urban_system_book(profile: BookProfile) -> BookProfile:
+    """都市脑洞流爽文（book#4）: urban 底盘 + 抽奖系统合法化"""
+    from dataclasses import replace
+    # 移除跟"抽奖系统"合法金手指冲突的 avoid/drift（保留修真类禁忌）
+    _allow = {"系统任务", "任务大厅", "属性面板"}
+    new_avoid = tuple(m for m in profile.avoid_markers if m not in _allow)
+    new_drift_markers = tuple(m for m in profile.model_drift_markers if m not in _allow)
+    new_drift_replacements = {k: v for k, v in profile.drift_replacements.items() if k not in _allow}
+    new_guard = (
+        "本书是当代都市脑洞爽文，全部行动落在现代都市场景（校园、CBD、豪宅、商圈、餐厅），不得滑向修真/宗门/网游关卡。",
+        "主角觉醒“万界抽奖系统”是唯一合法金手指：签到抽奖/装逼任务额外抽奖/奖池现金-技能-豪车-心法皆合法。系统面板对主角显现，其他人不可见。",
+        "系统奖励必须合理落地——现金以转账形式到账、技能是脑内多出的记忆和肌肉记忆、豪车豪宅是“突然收到的礼物/中奖/家里亲戚遗产”等社会化解释。",
+        "每章至少 1 个爽点：抽奖开出好东西 / 装逼打脸嘲讽者 / 撩妹进度推进 / 商战小胜。章末钩子必须落在具体细节（未读消息/转账通知/系统提示音/名片/一个眼神）。",
+        "撩妹三线并行：陆芷萱(倒追型)/林清欢(纯爱型)/韩雪(总裁盟友型)。三线互不撞车，主角保持外憨内精的克制。",
+        "商战对手陆家集团贯穿全书。禁忌：不写主角受气不反击、不写系统凭空造物、不写主角靠系统解决所有事（要有主角自己的智谋和判断）。",
+    )
+    # 移除 urban 的 sample_banned_terms 里跟系统抽奖冲突的（无·系统词不在 banned 里·放心）
+    return replace(
+        profile,
+        guard_lines=new_guard,
+        avoid_markers=new_avoid,
+        model_drift_markers=new_drift_markers,
+        drift_replacements=new_drift_replacements,
+    )
 
 
 def infer_book_profile(*, book_id: int = 0, title: str = "", genre: str = "", context: str = "") -> BookProfile:
     source = "\n".join([title or "", genre or "", context or ""])
+    # 武侠网游 archetype · 允许游戏词（NPC/玩家/任务/刷怪/内测）· 但保留 living_wuxia 的活人要求
+    if _looks_like_game_wuxia(source):
+        return BookProfile(
+            book_id=book_id,
+            title=title,
+            genre=genre,
+            archetype="game_wuxia",
+            core_markers=WUXIA_CORE_MARKERS,
+            avoid_markers=(),  # 不禁游戏词
+            model_drift_markers=(),  # 不 block 游戏词
+            drift_replacements={},
+            guard_lines=(
+                "本书是武侠网游主题：现实侧/玩家交流可以承认游戏入口；进入清虚观、门派、拜师、盘问、试炼等世界内现场后，一律按真实江湖人物因果写。",
+                "世界内人物先是有欲望、顾虑、利益和误判的活人；主角不能用接口语言解释来路，任务来源必须落到木牌、拜帖、山门规矩、人物误判或可见物证。",
+                "游戏术语只能在现实侧或明确玩家之间轻量出现；不得进入世界内人物对白、内心和门派交涉逻辑。",
+                "【系统提示语气铁律】系统提示/系统音必须古朴克制、公事公办，像古籍判词或冷硬公告；严禁现代网络吐槽腔、玩梗、调侃、卖萌（禁『杂鱼退散』『多吃饭少打架』『你终于不用被影子打死了』『建议你现在后悔还来得及』这类）。数值播报（同步率/精气值百分比）点到即止，不堆砌，不喧宾夺主。",
+                "【钩子调性铁律】章末钩子必须落在玄幻武侠或现实困境的具体物象上（一柄剑、一道伤、一封催款单、一个身影）；严禁用现代惊悚/悬疑推理腔制造悬念（禁『三天内暴毙』『门牌号都对得上』式冷汗惊悚描写）。现实绑架/恐吓类钩子要写成人物具体动作与处境，不写成惊悚片旁白。",
+                "【多人纹理要求】游戏世界不应长期只有主角一人；每隔几章可出现其他异乡人/路人/同路者的存在感（路过、喊话、抢夺、结伴、擦肩博弈），但现场叙事仍按江湖话、身份误判和利益冲突推进。",
+            ),
+            sample_axes=(
+                "游戏内具体困境",
+                "NPC 出人意料的反应",
+                "玩家之间的博弈",
+                "规则误判与代价",
+                "现实与游戏交织",
+            ),
+            sample_banned_terms=("横店", "剧组", "演员", "龙套", "片场"),
+        )
     if _looks_like_living_wuxia(source):
         return BookProfile(
             book_id=book_id,
@@ -318,6 +376,16 @@ def infer_book_profile(*, book_id: int = 0, title: str = "", genre: str = "", co
 
 def infer_book_profile_from_context(*parts: str) -> BookProfile:
     return infer_book_profile(context="\n".join(str(part or "") for part in parts))
+
+
+def _looks_like_game_wuxia(text: str) -> bool:
+    """武侠网游 · 同时含武侠元素 + 网游元素"""
+    src = text or ""
+    wuxia = ("江湖", "门派", "武侠", "拜师", "剑法", "内力", "招式")
+    game = ("网游", "游戏", "NPC", "玩家", "内测", "武侠网游", "全息", "副本", "系统")
+    wuxia_hit = sum(1 for m in wuxia if m in src) >= 2
+    game_hit = sum(1 for m in game if m in src) >= 2
+    return wuxia_hit and game_hit
 
 
 def _looks_like_living_wuxia(text: str) -> bool:

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import ChapterBrief, ChapterVersion, QualityReport
 from app.services.production_optimization import predict_revision_pass
+from app.services.world_logic import evaluate_world_logic
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ def get_production_strategy_rules() -> list[ProductionStrategyRule]:
         ProductionStrategyRule("active_budget_recovery", _rule_active_budget_recovery),
         ProductionStrategyRule("active_trend_recovery", _rule_active_trend_recovery),
         ProductionStrategyRule("pending_trend_recovery_contract", _rule_pending_trend_recovery_contract),
+        ProductionStrategyRule("restored_incumbent_world_logic_blocked", _rule_restored_incumbent_world_logic_blocked),
         ProductionStrategyRule("narrow_repairable_gate", _rule_narrow_repairable_gate),
         ProductionStrategyRule("regressed_rebuild_candidate", _rule_regressed_rebuild_candidate),
         ProductionStrategyRule("active_rebuild_candidate", _rule_active_rebuild_candidate),
@@ -104,6 +106,17 @@ def get_production_strategy_rules() -> list[ProductionStrategyRule]:
 
 def _no_strategy(ctx: ProductionStrategyContext) -> ProductionStrategyAssessment:
     return ProductionStrategyAssessment(evidence=ctx.evidence)
+
+
+def _latest_restored_incumbent_world_logic_blocked(version: ChapterVersion | None) -> bool:
+    if not version or not str(version.source or "").startswith("rebuild_candidate_incumbent_restore:"):
+        return False
+    report = evaluate_world_logic(version.content or "")
+    return (
+        report.score < 60
+        or report.checks.get("player_layer_intrusion", 100) < 60
+        or report.checks.get("character_knowledge_boundary", 100) < 60
+    )
 
 
 def _rule_active_budget_recovery(ctx: ProductionStrategyContext) -> ProductionStrategyAssessment:
@@ -145,6 +158,19 @@ def _rule_pending_trend_recovery_contract(ctx: ProductionStrategyContext) -> Pro
     )
 
 
+def _rule_restored_incumbent_world_logic_blocked(ctx: ProductionStrategyContext) -> ProductionStrategyAssessment:
+    if not _latest_restored_incumbent_world_logic_blocked(ctx.latest_version):
+        return _no_strategy(ctx)
+    return ProductionStrategyAssessment(
+        action="generate_rebuild_candidates",
+        intent="escape_polluted_incumbent_restore",
+        category="restore_world_logic_blocked",
+        confidence=98,
+        reason="当前最新稿来自历史 incumbent_restore，但按当前世界逻辑/玩家层规则复评不合格；停止局部修补，重新生成候选。",
+        evidence=ctx.evidence,
+    )
+
+
 def _rule_narrow_repairable_gate(ctx: ProductionStrategyContext) -> ProductionStrategyAssessment:
     if not ctx.latest_quality or not _latest_failure_is_narrow_and_repairable(ctx.latest_quality):
         return _no_strategy(ctx)
@@ -155,7 +181,7 @@ def _rule_narrow_repairable_gate(ctx: ProductionStrategyContext) -> ProductionSt
         intent="continue_narrow_repairable_gate",
         category="narrow_repairable_gate",
         confidence=84,
-        reason="最新稿已把阻断收敛为单一可修门禁，继续定向修订，不重新打散为多候选。",
+        reason="最新稿已把阻断收敛为单一可修门禁，继续定向修订，不重新打散为候选重建。",
         evidence=ctx.evidence,
     )
 
@@ -173,7 +199,7 @@ def _rule_regressed_rebuild_candidate(ctx: ProductionStrategyContext) -> Product
         intent="recover_regressed_rebuild_candidate",
         category="rebuild_candidate_regressed",
         confidence=96,
-        reason="当前多候选择优稿低于历史最佳稿，停止沿低分稿继续修订；重新候选择优并启用历史最佳稿兜底。",
+        reason="当前候选择优稿低于历史最佳稿，停止沿低分稿继续修订；重新候选择优并启用历史最佳稿兜底。",
         evidence=ctx.evidence,
     )
 
@@ -188,7 +214,7 @@ def _rule_active_rebuild_candidate(ctx: ProductionStrategyContext) -> Production
         intent="continue_selected_rebuild_candidate",
         category="active_rebuild_candidate",
         confidence=82,
-        reason="当前已有多候选择优稿，下一步应修选中稿，不重复生成候选或回到旧修订合同。",
+        reason="当前已有候选择优稿，下一步应修选中稿，不重复生成候选或回到旧修订合同。",
         evidence=ctx.evidence,
     )
 
@@ -201,7 +227,7 @@ def _rule_blocked_chapter_rebuild(ctx: ProductionStrategyContext) -> ProductionS
         intent="force_rebuild_blocked_chapter",
         category="readable_revision_deadlock",
         confidence=93,
-        reason="当前章多轮修订和候选重建仍未关闭质量门禁；禁止未通过转入下一章，改用多候选回炉重建直到正式通过。",
+        reason="当前章多轮修订和候选重建仍未关闭质量门禁；禁止未通过转入下一章，改用受控回炉重建直到正式通过。",
         evidence=ctx.evidence,
     )
 
@@ -214,7 +240,7 @@ def _rule_comparison_restore_loop(ctx: ProductionStrategyContext) -> ProductionS
         intent="escape_comparison_restore_loop",
         category="comparison_restore_loop",
         confidence=94,
-        reason="连续定点修订低于当前最佳稿并被自动回退，继续修只会反复回到同一分数；改为多候选重建并择优。",
+        reason="连续定点修订低于当前最佳稿并被自动回退，继续修只会反复回到同一分数；改为受控重建并择优。",
         evidence=ctx.evidence,
     )
 
@@ -227,7 +253,7 @@ def _rule_budget_recovery_pingpong(ctx: ProductionStrategyContext) -> Production
         intent="escape_budget_recovery_pingpong",
         category="strategy_loop",
         confidence=95,
-        reason="预算恢复后仍连续低分未通过，继续单稿修订只会涨版号；改为多候选重建并自动择优。",
+        reason="预算恢复后仍连续低分未通过，继续单稿修订只会涨版号；改为受控重建并自动择优。",
         evidence=ctx.evidence,
     )
 
@@ -240,7 +266,7 @@ def _rule_near_gate_plateau(ctx: ProductionStrategyContext) -> ProductionStrateg
         intent="escape_near_gate_plateau",
         category="score_plateau",
         confidence=92,
-        reason="最近多版卡在准合格区间但无法通过，说明不是局部措辞问题；改为多候选重建寻找可通过结构。",
+        reason="最近多版卡在准合格区间但无法通过，说明不是局部措辞问题；改为受控重建寻找可通过结构。",
         evidence=ctx.evidence,
     )
 
@@ -253,7 +279,7 @@ def _rule_linear_revision_exhaustion(ctx: ProductionStrategyContext) -> Producti
         intent="escape_linear_revision_exhaustion",
         category="linear_revision_exhausted",
         confidence=90,
-        reason="连续正文修订未产生有效改善，停止线性烧修订，改为多候选重建。",
+        reason="连续正文修订未产生有效改善，停止线性烧修订，改为受控重建。",
         evidence=ctx.evidence,
     )
 
@@ -285,7 +311,7 @@ def _rule_quality_rebuild_signal(ctx: ProductionStrategyContext) -> ProductionSt
         intent="respect_quality_rebuild_signal",
         category="quality_requires_rebuild",
         confidence=88,
-        reason="最新质检已指向结构重建，直接生成多候选稿，避免继续微修。",
+        reason="最新质检已指向结构重建，直接生成受控候选稿，避免继续微修。",
         evidence=ctx.evidence,
     )
 
@@ -301,7 +327,7 @@ def _rule_pass_prediction_rebuild(ctx: ProductionStrategyContext) -> ProductionS
         intent="respect_pass_prediction_rebuild",
         category="pass_prediction_rebuild",
         confidence=prediction.confidence,
-        reason="通过预测显示继续线性修订收益低，改为多候选重建以缩短达标时间。",
+        reason="通过预测显示继续线性修订收益低，改为受控重建以缩短达标时间。",
         evidence=(*ctx.evidence, *prediction.reasons),
     )
 
@@ -417,7 +443,7 @@ def _pending_trend_recovery_contract(brief_text: str) -> bool:
 
 def _active_rebuild_candidate_state(*, latest_version: ChapterVersion, brief_text: str) -> bool:
     source = str(latest_version.source or "")
-    return source.startswith(("rebuild_candidate_selected:", "rebuild_candidate_incumbent_restore:")) and (
+    return source.startswith(("rebuild_candidate:", "rebuild_candidate_selected:", "rebuild_candidate_incumbent_restore:")) and (
         "reading_assessment_auto_quality#" in brief_text
         or "需重建" in brief_text
         or "失败结构不得沿用" in brief_text

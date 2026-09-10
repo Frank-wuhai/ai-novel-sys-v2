@@ -4,7 +4,7 @@ import json
 
 from app.db.session import session_scope
 from app.services.aesthetic_profile import apply_aesthetic_profile
-from app.services.book_aesthetic_standard import build_book_aesthetic_standard
+from app.services.book_aesthetic_standard import _benchmark_fragment, build_book_aesthetic_standard
 from app.services.paragraph_aesthetic import evaluate_paragraph_aesthetic
 from app.services.production import create_book, create_chapter_brief, create_foundation
 from app.services.production_packet import build_chapter_production_packet
@@ -65,6 +65,14 @@ def main() -> int:
     acceptance = "\n".join(str(item) for item in plan.get("acceptance") or [])
     if "审美密度" not in acceptance or "禁止笔触" not in acceptance:
         failures.append("unit_plan_missing_aesthetic_acceptance")
+    polluted_fragment = _benchmark_fragment(
+        "顾晚舔了舔干裂的嘴唇，转身走到桌前，手指在笔记本触控板上划了几下，屏幕亮起来，游戏论坛的页面还开着。内测公告第三条写着游戏内习得的技能会反馈现实身体。"
+        "\n清虚观山门外，瘦高道士把拂尘横在顾晚鼻尖前三寸，先看木牌，再看他袖口的油点，冷声问他是哪家武馆出来的穷小子。顾晚后脑勺还疼，只能顺着对方的误判往下编，先认穷，再认路远，最后把木牌递到香案边上。"
+    )
+    if "游戏论坛" in polluted_fragment or "内测公告" in polluted_fragment:
+        failures.append("polluted_benchmark_fragment_rendered")
+    if "清虚观山门外" not in polluted_fragment:
+        failures.append("safe_benchmark_fragment_not_selected")
     if paragraph_report.get("status") != "attention" or not paragraph_report.get("revision_targets"):
         failures.append("paragraph_aesthetic_did_not_flag_abstract_text")
     print(

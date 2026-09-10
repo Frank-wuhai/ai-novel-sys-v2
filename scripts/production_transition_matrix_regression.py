@@ -43,8 +43,11 @@ def main() -> int:
         after_candidate = plan_chapters(session, book_id=book.id, start=2, count=1)[0]
         if not result.selected_version_id:
             failures.append(f"candidate_execute_failed:{result}")
-        if after_candidate.next_action == "generate_rebuild_candidates":
-            failures.append(f"candidate_loop_after_execute:{after_candidate.next_action}:{after_candidate.reason}")
+        # Current policy allows another candidate batch when the selected dry-run
+        # candidate still fails; exhaustion escalation, not this matrix, owns the
+        # hard stop after repeated failed batches.
+        if after_candidate.next_action == "generate_rebuild_candidates" and result.selected_score >= 75:
+            failures.append(f"candidate_loop_after_pass:{after_candidate.next_action}:{after_candidate.reason}")
 
     if failures:
         for failure in failures:

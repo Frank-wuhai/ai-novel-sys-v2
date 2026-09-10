@@ -157,6 +157,25 @@ def evaluate_early_stop(
         best_version = None
         best_score = None
 
+    # 路径②兜底修复（2026-07-29）：预计算"最高分的 passed 版"。当停止经由
+    # max_versions/plateau/no_improvement 兜底分支触发时，若历史中存在 passed 版
+    # (已过完整质检链)，best 应优先落到该合格版并补 quality_gate_passed 标记，
+    # 否则 best 会落到全体最高分版(可能 passed=False)、丢失合格信号，被 orchestrator
+    # 误踢 rebuild——尽管本章其实已有可 accept 的合格版。
+    def _prefer_passing(reason: str, rules: tuple[str, ...]) -> "EarlyStopDecision | None":
+        if not passing:
+            return None
+        bp = max(passing, key=lambda v: (v.score or -1, v.version_number))
+        return EarlyStopDecision(
+            should_stop=True,
+            stop_reason=f"{reason}; recovered passing v{bp.version_number}@{bp.score}",
+            best_version_number=bp.version_number,
+            best_score=bp.score,
+            versions_evaluated=versions_evaluated,
+            passing_versions=len(passing),
+            triggered_rules=rules + ("quality_gate_passed",),
+        )
+
     # ------------------------------------------------------------------ rule 1
     # Hard cap: even if nothing passes, stop hemorrhaging tokens.
     if versions_evaluated >= policy.max_versions:
@@ -164,6 +183,9 @@ def evaluate_early_stop(
             f"max_versions reached ({versions_evaluated}/{policy.max_versions});"
             f" best_score={best_score if best_score is not None else 'n/a'}"
         )
+        _recovered = _prefer_passing(reason, ("max_versions",))
+        if _recovered is not None:
+            return _recovered
         return EarlyStopDecision(
             should_stop=True,
             stop_reason=reason,
@@ -174,17 +196,31 @@ def evaluate_early_stop(
             triggered_rules=("max_versions",),
         )
 
-    # ------------------------------------------------------------------ rule 2
-    # Passing bar reached — but respect min_versions_before_stop warm-up so
-    # a lucky early draft isn't accepted without any comparison surface.
-    passing_above_threshold = [
-        v for v in passing if v.score is not None and v.score >= policy.accept_score_threshold
-    ]
-    if passing_above_threshold and versions_evaluated >= policy.min_versions_before_stop:
-        best_pass = max(passing_above_threshold, key=lambda v: (v.score or -1, v.version_number))
+    # ------------------------------------------------------------------ rule 2a
+    # 达标线统一（2026-07-29 路径②·消除 72-75 鸿沟）：
+    #
+    # VersionScore.passed 已是"通过完整质检链"的权威信号——它由
+    # quality.py `passed = verdict in {soft_pass, pass}` 产生，即已包含
+    # hard_gate 通过 + 章型门(72)/soft_pass(65+gap≤15) 的裁决。
+    #
+    # 旧 rule 2 却要求 score>=accept_score_threshold(75) 才认"达标停止"，
+    # 而前5章 strict 章型 pass_score=72、B版口语化天然 score 65-74，于是
+    # 大量 passed=True 但 score 72-74 的合格版被判"没到75"，继续跑到
+    # plateau/max_versions 才停——book4/book5 前5章烧的额外版本(15/13版)
+    # 就耗在这条鸿沟上。这正是"标准打架"在重试层的翻版。
+    #
+    # 修复：任何 passed=True 的版本(已过质检链) + 过 warm-up → 立即达标停止。
+    # 不再死守 75 分线。原 score>=75 的择优逻辑降级为 rule 2b(在有多个
+    # passed 版时优先取高分版)，不再是"停止"的必要条件。
+    if passing and versions_evaluated >= policy.min_versions_before_stop:
+        # 优先取 score>=accept_score_threshold 的高分 passed 版；没有则取
+        # 分数最高的 passed 版(可能 72-74，但已过质检链，够格停止)。
+        best_pass = max(passing, key=lambda v: (v.score or -1, v.version_number))
+        _threshold_met = best_pass.score is not None and best_pass.score >= policy.accept_score_threshold
         reason = (
-            f"accept_score_threshold met: v{best_pass.version_number} score={best_pass.score} "
-            f">= {policy.accept_score_threshold}; total_versions={versions_evaluated}"
+            f"quality_gate_passed: v{best_pass.version_number} score={best_pass.score} "
+            f"passed=True ({'>=' if _threshold_met else '<'}{policy.accept_score_threshold}, "
+            f"已过质检链含soft_pass); total_versions={versions_evaluated}"
         )
         return EarlyStopDecision(
             should_stop=True,
@@ -193,7 +229,7 @@ def evaluate_early_stop(
             best_score=best_pass.score,
             versions_evaluated=versions_evaluated,
             passing_versions=len(passing),
-            triggered_rules=("accept_score_threshold",),
+            triggered_rules=("accept_score_threshold",) if _threshold_met else ("quality_gate_passed",),
         )
 
     # ------------------------------------------------------------------ rule 2.5
@@ -239,6 +275,9 @@ def evaluate_early_stop(
                     f"rule scores drift {drift} <= {policy.plateau_delta} "
                     f"(scores={window_scores}); best_score={best_score}"
                 )
+                _recovered = _prefer_passing(reason, ("plateau_stop",))
+                if _recovered is not None:
+                    return _recovered
                 return EarlyStopDecision(
                     should_stop=True,
                     stop_reason=reason,

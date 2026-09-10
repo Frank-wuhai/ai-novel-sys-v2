@@ -218,20 +218,38 @@ def _latest_protected_revision_brief(session: Session, *, chapter_id: int) -> Ch
             .limit(16)
         )
     )
-    for brief in briefs:
-        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-        if any(
-            marker in text
-            for marker in (
-                "reading_assessment_contract",
-                "阅读评估结论",
-                "当前稿不是正式批准稿",
-                "修订方向:",
-                "clean_rebuild_contract@v1",
-            )
-        ):
+    brief_texts = [(brief, "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])) for brief in briefs]
+    for brief, text in brief_texts:
+        if _is_unit_flow_protected_revision_brief_text(text):
+            return brief
+    for brief, text in brief_texts:
+        if _is_protected_revision_brief_text(text):
             return brief
     return None
+
+
+def _is_protected_revision_brief_text(text: str) -> bool:
+    if any(
+        marker in text
+        for marker in (
+            "reading_assessment_contract",
+            "reading_assessment_auto_quality#",
+            "阅读评估结论",
+            "当前稿不是正式批准稿",
+            "修订方向:",
+            "clean_rebuild_contract@v1",
+        )
+    ):
+        return True
+    return _is_unit_flow_protected_revision_brief_text(text)
+
+
+def _is_unit_flow_protected_revision_brief_text(text: str) -> bool:
+    normalized = text.lower()
+    is_unit_flow = "unit_flow" in normalized or "单元流" in text or "小单元" in text
+    is_local_contract = "revision_mode:local_patch" in normalized or "revision_mode:targeted" in normalized
+    has_explicit_target = any(marker in text for marker in ("只修第", "只重写第", "只替换第", "只改第", "只动第"))
+    return is_unit_flow and is_local_contract and has_explicit_target
 
 
 def _loads_json(value: str | None) -> dict[str, Any]:

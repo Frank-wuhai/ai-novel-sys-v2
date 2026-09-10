@@ -43,6 +43,21 @@ def main() -> int:
         report = evaluate_chapter_units(_sample_chapter()).to_dict()
         alignment = align_chapter_unit_plan(plan, report)
         plan_id = plan.id
+        contaminated = ensure_chapter_unit_plan(
+            session,
+            chapter_id=chapter.id,
+            chapter_brief_id=None,
+            chapter_number=1,
+            goal="【自然网文正文约束·最高优先级】: 不要像提纲。",
+            required_beats=(
+                "剧情基线：他一边在现实里送外卖、照顾病重的父亲、撑着家里濒倒的小武馆，"
+                "一边在《入梦》里靠清虚观武学一步步变强——每强一分，现实的担子就更扛不动一分。\n"
+                "主角被清虚观老道盘问木牌来历；主角用江湖谎话争取入门机会；章末留下身体代价。"
+            ),
+            constraints="不要输出系统说明。",
+            mode="revision",
+        )
+        contaminated_payload = json.loads(contaminated.plan_json)
     failures: list[str] = []
     if payload.get("target_unit_count", 0) < 6:
         failures.append("target_unit_count_low")
@@ -52,6 +67,12 @@ def main() -> int:
         failures.append("missing_prompt_block")
     if int(alignment.get("alignment_score") or 0) < 70:
         failures.append(f"alignment_low:{alignment.get('alignment_score')}")
+    contaminated_text = json.dumps(contaminated_payload, ensure_ascii=False)
+    for marker in ("剧情基线", "自然网文正文约束", "他一边在现实里", "每强一分", "家里濒倒的小武馆"):
+        if marker in contaminated_text:
+            failures.append(f"contaminated_unit_plan_marker:{marker}")
+    if contaminated_payload.get("target_unit_count") != 5:
+        failures.append(f"contaminated_unit_count:{contaminated_payload.get('target_unit_count')}")
     result = {
         "status": "fail" if failures else "pass",
         "failures": failures,

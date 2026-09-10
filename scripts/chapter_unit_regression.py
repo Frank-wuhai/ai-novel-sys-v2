@@ -4,6 +4,7 @@ import json
 
 from app.llm.providers import LLMResponse, estimate_tokens
 from app.llm.schemas import DraftOutput
+from app.services.chapter_unit_plans import build_chapter_unit_plan_payload
 from app.services.chapter_units import evaluate_chapter_units
 from app.services.production_llm import repair_failed_chapter_units, repair_humanized_unit_flow
 
@@ -22,11 +23,23 @@ BAD_TEXT = """
 """.strip()
 
 
+KEYWORD_STUFFED_TEXT = """
+林照想要找到线索，于是决定继续行动。他走、看、抓、推、躲，必须拿到答案。这里有危险、代价、阻碍和秘密，也有人皱眉、沉默、心里发冷。然后事情发生，结果出现，接着他发现规矩，马上前往下一处。
+
+刚才那句话很重要，于是他继续走、继续看、继续抓、继续推。这里还有危险、代价、阻碍和秘密，也有人皱眉、沉默、心里发冷。然后事情发生，结果出现，接着他发现规矩，马上前往下一处。
+
+因此林照选择活下去，只好继续行动。他退、停、问、答、伸手、抬手、转身。这里仍然有危险、代价、阻碍和秘密，也有人皱眉、沉默、心里发冷。然后事情发生，结果出现，接着他发现规矩，马上前往下一处。
+""".strip()
+
+
 def main() -> int:
     good = evaluate_chapter_units(GOOD_TEXT, target_min=80, target_max=220).to_dict()
     single_newline_text = GOOD_TEXT.replace("。", "。\n").replace("\n\n", "\n")
     single_newline_good = evaluate_chapter_units(single_newline_text, target_min=80, target_max=220).to_dict()
+    mixed_newline_text = single_newline_text + "\n\n章末多出一行提示。\n\n主角决定继续追查。"
+    mixed_newline_good = evaluate_chapter_units(mixed_newline_text, target_min=80, target_max=220).to_dict()
     bad = evaluate_chapter_units(BAD_TEXT, target_min=80, target_max=220).to_dict()
+    stuffed = evaluate_chapter_units(KEYWORD_STUFFED_TEXT, target_min=80, target_max=260).to_dict()
     repaired, repair_meta = repair_humanized_unit_flow(
         _FakeRepairProvider(),
         draft=DraftOutput(title="坏稿", content="\n\n".join([BAD_TEXT] * 12), self_check=[], used_brief_points=[]),
@@ -59,14 +72,29 @@ def main() -> int:
         failures.append(f"single_newline_unit_count_low:{single_newline_good.get('unit_count')}")
     if int(single_newline_good.get("score") or 0) < 70:
         failures.append(f"single_newline_score_low:{single_newline_good.get('score')}")
+    if int(mixed_newline_good.get("unit_count") or 0) < 3:
+        failures.append(f"mixed_newline_unit_count_low:{mixed_newline_good.get('unit_count')}")
     if not bad.get("repair_contract"):
         failures.append("bad_missing_repair_contract")
     if int(bad.get("score") or 0) >= 70:
         failures.append(f"bad_score_too_high:{bad.get('score')}")
+    if int(stuffed.get("score") or 0) >= 70:
+        failures.append(f"keyword_stuffed_score_too_high:{stuffed.get('score')}")
+    if not any("causal_chain" in unit.get("issues", []) for unit in stuffed.get("units", [])):
+        failures.append("keyword_stuffed_missing_causal_chain_issue")
     if not repair_meta.get("attempted") or not repair_meta.get("accepted"):
         failures.append("unit_repair_not_accepted")
     if evaluate_chapter_units(repaired.content).score < 70:
         failures.append("unit_repair_score_low")
+    plan = build_chapter_unit_plan_payload(
+        chapter_number=1,
+        goal="清虚观山门盘问",
+        required_beats="山门盘问；剧情基线：二本学生顾晚为一笔内测奖金进入武侠网游《入梦》；章末身体副作用",
+        constraints="不得出现内测/论坛/玩家/NPC/系统分配",
+    )
+    plan_text = json.dumps(plan, ensure_ascii=False)
+    if "剧情基线" in plan_text or "内测奖金" in plan_text:
+        failures.append("unit_plan_included_meta_story_baseline")
     if not local_meta.get("accepted") or local_meta.get("mode") != "local_units":
         failures.append("local_unit_repair_not_accepted")
     if "经历了一番危险" in local_repaired.content:
@@ -79,10 +107,19 @@ def main() -> int:
             "score": single_newline_good.get("score"),
             "unit_count": single_newline_good.get("unit_count"),
         },
+        "mixed_newline_good": {
+            "score": mixed_newline_good.get("score"),
+            "unit_count": mixed_newline_good.get("unit_count"),
+        },
         "bad": {
             "score": bad.get("score"),
             "unit_count": bad.get("unit_count"),
             "repair_contract": bad.get("repair_contract"),
+        },
+        "keyword_stuffed": {
+            "score": stuffed.get("score"),
+            "unit_count": stuffed.get("unit_count"),
+            "issues": stuffed.get("issues"),
         },
         "repair": {
             "attempted": repair_meta.get("attempted"),

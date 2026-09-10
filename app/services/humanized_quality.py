@@ -46,7 +46,15 @@ REACTION_MARKERS = ("沉默", "皱眉", "笑", "愣", "怒", "怕", "惊", "疑"
 CAUSAL_MARKERS = ("因此", "于是", "所以", "却", "但", "偏偏", "反而", "果然", "下一刻", "随即", "这让", "正因为")
 SETTING_EMBED_MARKERS = ("规矩", "门派", "药", "灵", "阵", "城", "客栈", "江湖", "修炼", "师门", "交易", "人情")
 EXPOSITION_MARKERS = ("世界观", "设定", "系统说明", "背景介绍", "规则如下", "首先", "其次")
-HOOK_MARKERS = ("门外", "黑影", "脚步", "消息", "秘密", "发现", "转折", "陌生", "下一次", "笑声", "低声", "没有结束")
+HOOK_MARKERS = (
+    "门外", "黑影", "脚步", "消息", "秘密", "发现", "转折", "陌生", "下一次", "笑声", "低声", "没有结束",
+    "异常", "倒计时", "倒数", "坐标", "锚定", "锁定", "追踪", "清除", "通道", "巡检",
+)
+HOOK_PRESSURE_MARKERS = (
+    "倒计时", "倒数", "少了一秒", "强制清除", "清除驻留痕迹", "坐标已同步", "坐标",
+    "身份锚定", "锚定进度", "通道开启", "下次通道", "非标驻留", "巡检序列", "壁垒异常",
+    "数据壁垒异常", "锁定", "追踪", "异常提示",
+)
 
 
 def evaluate_humanized_delivery(text: str) -> HumanizedDeliveryReport:
@@ -119,8 +127,15 @@ def _embedded_setting_score(text: str) -> int:
 def _hook_score(ending: str) -> int:
     hook_hits = _hit_count(ending, HOOK_MARKERS)
     pressure_hits = _hit_count(ending, OBSTACLE_MARKERS + COST_MARKERS)
+    rule_pressure_hits = _hit_count(ending, HOOK_PRESSURE_MARKERS)
     question_hits = ending.count("？") + ending.count("?")
-    return _clamp(35 + min(hook_hits, 4) * 12 + min(pressure_hits, 3) * 7 + min(question_hits, 2) * 5)
+    return _clamp(
+        35
+        + min(hook_hits, 4) * 10
+        + min(pressure_hits, 3) * 6
+        + min(rule_pressure_hits, 4) * 8
+        + min(question_hits, 2) * 5
+    )
 
 
 def _recommendations(checks: dict[str, int]) -> list[str]:

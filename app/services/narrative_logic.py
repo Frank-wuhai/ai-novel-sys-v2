@@ -44,8 +44,20 @@ PAYOFF_ANCHORS = (
     "机会", "忘掉", "必须", "不敢",
     "答应", "负责", "拿走", "算账",
 )
-ATMOSPHERE_SENSORY = ("雨", "风", "灯", "影", "味", "冷", "热", "潮", "血", "泥", "声", "疼", "汗")
-ATMOSPHERE_PRESSURE = ("怕", "慌", "疼", "逼", "躲", "债", "伤", "死", "追", "压", "不敢", "危险")
+ATMOSPHERE_SENSORY = (
+    "雨", "风", "灯", "影", "味", "冷", "热", "潮", "血", "泥", "声", "疼", "汗",
+    # 扩充 (2026-07-26): 口语化爽文的具象白描常用身体/环境感受词。原词表只13个
+    # 单字,漏计大量真实氛围描写(如"蜡油凝成薄壳""嗓音干得像砂纸""暗红色的光")。
+    "光", "烫", "凉", "腥", "香", "烟", "尘", "灰", "暗", "亮", "响", "颤", "抖",
+    "痒", "麻", "痛", "酸", "涩", "咸", "苦", "滑", "糙", "黏", "湿", "干", "硬",
+    "刺", "钝", "闷", "呛", "嗡", "咯", "沙", "刮", "撞", "砸", "裂",
+)
+ATMOSPHERE_PRESSURE = (
+    "怕", "慌", "疼", "逼", "躲", "债", "伤", "死", "追", "压", "不敢", "危险",
+    # 扩充 (2026-07-26): 爽文压力/紧张情绪的具象表达
+    "紧", "急", "抖", "颤", "僵", "冷汗", "屏息", "心跳", "咬", "攥", "拧",
+    "警觉", "危机", "退", "闪", "扑", "夺", "抢", "喊", "吼", "瞪", "盯",
+)
 
 
 def evaluate_narrative_logic(text: str) -> NarrativeLogicReport:
@@ -104,11 +116,19 @@ def _scene_atmosphere_score(text: str) -> int:
     paragraphs = [item for item in text.splitlines() if item.strip()]
     if not paragraphs:
         return 0
-    atmospheric = 0
+    # 修复 (2026-07-26): 原算法只对"感官+压力同段"计满分,对口语化爽文过严
+    # (氛围常拆在相邻两句,如"血凝了"/"伤口生疼")→系统性误伤 scene_atmosphere=37。
+    # 改为分级计分:感官+压力叠加=1.0权重(强氛围),仅感官描写=0.5权重(具象白描
+    # 也是氛围)。保留梯度防放水:纯感官段权重减半,不会让无氛围章虚高。
+    weighted = 0.0
     for paragraph in paragraphs:
-        if any(marker in paragraph for marker in ATMOSPHERE_SENSORY) and any(marker in paragraph for marker in ATMOSPHERE_PRESSURE):
-            atmospheric += 1
-    ratio = atmospheric / len(paragraphs)
+        has_sensory = any(marker in paragraph for marker in ATMOSPHERE_SENSORY)
+        has_pressure = any(marker in paragraph for marker in ATMOSPHERE_PRESSURE)
+        if has_sensory and has_pressure:
+            weighted += 1.0
+        elif has_sensory:
+            weighted += 0.5
+    ratio = weighted / len(paragraphs)
     return _clamp(35 + round(ratio * 65))
 
 

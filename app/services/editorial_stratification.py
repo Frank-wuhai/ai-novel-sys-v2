@@ -350,6 +350,10 @@ def _chief_acceptance_checks(stratification: EditorialStratification, weakest: l
     checks = [
         "下一版不得出现质检术语、系统字段或修订合同文本。",
         "合格段落只做轻调，不为追求变化而重写。",
+        # 2026-08-07 v25.10:跨链一致性 —— 防止 L1/L2/L3 主线/长记忆/人物状态错位
+        "跨链一致性:人物状态与上一章长记忆(L1)对齐,不得擅自改写姓名/境界/关系。",
+        "跨链一致性:本章主事件须承接 brief (L2 中线摘要) 已有承诺,不得跳主线。",
+        "跨链一致性:章末钩子须与 L3 plot_hook 形成因果链,不得孤立突兀。",
     ]
     if stratification.tier == TIER_SOLID_DRAFT:
         checks.append("必须说明保留了源版本哪些主事件、场景顺序和章末事实。")

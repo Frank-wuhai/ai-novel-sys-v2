@@ -28,6 +28,14 @@ CHAPTER_VERSION_TRANSITIONS = {
     ("approved", "approved", "quality_pass"),
     ("approved", "needs_revision", "quality_fail"),
     ("approved", "needs_revision", "feedback_reopen"),
+    # P1-2 · 收编 rebuild 通道 · 让 candidate/discarded 从死枝变为合法节点
+    ("candidate", "reviewed_pass", "candidate_promote_pass"),
+    ("candidate", "needs_revision", "candidate_promote_fail"),
+    ("candidate", "discarded", "candidate_reject"),
+    ("needs_revision", "candidate", "spawn_candidate"),
+    ("draft", "candidate", "spawn_candidate"),
+    ("candidate", "candidate", "quality_pass"),
+    ("candidate", "candidate", "quality_fail"),
 }
 
 PUBLISH_JOB_TRANSITIONS = {

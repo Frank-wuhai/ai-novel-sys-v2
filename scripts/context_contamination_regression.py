@@ -11,6 +11,7 @@ from app.db.session import session_scope
 from app.models.entities import Chapter, ChapterBrief, Character, PowerSystem, WorldRule
 from app.services.canon import add_character, add_power_system, add_world_rule
 from app.services.production import create_book, create_foundation, seed_prompts
+from app.services.context_contamination import context_anchor_lines, context_anchor_terms
 from app.services.production_packet import build_chapter_production_packet
 from regression_db import isolated_database
 
@@ -93,6 +94,24 @@ def main() -> int:
         if not packet.audit.get("context_contamination", {}).get("passed"):
             print("clean production packet did not pass contamination audit")
             print(packet.audit.get("context_contamination"))
+            return 1
+
+        ref_book = create_book(session, title="我不是剑仙", genre="古风仙侠", platform="番茄小说")
+        create_foundation(
+            session,
+            book_id=ref_book.id,
+            premise="沈渡坠入写实蜀山风仙侠世界。",
+            reader_promise="底层小人物谨慎求活。",
+            world_engine="异界参考还珠楼主《蜀山剑侠传》+电影《蜀山传》，但当前作品名是《我不是剑仙》。",
+            protagonist_engine="沈渡用真视之眼看破绽。",
+            conflict_engine="数据壁垒异常与异界求活。",
+        )
+        terms = context_anchor_terms(session, book_id=ref_book.id)
+        lines = "\n".join(context_anchor_lines(session, book_id=ref_book.id))
+        if terms.get("world_titles", [])[:1] != ["我不是剑仙"] or "《蜀山传》" in lines:
+            print("reference title leaked into current world anchor")
+            print(terms)
+            print(lines)
             return 1
 
     print("context-contamination-regression: PASS")

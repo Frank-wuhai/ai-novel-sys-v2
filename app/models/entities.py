@@ -126,6 +126,22 @@ class WorldRule(Base):
     status: Mapped[str] = mapped_column(String(50), default="active")
 
 
+class CanonAuthorityProfile(Base):
+    __tablename__ = "canon_authority_profiles"
+    __table_args__ = (
+        Index("ix_canon_authority_profiles_book_status", "book_id", "status"),
+        Index("ix_canon_authority_profiles_book_created", "book_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    book_id: Mapped[int] = mapped_column(ForeignKey("books.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    source: Mapped[str] = mapped_column(String(120), default="system")
+    profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
 class PowerSystem(Base):
     __tablename__ = "power_systems"
 

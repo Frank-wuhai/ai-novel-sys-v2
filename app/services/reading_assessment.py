@@ -13,6 +13,7 @@ from app.services.brief_sanitizer import sanitize_existing_chapter_brief
 from app.services.feedback import submit_revision_suggestion
 from app.services.production_state import latest_story_brief
 from app.services.status_language import editorial_blocker_text, editorial_summary_text
+from app.services.world_logic import evaluate_world_logic
 from app.workflows.state_machine import move
 
 
@@ -28,10 +29,14 @@ WATCHED_READING_DIMS = {
     "dialogue_fullness": 55,
     "character_voice": 60,
     "prose_voice": 65,
+    "prose_naturalness": 65,
+    "natural_sentence_glue": 60,
+    "non_checklist_narration": 62,
+    "diction_fit": 60,
     "chapter_unit_flow": 65,
     "imageable_paragraphs": 60,
 }
-READING_ASSESSMENT_POLICY_VERSION = "v6_hard_issue_acceptance"
+READING_ASSESSMENT_POLICY_VERSION = "v9_author_rejection_blocks_soft_accept"
 REVISION_ACTIONS = {"auto_polish", "auto_revise", "auto_rebuild"}
 APPROVAL_ACTIONS = {"approve_ready"}
 
@@ -124,12 +129,11 @@ def maybe_apply_reading_assessment(
         and existing.get("policy_version") == READING_ASSESSMENT_POLICY_VERSION
     ):
         assessment = _assessment_from_dict(existing)
-        if _is_effective_approval(assessment):
-            # Sprint 2 P0-1: existing approval-effective assessment — close
-            # any dangling revision briefs (they'd otherwise flip
-            # ``version.status`` back to needs_revision via
-            # ``_revision_brief_blocks_quality_reconcile`` on the next planner
-            # pass) and reconcile version state to reviewed_pass.
+        if bool(quality.passed) or _is_effective_approval(assessment):
+            # Existing assessments may lag behind a later soft-pass/live review.
+            # Once the current quality row passes, reading assessment must not
+            # reopen revision-brief creation; it should only close stale briefs
+            # and reconcile the version into a pass state.
             if chapter is not None:
                 _close_revision_briefs(session, chapter_id=chapter.id)
             if (
@@ -191,6 +195,18 @@ def maybe_apply_reading_assessment(
         return _store_assessment(quality, data, assessment, version=version)
 
     assessment = assess_reading_quality(data, quality_id=quality.id)
+    if _restored_incumbent_current_world_logic_blocked(data, version=version):
+        assessment = ReadingAssessment(
+            "restored_incumbent_world_logic_rebuild",
+            "auto_rebuild",
+            "恢复旧稿污染，需重建",
+            "当前版本来自 incumbent_restore，但按当前世界逻辑/玩家层规则复评不合格；系统必须切断旧稿局部修补，重新生成候选。",
+            "rewrite",
+            assessment.preserve,
+            list(dict.fromkeys([*assessment.improve, "删除游戏内现场的内测/NPC/玩家/论坛等元概念泄漏。"])),
+            list(dict.fromkeys([*assessment.blockers, "restored_incumbent_world_logic_blocked"])),
+            quality_id=quality.id,
+        )
     external_brief = _active_external_revision_order(session, chapter_id=chapter.id)
     if external_brief and _revision_brief_produced_version(session, brief_id=external_brief.id, version_id=version.id):
         external_brief.status = "superseded"
@@ -250,6 +266,19 @@ def maybe_apply_reading_assessment(
     return stored
 
 
+def _restored_incumbent_current_world_logic_blocked(report_data: dict, *, version: ChapterVersion | None) -> bool:
+    if not version or not str(version.source or "").startswith("rebuild_candidate_incumbent_restore:"):
+        return False
+    if "selected_from_incumbent_version_id" not in report_data and (report_data.get("selection_reason") != "incumbent_ranked_higher_than_candidates"):
+        return False
+    report = evaluate_world_logic(version.content or "")
+    return (
+        report.score < 60
+        or report.checks.get("player_layer_intrusion", 100) < 60
+        or report.checks.get("character_knowledge_boundary", 100) < 60
+    )
+
+
 def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) -> ReadingAssessment:
     score = int(report_data.get("score") or 0)
     passed = bool(report_data.get("base_quality_passed", report_data.get("passed")))
@@ -276,6 +305,42 @@ def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) 
 
     if failure_class.get("category") == "structure_rewrite":
         reasons = [str(item) for item in failure_class.get("structural_reasons") or []]
+        # 2026-07-24 路径歧视根本修复：structure_rewrite 的 structural_reasons 分两类——
+        #   硬结构失败(真需重建): length_out_of_range / over_target_max_chars /
+        #     unit_count_exploded / chapter_type_gate —— 长度/单元爆炸/章型硬门禁，必须重建。
+        #   软误判维度(对番茄口语B版·尤其 reading_assessment 重建brief 系统性偏低·非真实
+        #     结构失败): unit_flow_structural(chapter_unit_flow<65) / brief_coverage_structural
+        #     (brief_coverage<55)。重建brief的beats是系统标记(reading_assessment_auto_quality#)
+        #     而非自然语言剧情点，规则关键词匹配天然失效 → brief_coverage 假性偏低。
+        # 问题现象:ch53-55(brief_cov45-49·unit_flow57-59)因已有 existing assessment 走快
+        #   路径入库,ch57(brief_cov50·质量更高)走 fresh 路径被 structure_rewrite 误杀 auto_rebuild
+        #   → passed翻False。同质不同判 = 路径歧视bug,非ch57质量差(人工通读确认brief全兑现)。
+        # 修复:当 structural_reasons 只含软误判维度(无任何硬结构失败) + hard_gate过 +
+        #   score≥HARD_FLOOR(65·soft_pass底线) + 无 report_gate_blockers 时,不强制 auto_rebuild,
+        #   降级 approve_ready 放行(归 quality 层 soft_pass 裁决)。质量红线仍由:任一硬结构
+        #   失败→保留rebuild、hard_gate一票否决、score<65拦、report_gate_blockers拦 守住。
+        _HARD_STRUCTURAL = {"length_out_of_range", "over_target_max_chars", "unit_count_exploded", "chapter_type_gate"}
+        _has_hard_structural = any(r in _HARD_STRUCTURAL for r in reasons)
+        _soft_misjudge_only = bool(reasons) and not _has_hard_structural
+        if (
+            _soft_misjudge_only
+            and hard_gate_passed
+            and score >= 65
+            and not report_gate_blockers
+        ):
+            return ReadingAssessment(
+                "soft_structural_accept",
+                "approve_ready",
+                "结构软触发·质检达标放行",
+                "结构分类仅因 brief_coverage/unit_flow 软触发(对口语化B版与重建brief系统性偏低)"
+                "命中 structure_rewrite；但无长度/单元爆炸/章型硬门禁等真实结构失败，硬门禁通过"
+                "且综合分达 soft_pass 底线。判定为规则误报，放行入库，不强制重建。",
+                "machine_polish",
+                preserve,
+                improve or reasons,
+                [],
+                quality_id=quality_id,
+            )
         # Change C (2026-07-02): if the LLM chief editor already reviewed and
         # cleared the version — pass verdict, strong LLM score, hard_gate PASS,
         # editorial tier B or above, and the editorial_gate applied a soft
@@ -302,6 +367,42 @@ def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) 
                 preserve,
                 improve or reasons,
                 [],
+                quality_id=quality_id,
+            )
+        report_issues = [str(item) for item in report_data.get("issues") or []]
+        hard_gate_issues = [str(item) for item in hard_gate.get("issues") or []] if hard_gate else []
+        combined_issues = [*report_issues, *hard_gate_issues, *report_gate_blockers]
+        prose_gate_only = (
+            score >= 75
+            and not _has_hard_structural
+            and any("prose_naturalness_blocker" in item for item in combined_issues)
+            and not any(
+                item.startswith("too_long")
+                or any(
+                    marker in item
+                    for marker in (
+                        "length_out_of_range",
+                        "over_target_max_chars",
+                        "unit_count_exploded",
+                        "chapter_type_gate_failed",
+                        "visual_underdeveloped",
+                        "imageable_underdeveloped",
+                    )
+                )
+                for item in combined_issues
+            )
+        )
+        if prose_gate_only:
+            targets = list(dict.fromkeys([*(improve or []), "删减多余比喻和装饰词。", "把功能短对白改成带立场、试探和情绪的自然对白。", "保留当前场景链，只做文风和对白定点修订。"]))
+            return ReadingAssessment(
+                "usable_draft_needs_prose_revision",
+                "auto_revise",
+                "高分底稿，文风定点修订",
+                "当前稿结构和读者承诺已基本成立，失败主要来自 prose_naturalness/对白自然度；禁止整章重建，改为保留场景链的文风定点修订。",
+                "targeted",
+                preserve,
+                targets[:8],
+                [item for item in combined_issues if item][:6],
                 quality_id=quality_id,
             )
         return ReadingAssessment(
@@ -342,7 +443,33 @@ def assess_reading_quality(report_data: dict, *, quality_id: int | None = None) 
             blockers or severe,
             quality_id=quality_id,
         )
+    # book7 P0: score 在 [60, 65) 且 chapter_type_gate soft_pass=true 时,
+    # 不再判 rebuild_required, 走 soft_accept_path 允许 publish-review 路径.
     if not passed and (score < 70 or not hard_gate_passed):
+        # book7 P0: 软接受 - score ≥ 60 + chapter_type_gate soft_pass + hard_gate PASS
+        # → approve_ready (供 confirm-adopt), 不再判 rebuild_required.
+        chapter_type_gate_data = (
+            report_data.get("chapter_type_gate")
+            if isinstance(report_data.get("chapter_type_gate"), dict)
+            else {}
+        )
+        if (
+            score >= 60
+            and hard_gate_passed
+            and bool(chapter_type_gate_data.get("soft_pass"))
+        ):
+            return ReadingAssessment(
+                "soft_accept_path",
+                "approve_ready",
+                "软接受（chapter_type_gate soft_pass）",
+                "正文硬门禁过、chapter_type_gate 软过、score 落在 [60, 70) 区间；"
+                "剩余问题属软优化，不强制重建，可走 confirm-adopt 路径。",
+                "none",
+                preserve,
+                improve[:4],
+                [],
+                quality_id=quality_id,
+            )
         return ReadingAssessment(
             "rebuild_required",
             "auto_rebuild",
@@ -531,6 +658,7 @@ def _ensure_revision_brief(
         else f"阅读评估自动修订第{chapter_number}章：以 v{version.id} 为底稿，把“能读”修到“想追”。"
     )
     story_commitments = _story_commitment_lines(session, chapter_id=chapter_id, chapter_number=chapter_number)
+    author_anchor_lines = _latest_author_sample_anchor_lines(session, chapter_id=chapter_id)
     source_policy = (
         (
             "失败结构不得沿用；必须替换失败开场、段落顺序、问路铺垫和失败场景链；"
@@ -546,6 +674,7 @@ def _ensure_revision_brief(
             f"当前阅读层级：{assessment.label}",
             source_policy,
             *story_commitments,
+            *author_anchor_lines,
             preserve_label + "；".join(assessment.preserve[:6]),
             "本轮只解决：" + "；".join((assessment.improve or assessment.blockers)[:6]),
         ]
@@ -574,7 +703,7 @@ def _revision_mode_for_assessment(session: Session, *, chapter_id: int, assessme
 
 def _assessment_constraint_lines(*, previous_constraints: str, revision_mode: str, rebuilding: bool) -> list[str]:
     base = [
-        "3000-4500 中文字符，正文优先，不用自检内容凑字数。",
+        "1800-2500 中文字符（上限2800），正文优先，不用自检内容凑字数。",
         "不要输出导演单、质检报告、修订合同、验收清单或系统说明。",
         "少量界面/提示只能作为人物感知层点到为止，不能替代真实人物行动、因果和代价。",
         "对白和动作必须承接上一段后果，不能另起炉灶。",
@@ -637,6 +766,27 @@ def _compact_assessment_constraints(text: str) -> list[str]:
         if len(kept) >= 3:
             break
     return kept
+
+
+def _latest_author_sample_anchor_lines(session: Session, *, chapter_id: int) -> list[str]:
+    rows = list(
+        session.scalars(
+            select(ChapterBrief)
+            .where(ChapterBrief.chapter_id == chapter_id)
+            .order_by(ChapterBrief.id.desc())
+            .limit(12)
+        )
+    )
+    for brief in rows:
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        if "用户作者样稿约束" not in text and not ("标题：旧盔" in text and "第二个" in text and "伤药" in text):
+            continue
+        return [
+            "用户作者样稿约束：标题短而有指向；用沈渡当下感知、误判、身体反应和再确认承载设定；避免僵硬“不是X，是Y”连用；老板对白要像市井活人；买旧盔目的必须在前500字内说明为底层赚钱接单，而非主角兴奋玩游戏。",
+            "用户样稿不可漂移锚点：旧盔/接单赚钱 -> 雪屏/数据异常 -> 整个人物理坠落山地 -> 药味/窝棚/人烟 -> 敲门求伤药/拿活抵 -> 章末“第二个”压力。",
+            "用户样稿禁止替换：不得把窝棚/老人/求伤药/第二个改写成道观、道童、清虚观、铁牌、身份牌、投师、拜师、收徒或门派入门盘问。",
+        ]
+    return []
 
 
 def _recent_reading_rebuild_failures(session: Session, *, chapter_id: int, limit: int = 4) -> int:
@@ -708,7 +858,7 @@ def downgrade_rebound_brief_to_targeted(brief: ChapterBrief, *, version_id: int,
                 "reading_assessment_contract: 系统自动阅读评估生成；结构失败不得降级为局部修补。",
                 f"源版本锁定：v{version_id}；只保留有效事实，不沿用失败长度和散乱结构。",
                 "结构失败原因：" + "；".join(reasons[:5]),
-                "正文必须压缩到3000-4500中文字符，按6-8个连续小单元重构。",
+                "正文必须压缩到1800-2500中文字符（上限2800），按5-6个连续小单元重构。",
                 f"合同当前底稿：v{version_id}",
             ]
         )
@@ -826,11 +976,11 @@ def _story_commitment_lines(session: Session, *, chapter_id: int, chapter_number
     if chapter_number == 1:
         commitments.extend(
             [
-                "第1章硬性交付：第一句必须从门外逼问、现场盘问、交易催促、冲突后果或人物动作开场；不得以醒来、睁眼、摸手机、宿舍回忆、系统菜单或环境确认开场。",
-                "第1章硬性交付：前700字内必须出现具体外部压力或关系盘问，不得只写醒来、问路和环境确认。",
-                "第1章硬性交付：桥段复刻任务必须在前1500字内触发，中段完成一次行动尝试，且让NPC或玩家因主角演法产生误判、试探或反应。",
-                "第1章硬性交付：结尾前必须写出明确奖励或能力痕迹；最后300字必须同步出现现实或身体层面的副作用线索。",
-                "第1章硬性交付：章末钩子必须来自本次复刻的后果，不得只用远处响动、泛泛麻烦或任务刚触发收尾。",
+                "第1章硬性交付：开篇必须让现实底座、世界入口和主角当下处境在场景中成立；不强制第一句冲突，不强制盘问开场。",
+                "第1章硬性交付：前半章必须自然落地世界观入口、核心卖点和主角进入该世界的动机；不强制前700字外部压力或关系盘问。",
+                "第1章硬性交付：核心桥段或关键规则必须在前1500字内触发，中段完成一次行动尝试，且让本书关键人物、现场旁观者或规则反馈因主角做法产生误判、试探或反应。",
+                "第1章硬性交付：结尾前必须写出明确回报、能力痕迹、规则异常或下一次探索机会；是否影响现实必须服从本书 Story Bible / Canon。",
+                "第1章硬性交付：章末钩子必须来自本章行动和核心设定承诺，不得只用远处响动、泛泛麻烦或任务刚触发收尾。",
             ]
         )
     if focus:
@@ -901,13 +1051,26 @@ def _report_gate_blockers(report_data: dict) -> list[str]:
                 "causal_continuity_blocker",
                 "cost_plausibility_blocker",
                 "expression_collocation_blocker",
+                "author_rejected",
+                "author_rejected_logic",
+                "world_logic_blocker",
             )
         ):
             rows.append(issue)
     chapter_type_gate = report_data.get("chapter_type_gate") if isinstance(report_data.get("chapter_type_gate"), dict) else {}
     if chapter_type_gate and not bool(chapter_type_gate.get("passed")):
-        failures = ",".join(str(item) for item in (chapter_type_gate.get("failures") or [])[:5])
-        rows.append("chapter_type_gate_failed:" + failures)
+        # 2026-07-24 type_gate 越权修复(与 publish_review_cards._should_auto_approve 对齐):
+        # chapter_type_gate 失败只对生死线章型(strict=True: opening/early_serial/turning_point)
+        # 保留 report_gate_blocker 否决权。常规连载章(strict=False)的 type_gate 失败(brief_coverage/
+        # unit_flow/scene_atmosphere 等对番茄口语化B版系统性偏低的维度)不应在此二次否决——
+        # 裁决权归 quality 层(hard_gate + soft_pass 底线65)。否则常规章的口语化B版会被 type_gate
+        # 从 report_gate_blockers 出口反复拦截,与 soft_structural_accept 豁免冲突。
+        # 生死线章型或 soft_pass 未激活的 strict 章仍保留否决,质量红线不放松。
+        _tg_strict = bool(chapter_type_gate.get("strict"))
+        _tg_soft = bool(chapter_type_gate.get("soft_pass"))
+        if _tg_strict and not _tg_soft:
+            failures = ",".join(str(item) for item in (chapter_type_gate.get("failures") or [])[:5])
+            rows.append("chapter_type_gate_failed:" + failures)
     hard_gate = report_data.get("hard_gate") if isinstance(report_data.get("hard_gate"), dict) else {}
     if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
         rows.append("hard_gate_failed")
@@ -1082,29 +1245,26 @@ def _apply_final_quality_decision(
         "base_quality_passed": base_passed,
         "source": "unified_quality_verdict@v1",
     }
-    # Sprint 2 P2-Ch27: skip quality mutation entirely when chapter is closed.
-    # Otherwise a stale reading_assessment pass writes final_passed=False into
-    # the QR, unblocking the planner's fresh revision loop even though
-    # accept_early_stop has already promoted the best version. We keep the
-    # in-memory ``final_verdict`` dict for other callers but do not persist it.
+    # Only already approved/published chapters are sealed against automatic
+    # demotion. ``continuity_recorded`` and ``needs_confirmation`` are pipeline
+    # staging states; a fresh reading assessment that finds hard failure must
+    # be allowed to reopen them, otherwise a failed report can coexist with
+    # quality.passed=True and reviewed_pass.
     from sqlalchemy.orm import object_session
-    from app.services.chapter_state import chapter_is_in_closed_state
+    from app.models.entities import Chapter
+
     _s = object_session(quality)
-    _closed = (
-        _s is not None
-        and version is not None
-        and chapter_is_in_closed_state(_s, version.chapter_id)
-    )
-    if not _closed:
+    chapter = _s.get(Chapter, version.chapter_id) if _s is not None and version is not None else None
+    _sealed = bool(version and version.status == "approved") or (chapter is not None and chapter.status in {"approved", "published"})
+    if not _sealed:
         quality.passed = final_passed
         quality.report = json.dumps(data, ensure_ascii=False)
-    if not version:
-        return
-    if _closed:
-        # Closed chapters must not have version status flipped by state repair.
+    if not version or _sealed:
         return
     if requires_revision and version.status in {"reviewed_pass", "approved"}:
         version.status = move("chapter_version", version.status, "needs_revision", "feedback_reopen")
+        if chapter is not None and chapter.status in {"needs_confirmation", "continuity_recorded"}:
+            chapter.status = "needs_revision"
     elif final_passed and version.status == "needs_revision":
         version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
 

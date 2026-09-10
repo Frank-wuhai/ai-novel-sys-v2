@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models.entities import Book, Chapter, ChapterVersion, GenerationTask
 from app.services.expression_precision import precision_prompt_rules
+from app.services.literary_relation import literary_relation_prompt_rules
 from app.services.narrative_logic import narrative_logic_prompt_rules
 
 
@@ -21,6 +22,7 @@ class WriterCraftContext:
     pov_rules: list[str]
     scene_expansion_rules: list[str]
     precision_rules: list[str]
+    literary_relation_rules: list[str]
     revision_checklist: list[str]
     memory_targets: list[str]
 
@@ -56,6 +58,9 @@ class WriterCraftContext:
             "语言表述准确性：",
             *[f"- {item}" for item in self.precision_rules],
             "",
+            "语言关系与漂亮度合法性：",
+            *[f"- {item}" for item in self.literary_relation_rules],
+            "",
             "作家修订自检：",
             *[f"- {item}" for item in self.revision_checklist],
             "",
@@ -74,6 +79,7 @@ class WriterCraftContext:
             "pov_rules": self.pov_rules,
             "scene_expansion_rules": self.scene_expansion_rules,
             "precision_rules": self.precision_rules,
+            "literary_relation_rules": self.literary_relation_rules,
             "revision_checklist": self.revision_checklist,
             "memory_targets": self.memory_targets,
         }
@@ -102,6 +108,7 @@ def build_writer_craft_context(
         pov_rules=_pov_rules(),
         scene_expansion_rules=_scene_expansion_rules(),
         precision_rules=precision_prompt_rules(),
+        literary_relation_rules=literary_relation_prompt_rules(),
         revision_checklist=[*narrative_logic_prompt_rules(), *_revision_checklist()],
         memory_targets=_memory_targets(),
     )
@@ -322,17 +329,43 @@ def _score_designed_asset(text: str) -> int:
 
 
 def _score_character_action(text: str) -> int:
+    # 书面主动决策动词
     markers = ("决定", "选择", "改口", "伸手", "抓起", "推开", "咬牙", "抬手", "转身", "试探", "交换", "拒绝")
-    cost = ("代价", "后果", "欠", "伤", "疼", "暴露", "失去", "误会")
-    return max(30, min(100, 35 + sum(1 for marker in markers if marker in text) * 5 + sum(1 for marker in cost if marker in text) * 5))
+    # 口语爽文高频主动动作动词（同样是主角施动，只是用词更口语）
+    markers_colloquial = (
+        "接过", "接住", "拿起", "翻过", "摸到", "盯着", "凑", "拎", "甩", "扫了一眼", "抿", "夺过",
+        "扣在", "递过", "掏出", "捏", "压低", "冷笑", "开口", "反手", "站起", "坐下", "抬眼", "眯起",
+        "没接", "没躲", "没动", "转头", "低头", "抬头", "迎上", "堵", "拦", "指着",
+    )
+    cost = ("代价", "后果", "欠", "伤", "疼", "暴露", "失去", "误会", "破防", "翻脸", "撕破", "得罪")
+    score = 35
+    score += sum(1 for marker in markers if marker in text) * 5
+    score += min(25, sum(1 for marker in markers_colloquial if marker in text) * 4)
+    score += sum(1 for marker in cost if marker in text) * 5
+    return max(30, min(100, score))
 
 
 def _score_chapter_necessity(text: str) -> int:
+    # 书面因果连接词
     causal = ("因此", "所以", "换来", "导致", "这才", "原来", "从此", "不得不", "只能", "必须")
+    # 口语因果连接（番茄爽文高频，表达"事件导致事件"的不可逆推进）
+    causal_colloquial = ("要不是", "结果", "于是", "这下", "眼看", "没想到", "谁知", "反倒", "干脆", "索性", "这么一来", "才发现", "一下子")
+    # 书面线索/伏笔词
     thread = ("秘密", "线索", "旧账", "规矩", "证据", "仇", "债", "约定", "追", "下一")
+    # 口语钩子/悬念词（番茄章末高频：留悬念、埋关系、抛信息）
+    thread_colloquial = ("电话", "消息", "盯上", "找上门", "记住", "标记", "接下来", "没完", "等着", "名字", "麻烦", "盯着", "认识", "找到")
+    # 系统流/金手指不可逆变化信号（章节推动主线的爽文标志：本章发生了改变局面的事）
+    irreversible = ("系统", "觉醒", "激活", "解锁", "奖励", "任务", "签到", "属性", "面板", "抽中", "抽到", "提取", "升级", "解开")
     tail = (text or "")[-600:]
-    score = 35 + sum(1 for marker in causal if marker in text) * 5 + sum(1 for marker in thread if marker in text) * 4
-    if any(marker in tail for marker in thread):
+    score = 35
+    score += sum(1 for marker in causal if marker in text) * 5
+    score += min(16, sum(1 for marker in causal_colloquial if marker in text) * 4)
+    score += sum(1 for marker in thread if marker in text) * 4
+    score += min(16, sum(1 for marker in thread_colloquial if marker in text) * 4)
+    # 系统流封顶12，避免堆砌系统术语刷分
+    score += min(12, sum(1 for marker in irreversible if marker in text) * 3)
+    # 章末钩子加成：结尾出现悬念/线索（书面或口语）
+    if any(marker in tail for marker in thread) or any(marker in tail for marker in thread_colloquial):
         score += 15
     return max(30, min(100, score))
 
@@ -342,9 +375,16 @@ def _score_embodied_pov(text: str) -> int:
     paragraphs = [item.strip() for item in body.splitlines() if item.strip()]
     if not paragraphs:
         return 0
-    sensory = ("看见", "听见", "闻到", "摸到", "尝到", "疼", "冷", "热", "痒", "麻", "硌", "刺", "腥", "臭", "香", "汗", "喉咙", "后背", "手心", "指尖", "心口")
-    cognition = ("以为", "觉得", "想", "意识到", "不对", "愣", "迟疑", "明白", "怀疑", "误会", "下意识", "本能")
-    emotion = ("怕", "慌", "窘", "恼", "羞", "怒", "烦", "悔", "不甘", "发紧", "发凉", "发麻")
+    sensory = (
+        "看见", "听见", "闻到", "摸到", "尝到", "疼", "冷", "热", "痒", "麻", "硌", "刺", "腥", "臭", "香",
+        "汗", "喉咙", "后背", "手心", "指尖", "心口",
+        # 口语具身部位/体感补全
+        "上颚", "脊椎", "后脑", "胸口", "虎口", "耳根", "耳廓", "眼底", "眼珠", "眼皮", "喉结", "太阳穴",
+        "脖子", "手背", "膝盖", "肩膀", "脚底", "脚背", "胃", "翻涌", "发干", "发烫", "发白", "刺痛",
+        "潮", "黏", "烫", "凉",
+    )
+    cognition = ("以为", "觉得", "想", "意识到", "不对", "愣", "迟疑", "明白", "怀疑", "误会", "下意识", "本能", "回过神", "反应过来", "没料到", "心里")
+    emotion = ("怕", "慌", "窘", "恼", "羞", "怒", "烦", "悔", "不甘", "发紧", "发凉", "发麻", "绷", "松", "翻涌", "攥", "僵")
     objective_markers = ("只见", "与此同时", "此时", "众人", "所有人", "镜头", "画面", "场景")
     sensory_hits = sum(1 for marker in sensory if marker in body)
     cognition_hits = sum(1 for marker in cognition if marker in body)
@@ -379,15 +419,19 @@ def _score_scene_expansion(text: str) -> int:
     )
     chinese_lengths = [len(re.findall(r"[\u4e00-\u9fff]", paragraph)) for paragraph in paragraphs]
     avg_len = sum(chinese_lengths) / len(chinese_lengths)
-    short_ratio = sum(1 for length in chinese_lengths if length < 35) / len(chinese_lengths)
+    # 番茄短段口语风格适配：短段是番茄产品特征（最长段≤80字），不应重罚。
+    # 只在"极端碎段"(>60%段落<22字，真稀碎无信息)时轻罚，普通短段不罚。
+    # 场景稀薄(scene_hits少)的真短板仍由 scene_hits 项体现，不受此调整影响。
+    tiny_ratio = sum(1 for length in chinese_lengths if length < 22) / len(chinese_lengths)
     scene_hits = sum(1 for marker in scene_markers if marker in body)
     action_hits = sum(1 for marker in action_markers if marker in body)
     reaction_hits = sum(1 for marker in reaction_markers if marker in body)
     abstract_hits = sum(body.count(marker) for marker in abstract_markers)
+    # 展开段阈值下调至55字（番茄段落天然短于书面小说的70字）
     expanded_paragraphs = sum(
         1
         for paragraph in paragraphs
-        if len(re.findall(r"[\u4e00-\u9fff]", paragraph)) >= 70
+        if len(re.findall(r"[\u4e00-\u9fff]", paragraph)) >= 55
         and any(marker in paragraph for marker in scene_markers)
         and (any(marker in paragraph for marker in action_markers) or any(marker in paragraph for marker in reaction_markers))
     )
@@ -396,10 +440,11 @@ def _score_scene_expansion(text: str) -> int:
     score += min(16, action_hits * 2)
     score += min(14, reaction_hits * 2)
     score += min(18, expanded_paragraphs * 5)
-    if avg_len >= 70:
-        score += 8
-    elif avg_len < 38:
-        score -= 12
+    # 番茄风格不奖励长均段、也不重罚短均段；仅对<28字的极碎均段轻罚
+    if avg_len < 28:
+        score -= 8
     score -= min(24, abstract_hits * 4)
-    score -= min(18, round(short_ratio * 24))
+    # 短段惩罚仅针对极端碎段(>60%段落<22字)，且力度减半
+    if tiny_ratio > 0.6:
+        score -= min(10, round((tiny_ratio - 0.6) * 25))
     return max(0, min(100, score))

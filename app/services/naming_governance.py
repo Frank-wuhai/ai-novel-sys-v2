@@ -209,16 +209,19 @@ def evaluate_naming_governance(text: str, *, allowed_terms: list[str] | None = N
     allowed = _dedupe([*(allowed_terms or []), *_extract_candidate_terms(canon_context or "")])
     terms = _extract_candidate_terms(text or "")
     new_terms = [term for term in terms if term not in allowed]
-    ungrounded = [term for term in new_terms if not _term_grounded(text or "", term)]
+    burden_terms = [term for term in new_terms if _high_burden_term(term)]
+    low_burden_terms = [term for term in new_terms if term not in burden_terms]
+    ungrounded = [term for term in burden_terms if not _term_grounded(text or "", term)]
     score = 88
-    score -= max(0, len(new_terms) - 2) * 8
+    score -= max(0, len(burden_terms) - 2) * 8
+    score -= max(0, len(low_burden_terms) - 3) * 3
     score -= len(ungrounded) * 10
     if _has_fantasy_stack(new_terms):
         score -= 10
     score = max(0, min(100, score))
     issues: list[str] = []
-    if len(new_terms) > 2:
-        issues.append("too_many_new_names:" + ",".join(new_terms[:8]))
+    if len(burden_terms) > 2:
+        issues.append("too_many_new_names:" + ",".join(burden_terms[:8]))
     if ungrounded:
         issues.append("ungrounded_new_names:" + ",".join(ungrounded[:8]))
     if _has_fantasy_stack(new_terms):
@@ -323,6 +326,29 @@ def _term_grounded(text: str, term: str) -> bool:
     if any(marker in window for marker in ("没问来历", "不知来历", "没有来历", "来历不明")):
         return False
     return any(marker in window for marker in GROUNDING_MARKERS)
+
+
+def _high_burden_term(term: str) -> bool:
+    if term.endswith(("城", "镇", "村")):
+        return _has_fantasy_stack([term])
+    return term.endswith((
+        "剑派",
+        "镖局",
+        "药王谷",
+        "血印",
+        "铜铃",
+        "令牌",
+        "腰牌",
+        "法器",
+        "灵符",
+        "秘卷",
+        "石门",
+        "古井",
+        "山庄",
+        "堂口",
+        "寨",
+        "谷",
+    ))
 
 
 def _has_fantasy_stack(terms: list[str]) -> bool:

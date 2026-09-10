@@ -54,7 +54,7 @@ def _summary(*, action: str, version_status: str, quality_passed, publish_status
     if action == "wait_generation_task":
         return "章节正在等待后台模型队列完成。"
     if action == "generate_rebuild_candidates":
-        return "线性修订收益不足，系统将改走多候选重建。"
+        return "线性修订收益不足，系统将改走受控重建。"
     if action in {"draft_chapter", "queue_draft_chapter"}:
         return "章节已具备草稿生产条件。"
     if action in {"revise_chapter", "queue_revise_chapter"}:

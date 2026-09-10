@@ -86,6 +86,7 @@ from app.services.production import (
     get_publish_job,
     get_book,
     latest_chapter_version,
+    current_chapter_version,
     list_books,
     list_chapters,
     list_publish_executions,
@@ -304,6 +305,7 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--preview-only", action="store_true", help="only report the next action; do not write versions, reports, or jobs")
     p.add_argument("--queue-generation", action="store_true")
+    p.add_argument("--max-steps", type=int, default=30, help="maximum kernel steps for this single chapter run")
 
     p = sub.add_parser("run-book-cycle")
     p.add_argument("--book-id", type=int, required=True)
@@ -434,7 +436,16 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
     p.add_argument("--live-llm", action="store_true")
-    p.add_argument("--candidate-count", type=int, default=3)
+    p.add_argument("--candidate-count", type=int, default=1)
+    p.add_argument("--max-attempts", type=int, default=2)
+    p.add_argument("--task-timeout-seconds", type=int, default=3600)
+
+    # force-rebuild-candidates: 强制回炉 approved/needs_confirmation 章节
+    p = sub.add_parser("force-rebuild-candidates", help="把已批准章节状态倒回 needs_revision 并入队 rebuild")
+    p.add_argument("--book-id", type=int, required=True)
+    p.add_argument("--chapter-number", type=int, required=True)
+    p.add_argument("--live-llm", action="store_true")
+    p.add_argument("--candidate-count", type=int, default=1)
     p.add_argument("--max-attempts", type=int, default=2)
     p.add_argument("--task-timeout-seconds", type=int, default=3600)
 
@@ -819,6 +830,7 @@ def main() -> None:
     p.add_argument("--payoff", action="append", default=[], help="Repeatable. Format: FORESHADOW_ID:PAYOFF_TEXT")
     p.add_argument("--plot-thread-status", action="append", default=[], help="Repeatable. Format: THREAD_ID:STATUS")
 
+
     args = parser.parse_args()
     if args.database_url:
         configure_database(args.database_url)
@@ -1037,7 +1049,7 @@ def main() -> None:
                         book_id=args.book_id,
                         chapter_number=args.chapter_number,
                         platform=args.platform,
-                    ).plan()
+                    ).plan(apply_state_repairs=False)
                     print(f"chapter_number={plan.item.chapter_number}")
                     print(f"action={plan.item.next_action}")
                     print("status=preview")
@@ -1049,7 +1061,7 @@ def main() -> None:
                         book_id=args.book_id,
                         chapter_number=args.chapter_number,
                         platform=args.platform,
-                    ).run_until_terminal(dry_run=args.dry_run)
+                    ).run_until_terminal(dry_run=args.dry_run, max_steps=args.max_steps)
                     latest = run.latest_result
                     print(f"chapter_number={args.chapter_number}")
                     print(f"action={latest.get('action', '')}")
@@ -1288,6 +1300,27 @@ def main() -> None:
                 _print_debug_entrypoint(
                     f"production-run-next --book-id {args.book_id} --chapter-number {args.chapter_number} --queue-generation"
                 )
+                task = enqueue_rebuild_candidates(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                    dry_run=not args.live_llm,
+                    candidate_count=args.candidate_count,
+                    max_attempts=args.max_attempts,
+                    timeout_seconds=args.task_timeout_seconds,
+                )
+            elif args.cmd == "force-rebuild-candidates":
+                # 先把状态倒回 needs_revision · 再入队
+                from app.services.force_rebuild_prep import force_prepare_rebuild
+                prep = force_prepare_rebuild(
+                    session,
+                    book_id=args.book_id,
+                    chapter_number=args.chapter_number,
+                )
+                print(f"prep_ok={prep['ok']}")
+                print(f"prep_message={prep['message']}")
+                if not prep["ok"]:
+                    raise SystemExit(2)
                 task = enqueue_rebuild_candidates(
                     session,
                     book_id=args.book_id,
@@ -1595,19 +1628,32 @@ def main() -> None:
             elif args.cmd == "list-chapters":
                 for chapter in list_chapters(session, book_id=args.book_id):
                     latest = latest_chapter_version(session, chapter_id=chapter.id)
+                    current = current_chapter_version(session, chapter_id=chapter.id)
                     latest_status = latest.status if latest else "no_version"
                     latest_id = latest.id if latest else ""
-                    print(f"{chapter.chapter_number}\t{chapter.title}\t{chapter.status}\tlatest_version={latest_id}\t{latest_status}")
+                    current_status = current.status if current else "no_version"
+                    current_id = current.id if current else ""
+                    print(f"{chapter.chapter_number}\t{chapter.title}\t{chapter.status}\tcurrent_version={current_id}\t{current_status}\tlatest_version={latest_id}\t{latest_status}")
             elif args.cmd == "show-chapter":
                 chapters = [item for item in list_chapters(session, book_id=args.book_id) if item.chapter_number == args.chapter_number]
                 if not chapters:
                     raise ValueError("chapter not found")
                 chapter = chapters[0]
                 latest = latest_chapter_version(session, chapter_id=chapter.id)
+                current = current_chapter_version(session, chapter_id=chapter.id)
                 print(f"id={chapter.id}")
                 print(f"chapter_number={chapter.chapter_number}")
                 print(f"title={chapter.title}")
                 print(f"status={chapter.status}")
+                if current:
+                    print(f"current_version_id={current.id}")
+                    print(f"current_version_number={current.version_number}")
+                    print(f"current_version_status={current.status}")
+                    print(f"current_version_source={current.source}")
+                    print(f"current_content_chars={len(current.content)}")
+                    print("content_source=chapter_versions.content")
+                else:
+                    print("current_version_id=")
                 if latest:
                     print(f"latest_version_id={latest.id}")
                     print(f"latest_version_number={latest.version_number}")

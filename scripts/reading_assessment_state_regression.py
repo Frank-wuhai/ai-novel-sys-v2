@@ -113,6 +113,64 @@ def main() -> int:
             failures.append("current_reading_assessment_brief_not_exempt_from_budget_recovery")
 
     with session_scope() as session:
+        book = Book(title="Reading Assessment Restore World Logic", genre="网游武侠", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        version = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=1,
+            title="第一章",
+            content=(
+                "瘦高道士问：谁让你来的？顾晚把我是来参加内测的咽回去。"
+                "游戏里 NPC 不吃这套，得按规矩来。"
+            ) * 400,
+            status="needs_revision",
+            source="rebuild_candidate_incumbent_restore:v100",
+        )
+        session.add(version)
+        session.flush()
+        quality = QualityReport(
+            chapter_version_id=version.id,
+            score=79,
+            passed=False,
+            report=json.dumps(
+                {
+                    "status": "NEEDS_REVISION",
+                    "score": 79,
+                    "passed": False,
+                    "issues": ["prose_naturalness_blocker: 69"],
+                    "hard_gate": {"status": "FAIL", "passed": False, "issues": ["prose_naturalness_blocker: 69"]},
+                    "dimensions": {
+                        "author_intent": 100,
+                        "brief_coverage": 75,
+                        "reader_momentum": 90,
+                        "hook_strength": 83,
+                        "prose_naturalness": 69,
+                    },
+                    "production_failure_classification": {
+                        "category": "structure_rewrite",
+                        "structural_reasons": ["brief_coverage_structural"],
+                    },
+                    "selected_from_incumbent_version_id": 100,
+                    "selection_reason": "incumbent_ranked_higher_than_candidates",
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(quality)
+        session.flush()
+        assessment = maybe_apply_reading_assessment(session, book_id=book.id, chapter_number=1, quality=quality)
+        latest_brief = session.query(ChapterBrief).filter_by(chapter_id=chapter.id, status="revision_ready").order_by(ChapterBrief.id.desc()).first()
+        if assessment.action != "auto_rebuild" or assessment.revision_mode != "rewrite":
+            failures.append(f"restore_world_logic_not_rebuild:{assessment.to_dict()}")
+        brief_text = "\n".join([latest_brief.goal or "", latest_brief.required_beats or "", latest_brief.constraints or ""]) if latest_brief else ""
+        if "revision_mode:rewrite" not in brief_text or "局部" in (latest_brief.goal or ""):
+            failures.append(f"restore_world_logic_bad_brief:{brief_text[:300]}")
+
+    with session_scope() as session:
         book = Book(title="Reading Assessment Trend Priority", genre="网游武侠", target_platform="manual")
         session.add(book)
         session.flush()
@@ -220,8 +278,10 @@ def main() -> int:
             failures.append("structural_rebuild_locked_bad_opening")
         if latest_brief and "第1章硬性交付" not in (latest_brief.required_beats or ""):
             failures.append("structural_rebuild_missing_chapter1_deliverables")
-        if latest_brief and "第一句必须" not in (latest_brief.required_beats or ""):
-            failures.append("structural_rebuild_missing_opening_ban")
+        if latest_brief and not all(marker in (latest_brief.required_beats or "") for marker in ("现实底座", "世界观入口", "核心卖点")):
+            failures.append("structural_rebuild_missing_opening_world_promise")
+        if latest_brief and "第一句必须" in (latest_brief.required_beats or ""):
+            failures.append("structural_rebuild_kept_old_opening_ban")
 
     with session_scope() as session:
         book = Book(title="Reading Assessment Failed Rebuild Fresh", genre="网游武侠", target_platform="manual")

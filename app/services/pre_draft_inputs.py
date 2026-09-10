@@ -211,7 +211,20 @@ def _previous_chapter_stability_blocker(session: Session, *, book_id: int, chapt
 def _is_stable_previous_version(version: ChapterVersion, quality: QualityReport | None) -> bool:
     if version.status not in {"reviewed_pass", "approved"}:
         return False
-    return not (quality and quality.passed is False)
+    # 稳定性判定 · 只看 hard_gate（硬指标：字数/段落/游戏词/主角锚点）
+    # 软文学分（visual_staging/author_intent 等）不影响承接稳定性
+    if quality is None:
+        return True  # 无质检报告·按 approved 状态放行
+    import json as _json
+    try:
+        report = _json.loads(quality.report) if isinstance(quality.report, str) else (quality.report or {})
+    except Exception:
+        report = {}
+    hard_gate = report.get("hard_gate") or {}
+    if hard_gate.get("passed") is True:
+        return True  # hard_gate PASS · 承接稳定
+    # hard_gate FAIL 才真的不稳定（字数塌/段落塌/主角错名等）
+    return not (quality.passed is False)
 
 
 def _recommended_sample_index(sample_state: dict) -> int | None:

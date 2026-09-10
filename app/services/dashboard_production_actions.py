@@ -20,7 +20,7 @@ from app.models.entities import (
     StoryBible,
     StoryFoundation,
 )
-from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.chapter_standards import ensure_chapter_production_standard, _resolve_chapter_type
 from app.services.context_contamination import context_anchor_lines
 from app.services.db_ops import create_database_backup
 from app.services.story import get_story_bible
@@ -32,7 +32,11 @@ def repair_chapter_brief(session: Session, *, book_id: int, chapter_number: int)
     if not chapter:
         raise ValueError("chapter not found")
     context = _current_book_brief_context(session, book_id=book_id, chapter_number=chapter_number)
-    latest = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
+    latest = session.scalar(
+        select(ChapterBrief)
+        .where(ChapterBrief.chapter_id == chapter.id, ChapterBrief.status.in_(["ready", "revision_ready"]))
+        .order_by(ChapterBrief.id.desc())
+    )
     version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
     for old_brief in session.scalars(
         select(ChapterBrief).where(
@@ -47,6 +51,7 @@ def repair_chapter_brief(session: Session, *, book_id: int, chapter_number: int)
     constraints = ensure_chapter_production_standard(
         _clean_brief_constraints(latest.constraints if latest else "", context=context),
         chapter_number=chapter_number,
+        chapter_type=_resolve_chapter_type(chapter_number),
     )
     brief = ChapterBrief(chapter_id=chapter.id, goal=goal, required_beats=required, constraints=constraints, status=status)
     session.add(brief)
@@ -219,7 +224,7 @@ def _clean_brief_constraints(previous: str, *, context: dict[str, str] | None = 
     context = context or {}
     cleaned = _strip_stale_brief_text(previous)
     lines = [
-        "3000-4500 中文字符，正文优先，不用自检内容凑字数。",
+        "1800-2500 中文字符（上限2800），正文优先，不用自检内容凑字数。",
         "不要输出导演单、质检报告、修订合同、验收清单或系统说明。",
         "少量界面/提示只能作为人物感知层点到为止，不能替代真实人物行动、因果和代价。",
         "对白和动作必须承接上一段后果，不能另起炉灶。",

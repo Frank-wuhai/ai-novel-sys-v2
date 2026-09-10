@@ -54,9 +54,11 @@ echo "cycle_log=$CYCLE_LOG"
 
 # --- 启 worker ---
 (
+  # P54 (2026-07-07): sleep-seconds 5→1 加快 task 之间的 handoff（每章 ~9
+  # tasks，累计省 30-40s/章）。worker 是唯一 writer，短轮询不会引发锁。
   venv/bin/python -m app.cli --database-url "$DB" run-generation-worker \
     --max-loops 3600 \
-    --sleep-seconds 5 \
+    --sleep-seconds 1 \
     --max-tasks-per-loop 1 \
     --recover-stale-before-run \
     --task-timeout-seconds 3600 \
@@ -108,5 +110,8 @@ while : ; do
     exit 0
   fi
 
-  sleep 60
+  # P54 (2026-07-07): tick 60s→10s，加快 orchestrator 对 worker 完成 task
+  # 后 enqueue 下一步的响应速度。cycle 只读扫描（apply_state_repairs=False），
+  # 高频 tick 不再引发写锁。
+  sleep 10
 done

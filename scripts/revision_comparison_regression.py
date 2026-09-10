@@ -170,6 +170,72 @@ def main() -> int:
         protected_restored_status = protected_restored.status if protected_restored else ""
 
     with session_scope() as session:
+        book = Book(title="Revision Comparison Unit Flow Protected Brief", genre="玄幻", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        source = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=1,
+            title="源稿",
+            content="源稿正文" * 900,
+            status="needs_revision",
+            source="revision_compare_restore:v1",
+        )
+        current = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=2,
+            title="失败U1补丁",
+            content="失败正文" * 900,
+            status="needs_revision",
+            source="revision:unit_flow_patch",
+        )
+        unit_flow_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="U1局部补丁：共7个单元只重写第1个 L1-L10,其他6个单元保持不动",
+            required_beats="补场景描绘、心理链、动作反应链。",
+            constraints="revision_mode:local_patch；unit_flow；只替换第一个单元。max_chars=2500",
+            status="superseded",
+        )
+        later_reading_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="阅读评估定点修订第1章：以当前最佳稿为底稿，禁止整章重写。",
+            required_beats="reading_assessment_contract: 系统自动阅读评估生成。",
+            constraints="revision_mode:targeted",
+            status="superseded",
+        )
+        session.add_all([source, current, unit_flow_brief, later_reading_brief])
+        session.flush()
+        source_quality = QualityReport(
+            chapter_version_id=source.id,
+            score=74,
+            passed=True,
+            report=json.dumps({"status": "PASS", "score": 74, "passed": True, "base_quality_passed": True, "dimensions": {"brief_coverage": 66}}, ensure_ascii=False),
+        )
+        current_quality = QualityReport(
+            chapter_version_id=current.id,
+            score=74,
+            passed=False,
+            report=json.dumps({"status": "NEEDS_REVISION", "score": 74, "passed": False, "base_quality_passed": False, "dimensions": {"brief_coverage": 45}}, ensure_ascii=False),
+        )
+        task = GenerationTask(
+            book_id=book.id,
+            task_type="revise_chapter",
+            status="completed",
+            input_json=json.dumps({"chapter_number": 1, "source_version_id": source.id}, ensure_ascii=False),
+            output_json=json.dumps({"version_id": current.id}, ensure_ascii=False),
+        )
+        session.add_all([source_quality, current_quality, task])
+        session.flush()
+        unit_flow_result = compare_and_restore_if_regressed(session, current_version=current, current_quality=current_quality)
+        unit_flow_restored = session.get(ChapterVersion, unit_flow_result.restored_version_id) if unit_flow_result.restored_version_id else None
+        unit_flow_restored_status = unit_flow_restored.status if unit_flow_restored else ""
+        unit_flow_brief_status = unit_flow_brief.status
+        later_reading_brief_status = later_reading_brief.status
+
+    with session_scope() as session:
         book = Book(title="Revision Comparison Base Pass Regression", genre="玄幻", target_platform="manual")
         session.add(book)
         session.flush()
@@ -248,6 +314,12 @@ def main() -> int:
     restore_meta = protected_report.get("revision_comparison_restore", {})
     if not restore_meta.get("protected_brief_id"):
         failures.append("protected_restore_missing_brief_id")
+    if unit_flow_result.status != "regressed":
+        failures.append("unit_flow_protected_comparison_did_not_detect_regression")
+    if unit_flow_restored_status != "needs_revision":
+        failures.append(f"unit_flow_protected_restore_was_marked_pass:{unit_flow_restored_status}")
+    if unit_flow_brief_status != "revision_ready":
+        failures.append(f"unit_flow_protected_brief_not_reactivated:{unit_flow_brief_status}")
     if base_pass_result.status != "regressed" or not base_pass_result.restored_version_id:
         failures.append("base_quality_pass_regression_not_restored")
     print(
@@ -257,6 +329,7 @@ def main() -> int:
                 "failures": failures,
                 "result": result.to_dict(),
                 "protected_result": protected_result.to_dict(),
+                "unit_flow_result": unit_flow_result.to_dict(),
                 "base_pass_result": base_pass_result.to_dict(),
             },
             ensure_ascii=False,

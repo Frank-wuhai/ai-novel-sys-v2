@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PublishJob, QualityReport, StoryArc
-from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.chapter_standards import ensure_chapter_production_standard, _resolve_chapter_type
 from app.services.brief_sanitizer import sanitize_existing_chapter_brief
-from app.services.continuity import default_chapter_continuity_summary, record_chapter_continuity
+from app.services.continuity import default_chapter_continuity_summary, ensure_chapter_exit_state_table, record_chapter_continuity
 from app.services.context_contamination import audit_context_contamination, context_anchor_lines
 from app.services.execution_mode import ExecutionMode, execution_mode_from_flags
 from app.services.feedback import format_chapter_sample_adoption_context, submit_revision_suggestion
@@ -182,6 +182,7 @@ def upgrade_chapter_briefs_production_standards(session: Session, *, book_id: in
             chapter_number=chapter.chapter_number,
             arc_phase=phase,
             arc_goal=arc_goal,
+            chapter_type=_resolve_chapter_type(chapter.chapter_number),
         )
         if updated_constraints != brief.constraints:
             brief.constraints = updated_constraints
@@ -292,7 +293,7 @@ def _execute_accept_early_stop(
         session.flush()
 
     # Locate the version early-stop deemed acceptable.
-    from app.services.production_state import collect_version_scores
+    from app.services.production_state import collect_version_scores, _version_safe_for_early_stop
     from app.services.revision_early_stop import evaluate_early_stop
 
     version_scores = collect_version_scores(session, chapter.id)
@@ -314,7 +315,7 @@ def _execute_accept_early_stop(
                 ChapterVersion.version_number == best_version_number,
             )
         )
-        if best_v is not None and best_v.status in ("needs_revision", "candidate"):
+        if best_v is not None and best_v.status in ("needs_revision", "candidate") and _version_safe_for_early_stop(best_v):
             best_v.status = "reviewed_pass"
             session.add(best_v)
             session.flush()
@@ -498,6 +499,19 @@ def run_next_action(
     if action == "resolve_deferred_backlog":
         return RunNextActionResult(chapter_number, action, "blocked", item.reason, item.latest_version_id)
     if action == "review_chapter":
+        # 范式驱动精修关卡（PARADIGM_REFINE_ENABLED 开关控制）：
+        # review 前，若最新版是未精修的 AI 生稿，先跑一道精修生成新 draft 版，
+        # 再对精修版质检。对编排器状态机零侵入。
+        if not dry_run:
+            try:
+                from app.services.paradigm_refine import should_refine, refine_and_create_version
+                if should_refine(session, book_id=book_id, chapter_number=chapter_number):
+                    _diag, _new_v = refine_and_create_version(session, book_id=book_id, chapter_number=chapter_number)
+                    if _new_v is not None:
+                        session.commit()
+            except Exception as _refine_err:  # 精修失败不阻塞质检，退回原稿
+                import logging
+                logging.getLogger(__name__).warning("paradigm_refine skipped: %s", _refine_err)
         report = review_chapter(
             session,
             book_id=book_id,
@@ -632,13 +646,13 @@ def run_next_action(
         )
     if action == "generate_rebuild_candidates":
         if queue_heavy_generation:
-            task = enqueue_rebuild_candidates(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm, candidate_count=3)
+            task = enqueue_rebuild_candidates(session, book_id=book_id, chapter_number=chapter_number, dry_run=dry_llm, candidate_count=1)
             return RunNextActionResult(chapter_number, action, "queued", "queued rebuild candidate generation task", task.id)
         result = generate_rebuild_candidates(
             session,
             book_id=book_id,
             chapter_number=chapter_number,
-            candidate_count=3,
+            candidate_count=1,
             dry_run=dry_llm,
         )
         return RunNextActionResult(
@@ -653,7 +667,7 @@ def run_next_action(
             chapter_number,
             action,
             "blocked",
-            "当前策略已禁止未通过章节暂存后切下一章；请继续回炉修订或多候选重建，直到正式通过。",
+            "当前策略已禁止未通过章节暂存后切下一章；请继续回炉修订或受控重建，直到正式通过。",
             item.latest_version_id,
         )
     if action == "accept_early_stop":
@@ -734,7 +748,17 @@ def run_book_cycle(
     execution_mode = execution_mode_from_flags(dry_run=dry_run, preview_only=False, mode=None)
     executed: list[RunNextActionResult] = []
     for _ in range(max_steps):
-        items = plan_chapters(session, book_id=book_id, start=start, count=count)
+        # cycle-loop 只读扫描：apply_state_repairs=False 关闭 plan_chapters
+        # 内部对 feedback_adjustments / revision_briefs 的 UPDATE，避免与
+        # worker 争抢 SQLite 写锁。state repair 已经在 run_next_action 内部
+        # (line 539 _maybe_apply_revision_loop_guard 等) 就当前那 1 章做过，
+        # 无需在整批 plan 时重复。P54 (2026-07-07)：Ch13-20 Round 2 期间
+        # 累计 170 次 lock 100% 来自 plan_chapters 触发的 UPDATE
+        # feedback_adjustments SET status=?（85 唯一事件 × 2 exc 层）。
+        items = plan_chapters(
+            session, book_id=book_id, start=start, count=count,
+            apply_state_repairs=False,
+        )
         runnable = next((item for item in items if item.next_action in AUTO_ACTIONS), None)
         if not runnable:
             break
@@ -753,7 +777,10 @@ def run_book_cycle(
             break
         executed.append(result)
 
-    final_items = plan_chapters(session, book_id=book_id, start=start, count=count)
+    final_items = plan_chapters(
+        session, book_id=book_id, start=start, count=count,
+        apply_state_repairs=False,
+    )
     blocked = [
         item
         for item in final_items
@@ -1081,6 +1108,7 @@ def _plan_one(
     feedback_marker_without_quality = False
     revision_matches_quality_or_feedback = False
     story_clean_revision_brief = False
+    targeted_revision_contract = False
     production_strategy = None
     has_sample_adoption = bool(format_chapter_sample_adoption_context(session, book_id=book_id, chapter_number=chapter_number))
     has_continuity_context = _has_previous_chapter_context(session, book_id=book_id, chapter_number=chapter_number)
@@ -1118,6 +1146,13 @@ def _plan_one(
                 and (_revision_brief_matches_quality(revision_brief, quality) or _revision_brief_matches_feedback_reopen(revision_brief, quality))
             )
             story_clean_revision_brief = _revision_brief_is_story_clean(revision_brief)
+            _brief_text = _revision_brief_text(revision_brief)
+            targeted_revision_contract = bool(
+                _revision_brief_has_protected_review_marker(revision_brief)
+                and "revision_mode:targeted" in _brief_text
+                and _revision_brief_targets_version(revision_brief, version)
+                and "当前阅读层级：高分底稿，文风定点修订" in _brief_text
+            )
         production_strategy = assess_production_strategy(
             session,
             chapter_id=chapter.id,
@@ -1192,6 +1227,7 @@ def _plan_one(
             feedback_marker_without_quality=feedback_marker_without_quality,
             revision_matches_quality_or_feedback=revision_matches_quality_or_feedback,
             story_clean_revision_brief=story_clean_revision_brief,
+            targeted_revision_contract=targeted_revision_contract,
             has_reading_assessment_contract_brief=bool(revision_brief) and _revision_brief_has_protected_review_marker(revision_brief),
             rebuild_and_revision_exhausted=rebuild_and_revision_exhausted,
             exhausted_best_version_number=exhausted_best_version_number,
@@ -1312,18 +1348,22 @@ def _quality_report_has_unresolved_gate_blocker(quality: QualityReport | None) -
         return False
     data = _loads_json(quality.report)
     chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
-    # Sprint 2 P2-Ch44 soft-pass: chapter_type_gate.passed=False alone is NOT
-    # a blocker when soft_pass=True (LLM editorial+base quality already agreed
-    # the draft is acceptable, gap <=15pt to structural thresholds). The gate
-    # is preserved for audit but does not veto downstream promotion.
-    soft_pass_active = bool(chapter_type_gate.get("soft_pass"))
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    hard_gate_ok = bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS")
+    # A 方案（2026-07-23）· type_gate 越权否决清理（精准边界）：
+    # 常规连载推进章(serial_progress) → quality 层已放行(hard_gate过)时 type_gate 不
+    # 阻塞下游生产。生死线章型(strict=True: opening/early_serial/turning_point) → 保留
+    # type_gate 否决权。原 P2-Ch44 soft_pass 逃生阀保留(向后兼容)。裁决权归 quality 层：
+    # 篇幅/世界观矛盾/bias/番茄硬指标+intent LLM 复核，学院派维度不越权二次否决。
+    is_strict_chapter = bool(chapter_type_gate.get("strict"))
+    quality_layer_cleared = hard_gate_ok and not is_strict_chapter
+    soft_pass_active = bool(chapter_type_gate.get("soft_pass")) or quality_layer_cleared
     issues = [str(item) for item in data.get("issues") or []]
     if any(item.startswith("chapter_type_gate_failed") for item in issues) and not soft_pass_active:
         return True
     if chapter_type_gate and not bool(chapter_type_gate.get("passed")) and not soft_pass_active:
         return True
-    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
-    if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+    if hard_gate and not hard_gate_ok:
         return True
     return False
 
@@ -1601,7 +1641,7 @@ def _revision_budget_guard_should_defer(version: ChapterVersion | None, brief: C
         return True
     if version and brief and str(version.source or "").startswith("revision_budget_readable_restore:"):
         return True
-    if version and str(version.source or "").startswith("rebuild_candidate_selected:") and _revision_brief_has_protected_review_marker(brief):
+    if version and str(version.source or "").startswith(("rebuild_candidate:", "rebuild_candidate_selected:")) and _revision_brief_has_protected_review_marker(brief):
         return True
     return False
 
@@ -1719,7 +1759,48 @@ def _compute_exhaustion_signals(
     if not scores:
         return False, None, 0, rebuild_batch_count
     best = max(scores, key=lambda s: (s.score or 0, s.version_number))
+    best_version = session.scalar(
+        select(ChapterVersion).where(
+            ChapterVersion.chapter_id == chapter_id,
+            ChapterVersion.version_number == best.version_number,
+        )
+    )
+    if best_version is None or _version_has_exhaustion_hard_blocker(session, best_version):
+        return False, None, 0, rebuild_batch_count
     return True, best.version_number, int(best.score or 0), rebuild_batch_count
+
+
+def _version_has_exhaustion_hard_blocker(session: Session, version: ChapterVersion) -> bool:
+    quality = session.scalar(
+        select(QualityReport)
+        .where(QualityReport.chapter_version_id == version.id)
+        .order_by(QualityReport.id.desc())
+        .limit(1)
+    )
+    if quality is None or bool(quality.passed):
+        return quality is None
+    try:
+        report = json.loads(quality.report or "{}")
+    except Exception:
+        return True
+    issues = [str(item) for item in report.get("issues") or []]
+    hard_gate = report.get("hard_gate") if isinstance(report.get("hard_gate"), dict) else {}
+    final_verdict = report.get("final_verdict") if isinstance(report.get("final_verdict"), dict) else {}
+    hard_markers = (
+        "too_long",
+        "hard_gate_failed",
+        "prose_naturalness_blocker",
+        "chapter_type_gate_failed",
+        "visual_underdeveloped",
+        "imageable_underdeveloped",
+    )
+    if any(any(issue.startswith(marker) for marker in hard_markers) for issue in issues):
+        return True
+    if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+        return True
+    if str(final_verdict.get("status") or "").lower() in {"needs_revision", "fail", "failed"}:
+        return True
+    return False
 
 
 def _should_generate_rebuild_candidates(
@@ -2152,6 +2233,53 @@ def _revision_brief_already_has_sample_context(text: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _load_prev_chapter_exit_hint(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+) -> dict | None:
+    """读前章 (chapter_number-1) approved cv 的 exit_state · 供 brief 生成时承接。"""
+    if chapter_number <= 1:
+        return None
+    ensure_chapter_exit_state_table(session)
+    from sqlalchemy import text as _sql_text
+    row = session.execute(
+        _sql_text(
+            """
+            SELECT es.plot_hook, es.hook_keywords,
+                   es.physical_location, es.time_marker,
+                   es.main_character_state, es.new_facts, es.raw_summary
+            FROM chapter_exit_states es
+            JOIN chapter_versions cv ON cv.id = es.chapter_version_id
+            JOIN chapters c ON c.id = cv.chapter_id
+            WHERE c.book_id = :b AND c.chapter_number = :n
+              AND cv.status IN ('approved', 'published_review', 'published')
+            ORDER BY es.id DESC LIMIT 1
+            """
+        ),
+        {"b": book_id, "n": chapter_number - 1},
+    ).first()
+    if not row or not row[0]:
+        return None
+    kws: list[str] = []
+    if row[1]:
+        try:
+            import json as _json
+            kws = _json.loads(row[1]) or []
+        except Exception:
+            kws = []
+    return {
+        "hook": row[0],
+        "keywords": kws,
+        "location": row[2] or "",
+        "time_marker": row[3] or "",
+        "character_state": row[4] or "",
+        "new_facts": row[5] or "",
+        "raw_summary": row[6] or "",
+    }
+
+
 def _chapter_brief_fields(
     session: Session,
     *,
@@ -2168,12 +2296,34 @@ def _chapter_brief_fields(
         beat_parts = [required_beats] if required_beats else []
         if chapter_engine:
             beat_parts.append(f"本章章节发动机:{chapter_engine}")
+        # P2-hook-continuity: 无 arc 分支也读前章 exit_state
+        _prev_exit = _load_prev_chapter_exit_hint(session, book_id=book_id, chapter_number=chapter_number)
+        if _prev_exit:
+            # 具体场景快照 · 强制 LLM 承接
+            if _prev_exit.get("location"):
+                beat_parts.append(f"承接前章场景:{_prev_exit['location']}")
+            if _prev_exit.get("time_marker"):
+                beat_parts.append(f"承接前章时间:{_prev_exit['time_marker']}")
+            if _prev_exit.get("character_state"):
+                beat_parts.append(f"承接前章主角状态:{_prev_exit['character_state']}")
+            if _prev_exit.get("new_facts"):
+                beat_parts.append(f"承接前章新设定(不得违背):{_prev_exit['new_facts']}")
+            # 强制开场紧接前章最后画面 · 不许倒退时间/回忆/跳场景
+            beat_parts.append(
+                f"【开场硬约束】第一段必须紧接前章最后画面·不许倒退时间不许跳场景。"
+                f"前章最后画面:{_prev_exit['hook']}。"
+                f"Ch{chapter_number}第一段必须让这个画面继续演下去(主角开口/主角动作/对方开口/环境变化)。"
+            )
+            if _prev_exit.get("keywords"):
+                kws = _prev_exit["keywords"]
+                beat_parts.append(f"开局300字必须直接呼应至少2个前章关键词:{'/'.join(kws)}")
         return ChapterBriefFields(
             goal=f"{goal_prefix} 第{chapter_number}章",
             required_beats="，".join(_dedupe(_split_csv("，".join(beat_parts)))) if beat_parts else required_beats,
             constraints=ensure_chapter_production_standard(
                 "，".join(_dedupe(_split_csv(constraints) + ([f"执行作品DNA章节发动机:{chapter_engine}"] if chapter_engine else []))),
                 chapter_number=chapter_number,
+                chapter_type=_resolve_chapter_type(chapter_number),
             ),
         )
     arc = arcs[0]
@@ -2192,6 +2342,7 @@ def _chapter_brief_fields(
 
     beat_parts = [
         f"剧情段阶段:{phase}",
+        _arc_progression_beat(arc, chapter_number, phase),
         f"本章章节发动机:{chapter_engine}" if chapter_engine else "",
         "压力",
         "选择",
@@ -2207,6 +2358,28 @@ def _chapter_brief_fields(
         beat_parts.append(f"保持转折方向:{arc.turn}")
     beat_parts.extend(_split_csv(required_beats))
 
+    # P2-hook-continuity: 读前章 exit_state · 强制承接
+    _prev_exit = _load_prev_chapter_exit_hint(session, book_id=book_id, chapter_number=chapter_number)
+    if _prev_exit:
+        # 具体场景快照 · 强制 LLM 承接
+        if _prev_exit.get("location"):
+            beat_parts.append(f"承接前章场景:{_prev_exit['location']}")
+        if _prev_exit.get("time_marker"):
+            beat_parts.append(f"承接前章时间:{_prev_exit['time_marker']}")
+        if _prev_exit.get("character_state"):
+            beat_parts.append(f"承接前章主角状态:{_prev_exit['character_state']}")
+        if _prev_exit.get("new_facts"):
+            beat_parts.append(f"承接前章新设定(不得违背):{_prev_exit['new_facts']}")
+        # 强制开场紧接前章最后画面 · 不许倒退时间/回忆/跳场景
+        beat_parts.append(
+            f"【开场硬约束】第一段必须紧接前章最后画面·不许倒退时间不许跳场景。"
+            f"前章最后画面:{_prev_exit['hook']}。"
+            f"Ch{chapter_number}第一段必须让这个画面继续演下去(主角开口/主角动作/对方开口/环境变化)。"
+        )
+        if _prev_exit.get("keywords"):
+            kws = _prev_exit["keywords"]
+            beat_parts.append(f"开局300字必须直接呼应至少2个前章关键词:{'/'.join(kws)}")
+
     constraint_parts = [
         f"保持在第{arc.start_chapter}-{arc.end_chapter}章剧情段边界内",
         "不得偏离 Story Bible 和已登记 Canon",
@@ -2221,6 +2394,7 @@ def _chapter_brief_fields(
             chapter_number=chapter_number,
             arc_phase=phase,
             arc_goal=arc.goal,
+            chapter_type=_resolve_chapter_type(chapter_number),
         ),
     )
 
@@ -2238,6 +2412,64 @@ def _arc_phase(arc: StoryArc, chapter_number: int) -> str:
     if chapter_number < arc.end_chapter:
         return "climax"
     return "resolution"
+
+
+def _arc_progression_beat(arc: StoryArc, chapter_number: int, phase: str) -> str:
+    """D1 连续大纲流（确定性·零新增 LLM 随机）：把 arc 的 goal→climax→turn
+    三元目标按【本章在 arc 中的序号/总章数】切成逐章递进的【具体推进指令】。
+
+    动机：原先每章 beats 都拿同一个 arc.goal + phase 名，第2章和第4章收到的
+    "该发生什么"几乎一样，drafting LLM 只能即兴——这是前5章剧情漂移、章型门
+    反复打回的生成源头。此函数给每章一个明确的"你在整段弧线的第 index/total 步、
+    该把故事推进到哪个具体节点、上一步的什么必须在本章兑现"的锚点。
+
+    纯位置映射函数：同一 (arc, chapter) 永远产出同一指令，不调用 LLM、无随机性，
+    契合 D4 零随机底线。arc 字段缺失时优雅降级为通用推进语。
+    """
+    total = max(1, arc.end_chapter - arc.start_chapter + 1)
+    index = chapter_number - arc.start_chapter + 1  # 1-based
+    # arc 三元目标可能写得很长（整段"前五章要做什么"）。逐章指令只取核心引导，
+    # 截断到 ~36 字，避免把整段 arc 目标灌进每一章、稀释"本章具体推进"信号。
+    def _clip(s: str, n: int = 36) -> str:
+        s = (s or "").strip().replace("\n", " ")
+        return (s[:n] + "…") if len(s) > n else s
+    goal = _clip(arc.goal)
+    climax = _clip(arc.climax)
+    turn = _clip(arc.turn)
+    steps: list[str] = []
+    steps.append(f"本章是剧情段第{index}/{total}步")
+    if phase == "setup":
+        steps.append(
+            f"开局步：落地本段处境与初始压力"
+            + (f"，为『{goal}』埋第一个具体扣子（人物/物件/承诺/威胁任选其一，必须可指认）" if goal else "")
+        )
+    elif phase == "development":
+        steps.append(
+            "上行步：把上一章埋的扣子推进一格——主角主动做一个有代价的选择，"
+            + (f"让『{goal}』从抽象目标变成本章一个具体的小胜或小挫" if goal else "产生一个具体的小胜或小挫")
+        )
+    elif phase == "midpoint":
+        steps.append(
+            "转折步：抛出一个改变力量对比或信息格局的中点事件（新敌意/新真相/新代价），"
+            + (f"让局势明确朝『{climax or goal}』逼近，并关掉一条退路" if (climax or goal) else "并关掉一条退路")
+        )
+    elif phase == "climax":
+        steps.append(
+            "高潮步：正面兑现本段最大冲突"
+            + (f"——直接推进/引爆『{climax}』" if climax else "")
+            + "，主角付出实打实的代价换取推进，禁止拖延或回避对决"
+        )
+    else:  # resolution
+        steps.append(
+            "收束步：给本段一个有后果的落点"
+            + (f"，兑现转折『{turn}』" if turn else "")
+            + "，并在章末抛出通向下一段的新钩子（新目标/新威胁/新未解问题）"
+        )
+    # 跨章连续性硬约束：本章必须承接上一章的推进结果，不许原地复述 arc 目标
+    if index > 1:
+        steps.append("必须承接上一章的推进结果继续往前走，不许把本段目标当口号重复喊，不许原地打转")
+    return "；".join(steps)
+
 
 
 def _split_csv(value: str) -> list[str]:
@@ -2308,8 +2540,9 @@ def _loads_json(value: str | None) -> dict:
 
 
 def _revision_brief_matches_quality(brief: ChapterBrief, quality: QualityReport) -> bool:
-    marker = f"质检报告 #{quality.id}"
-    return marker in brief.goal or marker in brief.required_beats or marker in brief.constraints
+    text = _revision_brief_text(brief)
+    markers = (f"质检报告 #{quality.id}", f"reading_assessment_auto_quality#{quality.id}")
+    return any(marker in text for marker in markers)
 
 
 def _revision_brief_matches_feedback_reopen(brief: ChapterBrief, quality: QualityReport) -> bool:
@@ -2327,7 +2560,7 @@ def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> b
     if not brief:
         return False
     text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
-    return any(
+    if any(
         marker in text
         for marker in (
             "reading_assessment_contract",
@@ -2336,7 +2569,13 @@ def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> b
             "当前稿不是正式批准稿",
             "clean_rebuild_contract@v1",
         )
-    )
+    ):
+        return True
+    normalized = text.lower()
+    is_unit_flow = "unit_flow" in normalized or "单元流" in text or "小单元" in text
+    is_local_contract = "revision_mode:local_patch" in normalized or "revision_mode:targeted" in normalized
+    has_explicit_target = any(marker in text for marker in ("只修第", "只重写第", "只替换第", "只改第", "只动第"))
+    return is_unit_flow and is_local_contract and has_explicit_target
 
 
 def _reading_assessment_requires_revision(quality: QualityReport) -> bool:

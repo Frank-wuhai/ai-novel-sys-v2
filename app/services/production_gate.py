@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.entities import PlatformFeedback, StoryArc, StoryBible, StoryFoundation
+from app.models.entities import CanonAuthorityProfile, PlatformFeedback, StoryArc, StoryBible, StoryFoundation
 
 
 WRITE_ACTIONS = {
@@ -54,6 +54,8 @@ def assert_production_gate(session: Session, *, book_id: int, action: str) -> No
 
 
 def pending_skeleton_approval_labels(session: Session, *, book_id: int) -> list[str]:
+    if _has_human_confirmed_authority_profile(session, book_id=book_id):
+        return []
     foundation = session.scalar(select(StoryFoundation).where(StoryFoundation.book_id == book_id).order_by(StoryFoundation.id.desc()))
     bible = session.scalar(select(StoryBible).where(StoryBible.book_id == book_id))
     arc = session.scalar(select(StoryArc).where(StoryArc.book_id == book_id, StoryArc.arc_number == 1))
@@ -86,3 +88,12 @@ def pending_skeleton_approval_labels(session: Session, *, book_id: int) -> list[
     for item in rows:
         latest.setdefault(item.metric_value, item.raw_text)
     return [label for key, label in labels.items() if not values.get(key, "") or latest.get(key) != values.get(key, "")]
+
+
+def _has_human_confirmed_authority_profile(session: Session, *, book_id: int) -> bool:
+    profile = session.scalar(
+        select(CanonAuthorityProfile)
+        .where(CanonAuthorityProfile.book_id == book_id, CanonAuthorityProfile.status == "active")
+        .order_by(CanonAuthorityProfile.id.desc())
+    )
+    return bool(profile and (profile.source or "").startswith("human_confirmed"))

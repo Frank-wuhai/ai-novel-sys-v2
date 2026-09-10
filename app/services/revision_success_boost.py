@@ -68,12 +68,17 @@ def apply_revision_success_boost(
 def _boost_block(*, version: ChapterVersion, quality: QualityReport, quality_data: dict, chapter_number: int, focus: list[str]) -> str:
     source = str(version.source or "")
     decision = predict_revision_pass(quality_data, chapter_number=chapter_number)
+    assessment = quality_data.get("reading_assessment") if isinstance(quality_data.get("reading_assessment"), dict) else {}
+    prose_targeted = assessment.get("level") == "usable_draft_needs_prose_revision" or assessment.get("label") == "高分底稿，文风定点修订"
     lines = [
         BOOST_MARKER,
         f"当前待修底稿：v{version.id}，版本号 {version.version_number}，质检 {quality.score} 分。",
-        f"修订档位：{decision.label}；预测提分：+{decision.predicted_pass_delta}；置信度：{decision.confidence}。",
     ]
-    if decision.should_rebuild:
+    if prose_targeted:
+        lines.append("修订档位：文风对白定点修订；预测目标：关闭 prose_naturalness 与段落密度门禁；置信度：90。")
+    else:
+        lines.append(f"修订档位：{decision.label}；预测提分：+{decision.predicted_pass_delta}；置信度：{decision.confidence}。")
+    if decision.should_rebuild and not prose_targeted:
         lines.append("策略提醒：当前更适合候选重建；若生产路由仍要求修订，本轮必须按场景级重写失败段落，不做表层润色。")
     if source.startswith("rebuild_candidate_selected:"):
         lines.append("已采用重建候选稿；禁止再生成候选或另起新章，必须修选中稿。")

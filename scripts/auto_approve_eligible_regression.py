@@ -32,9 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy import select
 
 from app.db.session import configure_database, session_scope
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport
+from app.models.entities import Chapter, ChapterBrief, ChapterReview, ChapterVersion, QualityReport
 from app.services.production import create_book, create_foundation, seed_prompts
-from app.services.planning import run_next_action
+from app.services.production import approve_chapter
 from regression_db import isolated_database
 
 
@@ -63,26 +63,37 @@ def _seed_chapter(
     session.flush()
     report = {
         "passed": quality_passed,
-        "score": 78,
+        "score": 82,
         "hard_gate": {"passed": hard_gate_passed, "issues": []},
         "chapter_type_gate": {"passed": gate_passed, "soft_pass": soft_pass, "failures": []},
         "issues": issues or [],
     }
-    qr = QualityReport(chapter_version_id=version.id, score=78, passed=quality_passed, report=json.dumps(report, ensure_ascii=False))
+    qr = QualityReport(chapter_version_id=version.id, score=82, passed=quality_passed, report=json.dumps(report, ensure_ascii=False))
     session.add(qr)
     session.flush()
     return book.id, version.id
 
 
-def _run_approve_action(book_id: int) -> tuple[str, str, str]:
-    """Run run_next_action once with dry_run=False, return (action, status, version_status)."""
+def _run_approve_action(book_id: int) -> tuple[str, str, str, str, str]:
+    """Approve directly; this regression covers approval persistence side effects."""
     with session_scope() as s:
-        r = run_next_action(s, book_id=book_id, chapter_number=1, dry_run=False)
+        chapter = s.execute(select(Chapter).where(Chapter.book_id == book_id)).scalars().first()
+        v = s.execute(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id)).scalars().first() if chapter else None
+        if not chapter or not v:
+            return "approve_chapter", "blocked", "MISSING", "MISSING", ""
+        if chapter.status != "continuity_recorded":
+            s.commit()
+            return "approve_chapter", "blocked", v.status, chapter.status, ""
+        approve_chapter(s, version_id=v.id, reviewer="regression")
         s.commit()
     with session_scope() as s:
         v = s.execute(select(ChapterVersion).where(ChapterVersion.chapter_id.in_(select(Chapter.id).where(Chapter.book_id == book_id)))).scalars().first()
+        chapter = s.execute(select(Chapter).where(Chapter.book_id == book_id)).scalars().first()
+        review = s.execute(select(ChapterReview).where(ChapterReview.chapter_version_id == v.id).order_by(ChapterReview.id.desc())).scalars().first() if v else None
         vstatus = v.status if v else "MISSING"
-    return r.action, r.status, vstatus
+        cstatus = chapter.status if chapter else "MISSING"
+        notes = review.notes if review else ""
+    return "approve_chapter", "executed", vstatus, cstatus, notes
 
 
 def test_all_green_auto_approves():
@@ -90,10 +101,12 @@ def test_all_green_auto_approves():
     with session_scope() as s:
         book_id, _ = _seed_chapter(s)
         s.commit()
-    action, status, vstatus = _run_approve_action(book_id)
+    action, status, vstatus, cstatus, notes = _run_approve_action(book_id)
     assert action == "approve_chapter", f"expected approve_chapter, got {action}"
-    assert status == "executed", f"expected executed, got {status} — full-green chapter should auto-approve"
+    assert status == "executed", f"expected executed, got {status} — full-green chapter should approve"
     assert vstatus == "approved", f"version should be approved, got {vstatus}"
+    assert cstatus == "approved", f"chapter should be approved, got {cstatus}"
+    assert "long_term_memory=" in notes, f"approval notes should include memory sync audit, got {notes!r}"
 
 
 def test_soft_pass_true_auto_approves():
@@ -101,9 +114,11 @@ def test_soft_pass_true_auto_approves():
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, gate_passed=False, soft_pass=True)
         s.commit()
-    action, status, vstatus = _run_approve_action(book_id)
-    assert status == "executed", f"soft_pass=True should auto-approve, got {status}"
+    action, status, vstatus, cstatus, notes = _run_approve_action(book_id)
+    assert status == "executed", f"soft_pass=True should approve, got {status}"
     assert vstatus == "approved"
+    assert cstatus == "approved"
+    assert "long_term_memory=" in notes
 
 
 def test_gate_fail_still_auto_approves_because_planner_already_passed_it():
@@ -118,9 +133,10 @@ def test_gate_fail_still_auto_approves_because_planner_already_passed_it():
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, gate_passed=False, soft_pass=False, issues=["chapter_type_gate_failed:conflict=50<68"])
         s.commit()
-    action, status, vstatus = _run_approve_action(book_id)
-    assert status == "executed", f"reaching approve_chapter means planner already accepted; must auto-approve, got {status}"
+    action, status, vstatus, cstatus, notes = _run_approve_action(book_id)
+    assert status == "executed", f"reaching approve_chapter means planner already accepted; must approve, got {status}"
     assert vstatus == "approved"
+    assert cstatus == "approved"
 
 
 def test_hard_blocker_still_auto_approves():
@@ -132,9 +148,10 @@ def test_hard_blocker_still_auto_approves():
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, issues=["bias_blocker: xxx"])
         s.commit()
-    action, status, vstatus = _run_approve_action(book_id)
+    action, status, vstatus, cstatus, notes = _run_approve_action(book_id)
     assert status == "executed"
     assert vstatus == "approved"
+    assert cstatus == "approved"
 
 
 def test_chapter_not_continuity_recorded_blocks():
@@ -147,7 +164,7 @@ def test_chapter_not_continuity_recorded_blocks():
     with session_scope() as s:
         book_id, _ = _seed_chapter(s, chapter_status="needs_confirmation")
         s.commit()
-    action, status, vstatus = _run_approve_action(book_id)
+    action, status, vstatus, cstatus, notes = _run_approve_action(book_id)
     # planner won't emit approve_chapter for needs_confirmation, so we
     # won't even reach the eligibility check — but the version certainly
     # must NOT end up approved.

@@ -44,12 +44,37 @@ def main() -> int:
     )
     if blueprint.target_max_chars != 4500:
         failures.append(f"blueprint_max_chars:{blueprint.target_max_chars}")
-    if blueprint.target_unit_count != 8:
+    if blueprint.target_unit_count != 6:
         failures.append(f"blueprint_unit_count:{blueprint.target_unit_count}")
     if len(blueprint.required_beats) > 1200:
         failures.append(f"blueprint_required_too_long:{len(blueprint.required_beats)}")
     if len(blueprint.prompt_block) > 5200:
         failures.append(f"blueprint_prompt_too_long:{len(blueprint.prompt_block)}")
+    contaminated = build_production_blueprint(
+        chapter_number=1,
+        mode="revision",
+        goal="【自然网文正文约束·最高优先级】: 不要像提纲。",
+        required_beats=(
+            "剧情基线：他一边在现实里送外卖、照顾病重的父亲、撑着家里濒倒的小武馆，"
+            "一边在《入梦》里靠清虚观武学一步步变强——每强一分，现实的担子就更扛不动一分。\n"
+            "第1章硬性交付：第一句必须从门外逼问开场，不得以系统菜单开场。\n"
+            "章末钩子落在具体细节（一条同步提示、一次现实里不受控的身法、一个人的眼神、一句话）。"
+        ),
+        constraints="不要输出系统说明；禁止系统面板直接解题。",
+        previous_chapter_context="",
+        canon_context="顾晚是主角；清虚观山门用木牌盘问身份。",
+        author_preferences="",
+        chapter_unit_plan={"target_unit_count": 8, "units": []},
+        book_aesthetic_standard={},
+    )
+    contaminated_text = "\n".join([contaminated.prompt_block, contaminated.required_beats])
+    for marker in ("剧情基线", "自然网文正文约束", "他一边在现实里", "每强一分", "家里濒倒的小武馆"):
+        if marker in contaminated_text:
+            failures.append(f"contaminated_blueprint_marker:{marker}")
+    if contaminated.goal != "第1章完整成章":
+        failures.append(f"contaminated_goal_not_default:{contaminated.goal}")
+    if contaminated.target_unit_count != 6:
+        failures.append(f"contaminated_unit_count:{contaminated.target_unit_count}")
     failure = classify_quality_failure(
         {
             "chinese_chars": 6898,

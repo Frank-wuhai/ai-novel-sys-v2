@@ -450,6 +450,7 @@ def build_brief_revision_contract(suggestion_text: str, *, chapter_number: int) 
             "修订方向说明:",
             f"revision_mode:{mode}",
             f"范围:{scope}",
+            *_author_rejection_protocol_lines(mode=mode),
             "读感目标:",
             _compact_text(clean_text, limit=900),
             "主编验收:",
@@ -584,6 +585,8 @@ def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str
             mode_line,
             "修订方向:",
             clean_text,
+            "作者驳回协议:",
+            *_bullet_lines(_author_rejection_protocol_lines(mode=mode)),
             "意见理解规则:",
             *_bullet_lines(understanding_rules),
             "目标读者体验:",
@@ -596,6 +599,40 @@ def build_revision_contract(suggestion_text: str, *, chapter_number: int) -> str
             *_bullet_lines(checks),
         ]
     )
+
+
+def _author_rejection_protocol_lines(*, mode: str) -> list[str]:
+    """Guard author feedback from becoming an unconstrained rewrite loop.
+
+    Human rejection is authoritative, but it must be converted into a bounded
+    repair contract. The model may answer the rejected defects; it may not
+    treat the rejection as permission to replace unrelated working material.
+    """
+    common = [
+        "先把作者意见拆成具体缺陷：现实认知、因果承接、人物反应、术语定义、交易闭环、句子搭配；不得只概括为整体不好。",
+        "每个缺陷必须对应正文中的可见修复点；没有被作者意见命中的合格事实、主事件、人物关系和章末事实默认保留。",
+        "下一版必须能逐条对照原始作者意见验收；不能用新增设定、新人物、新支线或换题材来绕开原问题。",
+        "如果同一作者意见连续两轮仍未解决，停止自动扩写，回到问题清单和修订范围确认。",
+    ]
+    if mode in {REVISION_MODE_LOCAL_PATCH, REVISION_MODE_POLISH}:
+        return [
+            *common,
+            "本轮是小修/润色：禁止重排场景、改主线、改章末钩子或扩大成整章重写。",
+        ]
+    if mode == REVISION_MODE_TARGETED:
+        return [
+            *common,
+            "本轮是定点修订：只替换明确失败的句段或场景单元；允许补因果桥，但不得推翻已成立结构。",
+        ]
+    if mode == REVISION_MODE_REWRITE:
+        return [
+            *common,
+            "本轮虽允许结构重写，但必须沿用最新 Canon、作品方向和作者已确认的有效事实；禁止把重写当成重新开书。",
+        ]
+    return [
+        *common,
+        "fresh 只在作者明确废弃旧稿/方向完全错误时使用；仍必须服从最新 Story Bible、Canon 和作者原始意图。",
+    ]
 
 
 def normalize_revision_mode(mode: str) -> str:

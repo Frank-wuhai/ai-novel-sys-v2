@@ -175,7 +175,7 @@ def _unsafe_hits(text: str, markers: tuple[str, ...]) -> list[str]:
             index = value.find(marker, start)
             if index < 0:
                 break
-            if not _is_negated(value, index):
+            if not _is_negated(value, index) and not _safe_marker_context(value, marker, index):
                 unsafe = True
                 break
             start = index + len(marker)
@@ -187,3 +187,10 @@ def _unsafe_hits(text: str, markers: tuple[str, ...]) -> list[str]:
 def _is_negated(text: str, marker_index: int) -> bool:
     prefix = text[max(0, marker_index - 48) : marker_index]
     return any(item in prefix for item in NEGATION_PREFIXES)
+
+
+def _safe_marker_context(text: str, marker: str, marker_index: int) -> bool:
+    window = text[max(0, marker_index - 36) : marker_index + len(marker) + 36]
+    if marker == "系统提示":
+        return any(safe in window for safe in ("没有系统提示", "不是系统提示", "不靠系统提示", "不再有系统提示"))
+    return False

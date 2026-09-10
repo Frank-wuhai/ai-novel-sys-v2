@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Book, Character, PowerSystem, StoryBible, StoryFoundation, WorldRule
+from app.services.canon_authority import authority_prompt_lines, get_authority_profile
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ def audit_context_contamination(
     authority = _authority_text(session, book_id=book_id)
     terms = _authority_terms(authority)
     stale = _stale_terms(session, book_id=book_id, authority=authority, terms=terms)
+    deprecated = _deprecated_pollution_terms(session, book_id=book_id)
     blockers: list[str] = []
     warnings: list[str] = []
     sources = {
@@ -51,12 +53,19 @@ def audit_context_contamination(
     if not fresh_rewrite:
         sources["previous_content"] = previous_content
     for source_name, text in sources.items():
+        deprecated_hits = _deprecated_hits(text or "", deprecated)
+        if deprecated_hits:
+            blockers.append(f"{source_name} 含已裁决废弃设定: " + "、".join(deprecated_hits[:8]))
         hits = [term for term in stale if term and term in (text or "")]
         if hits:
             blockers.append(f"{source_name} 含旧设定锚点: " + "、".join(hits[:8]))
     for source_name, text in {"brief": brief_text, "canon": canon_context}.items():
+        if source_name == "canon" and not (text or "").strip():
+            continue
         missing = _missing_required_terms(text or "", terms, include_ability=source_name == "canon")
-        if missing:
+        if missing and source_name == "canon":
+            warnings.append(f"{source_name} 未承接当前骨架锚点: " + "、".join(missing[:8]))
+        elif missing:
             blockers.append(f"{source_name} 未承接当前骨架锚点: " + "、".join(missing[:8]))
     brief_missing_ability = _missing_required_terms(brief_text or "", terms, include_core=False, include_ability=True)
     if brief_missing_ability:
@@ -89,14 +98,19 @@ def context_anchor_lines(session: Session, *, book_id: int) -> list[str]:
         rows.append("当前世界/作品锚点:" + "、".join(f"《{item}》" for item in terms["world_titles"]))
     if terms.get("ability_terms"):
         rows.append("当前能力/卖点锚点:" + "、".join(terms["ability_terms"]))
+    rows.extend(authority_prompt_lines(session, book_id=book_id))
     return rows
+
+
+def context_anchor_terms(session: Session, *, book_id: int) -> dict[str, list[str]]:
+    return _authority_terms(_authority_text(session, book_id=book_id))
 
 
 def _authority_text(session: Session, *, book_id: int) -> str:
     book = session.get(Book, book_id)
     foundation = session.scalar(select(StoryFoundation).where(StoryFoundation.book_id == book_id).order_by(StoryFoundation.id.desc()))
     bible = session.scalar(select(StoryBible).where(StoryBible.book_id == book_id).order_by(StoryBible.id.desc()))
-    chunks = [book.title if book else ""]
+    chunks = [f"当前作品名：《{book.title}》" if book and book.title else ""]
     if foundation:
         chunks.extend(
             [
@@ -119,6 +133,10 @@ def _authority_text(session: Session, *, book_id: int) -> str:
                 bible.style_guide,
             ]
         )
+    profile = get_authority_profile(session, book_id=book_id)
+    profile_text = profile.authority_text()
+    if profile_text:
+        chunks.append(profile_text)
     return "\n".join(str(item or "") for item in chunks)
 
 
@@ -138,7 +156,9 @@ def _extract_world_titles(text: str) -> list[str]:
     for match in re.finditer(r"《([^》]{2,24})》", text or ""):
         title = match.group(1).strip()
         prefix = (text or "")[max(0, match.start() - 12) : match.start()]
-        if any(marker in prefix for marker in ("借鉴", "参考", "类似", "致敬", "像", "读过")):
+        line_start = (text or "").rfind("\n", 0, match.start()) + 1
+        line_prefix = (text or "")[line_start : match.start()]
+        if any(marker in prefix or marker in line_prefix for marker in ("借鉴", "参考", "类似", "致敬", "像", "读过")):
             continue
         rows.append(title)
     return _dedupe(rows)
@@ -146,7 +166,7 @@ def _extract_world_titles(text: str) -> list[str]:
 
 def _extract_ability_terms(text: str) -> list[str]:
     rows = [
-        *re.findall(r"[“\"‘']([^“”\"‘’']{2,16})(?:能力|系统|金手指)?[”\"’']", text or ""),
+        *re.findall(r"[“\"‘']([^“”\"‘’']{2,16})(?:能力|系统|金手指)[”\"’']", text or ""),
         *re.findall(r"激活(?:了|的)?([\u4e00-\u9fff]{2,12}?)(?:能力|系统|金手指|，|。|；)", text or ""),
     ]
     blocked_exact = {"核心能力", "核心卖点", "能力", "系统", "金手指"}
@@ -158,6 +178,8 @@ def _extract_ability_terms(text: str) -> list[str]:
         if item.startswith(("于", "在", "第一次", "首次")):
             continue
         if any(marker in item for marker in ("场景", "资格", "世界", "小说", "章节", "后遗症", "现代", "入侵")):
+            continue
+        if any(marker in item for marker in ("不想", "确保", "套路", "躲开", "智取", "谨小慎微")):
             continue
         if item.endswith(("资格", "世界", "小说")):
             continue
@@ -209,6 +231,62 @@ def _stale_terms(session: Session, *, book_id: int, authority: str, terms: dict[
             if current_titles and title not in current_titles and title not in authority:
                 stale.append(title)
     return _dedupe(stale)
+
+
+def _deprecated_pollution_terms(session: Session, *, book_id: int) -> list[str]:
+    profile = get_authority_profile(session, book_id=book_id)
+    rows: list[str] = []
+    for item in profile.deprecated_pollution:
+        rows.extend(re.findall(r"《([^》]{2,24})》", item or ""))
+        cleaned = re.sub(r"《([^》]{2,24})》", r"\1", item or "")
+        cleaned = re.split(r"不得|禁止|作废|废弃|污染|误写|作为", cleaned, 1)[0]
+        cleaned = cleaned.strip(" ：:，,；;-")
+        if 2 <= len(cleaned) <= 16:
+            rows.append(cleaned)
+    return _dedupe(rows)
+
+
+def _deprecated_hits(text: str, terms: list[str]) -> list[str]:
+    hits: list[str] = []
+    value = text or ""
+    for term in terms:
+        if not term:
+            continue
+        start = 0
+        while True:
+            idx = value.find(term, start)
+            if idx < 0:
+                break
+            start = idx + len(term)
+            prefix = value[max(0, idx - 18):idx]
+            line_start = value.rfind("\n", 0, idx) + 1
+            line_prefix = value[line_start:idx]
+            if any(
+                marker in prefix or marker in line_prefix
+                for marker in (
+                    "参考",
+                    "借鉴",
+                    "致敬",
+                    "类似",
+                    "电影",
+                    "还珠楼主",
+                    "禁止",
+                    "不得",
+                    "不能",
+                    "不准",
+                    "废弃",
+                    "作废",
+                    "不要",
+                    "禁用",
+                    "硬禁",
+                    "避免",
+                    "不再",
+                )
+            ):
+                continue
+            hits.append(term)
+            break
+    return _dedupe(hits)
 
 
 def _missing_required_terms(

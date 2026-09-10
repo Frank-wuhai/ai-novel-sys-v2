@@ -10,7 +10,8 @@ Verifies the orchestrator wiring introduced in phase2/1b:
 3. Queue-in-flight still wins (never preempt a running revision).
 4. Strategy override (``generate_rebuild_candidates`` from the strategy
    pipeline) still wins because it encodes higher-order signals.
-5. ``early_stop_should_stop=False`` leaves the pre-existing revise route
+5. Clean active story contracts block historical early-stop recovery.
+6. ``early_stop_should_stop=False`` leaves the pre-existing revise route
    intact.
 """
 
@@ -120,7 +121,23 @@ def main() -> int:
     if route.action != "revision_budget_recovery":
         failures.append(f"case4b: strategy must win when early-stop best<75, got {route.action!r}")
 
-    # 5. early_stop_should_stop=False leaves the classic revise route.
+    # 5. A clean active story contract must block early-stop recovery of an old
+    #    high-scoring draft, then fall through to the contract route.
+    situation = _base_situation(
+        story_clean_revision_brief=True,
+        early_stop_should_stop=True,
+        early_stop_best_score=90,
+        early_stop_best_version=27,
+        early_stop_triggered_rules=("max_versions",),
+    )
+    route = decide_production_route(situation)
+    if route.action == "accept_early_stop":
+        failures.append(
+            "case5: clean revision contract must block accept_early_stop, "
+            f"got action={route.action!r} intent={route.intent!r}"
+        )
+
+    # 6. early_stop_should_stop=False leaves the classic revise route.
     situation = _base_situation(
         early_stop_should_stop=False,
         early_stop_best_score=70,
@@ -128,9 +145,9 @@ def main() -> int:
     )
     route = decide_production_route(situation)
     if route.action != "revise_chapter":
-        failures.append(f"case5: classic revise path broken, got {route.action!r}")
+        failures.append(f"case6: classic revise path broken, got {route.action!r}")
 
-    # 6. Threshold exactly at 75 fires accept path.
+    # 7. Threshold exactly at 75 fires accept path.
     situation = _base_situation(
         early_stop_should_stop=True,
         early_stop_best_score=75,
@@ -139,9 +156,9 @@ def main() -> int:
     )
     route = decide_production_route(situation)
     if route.action != "accept_early_stop":
-        failures.append(f"case6: score==75 boundary must accept, got {route.action!r}")
+        failures.append(f"case7: score==75 boundary must accept, got {route.action!r}")
 
-    # 7. Below threshold (74) with should_stop=True should escalate, not accept.
+    # 8. Below threshold (74) with should_stop=True should escalate, not accept.
     situation = _base_situation(
         early_stop_should_stop=True,
         early_stop_best_score=74,
@@ -150,7 +167,7 @@ def main() -> int:
     )
     route = decide_production_route(situation)
     if route.action != "generate_rebuild_candidates":
-        failures.append(f"case7: score=74 must escalate not accept, got {route.action!r}")
+        failures.append(f"case8: score=74 must escalate not accept, got {route.action!r}")
 
     if failures:
         print("early_stop_orchestrator_regression=FAIL")
@@ -158,7 +175,7 @@ def main() -> int:
             print(f"- {failure}")
         return 1
     print("early_stop_orchestrator_regression=PASS")
-    print("cases_evaluated=7")
+    print("cases_evaluated=8")
     return 0
 
 

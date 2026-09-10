@@ -54,7 +54,9 @@ def format_semantic_memory_context(
     limit: int = 5,
 ) -> tuple[str, list[int]]:
     try:
-        summary = ensure_semantic_memory_for_production(session, book_id=book_id)
+        summary = summarize_semantic_memory(session, book_id=book_id)
+        if int(summary.get("indexed_count") or 0) <= 0:
+            return "", []
         hits = retrieve_book_knowledge(
             session,
             book_id=book_id,
@@ -63,7 +65,6 @@ def format_semantic_memory_context(
             dry_run=not _should_use_live_embedding_query(summary),
         )
     except (OperationalError, RuntimeError, httpx.HTTPError, ValueError):
-        session.rollback()
         return "", []
     if not hits:
         return "", []
@@ -600,7 +601,7 @@ def _knowledge_chunks(session: Session, *, book: Book, limit_chapters: int) -> l
     )
     for chapter in chapters:
         latest = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
-        text = "\n".join([chapter.title, chapter.summary, latest.content[:3000] if latest else ""]).strip()
+        text = "\n".join([chapter.title or "", chapter.summary or "", latest.content[:3000] if latest else ""]).strip()
         if text:
             chunks.append(_chunk("chapter", str(chapter.id), f"chapter {chapter.chapter_number}", text))
         quality = (

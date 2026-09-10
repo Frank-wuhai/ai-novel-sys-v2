@@ -45,15 +45,17 @@ def test_gate_passed_true_no_blocker():
     assert production_blocker(q) is False
 
 
-def test_gate_failed_no_soft_pass_blocks():
-    """Regression baseline: gate.passed=False without soft_pass still blocks."""
+def test_gate_failed_hard_gate_passed_does_not_block():
+    """A 方案（2026-07-23）契约变更：type_gate.passed=False + hard_gate.passed=True
+    → NOT a blocker。quality 层已放行(hard_gate过)时 type_gate 不越权否决，
+    即使没有显式 soft_pass 标志。裁决权归 quality 层的 hard_gate。"""
     q = _quality({
         "chapter_type_gate": {"passed": False, "soft_pass": False, "failures": ["brief_coverage=30<60"]},
         "hard_gate": {"passed": True},
         "issues": ["chapter_type_gate_failed:brief_coverage=30<60"],
     })
-    assert planner_blocker(q) is True
-    assert production_blocker(q) is True
+    assert planner_blocker(q) is False, "hard_gate过 → type_gate 不阻塞"
+    assert production_blocker(q) is False, "hard_gate过 → type_gate 不阻塞"
 
 
 def test_gate_failed_with_soft_pass_does_not_block():
@@ -83,25 +85,40 @@ def test_hard_gate_failure_always_blocks():
     assert production_blocker(q) is True
 
 
-def test_issues_only_no_gate_object_still_blocks_without_soft_pass():
-    """Legacy path: only `issues` array carries the failure; no gate object.
-    Cannot infer soft_pass → block."""
+def test_issues_only_no_gate_object_hard_gate_passed_does_not_block():
+    """A 方案契约变更：只有 issues 数组携带 type_gate 失败(无 gate 对象)，
+    但 hard_gate.passed=True → quality 层已放行 → NOT a blocker。"""
     q = _quality({
         "issues": ["chapter_type_gate_failed:brief_coverage=45<60"],
         "hard_gate": {"passed": True},
     })
-    assert planner_blocker(q) is True
-    assert production_blocker(q) is True
+    assert planner_blocker(q) is False, "hard_gate过 → type_gate issue 不阻塞"
+    assert production_blocker(q) is False, "hard_gate过 → type_gate issue 不阻塞"
+
+
+def test_strict_chapter_type_gate_still_blocks_when_hard_gate_passed():
+    """A 方案边界守护：生死线章型(strict=True: opening/early_serial/turning_point)
+    保留 type_gate 否决权 —— 即使 hard_gate.passed=True，type_gate 未过仍阻塞。
+    开局前5章是留存率生死线、转折章是爽点兑现点，高标准非学院派冗余。"""
+    q = _quality({
+        "chapter_type_gate": {"passed": False, "soft_pass": False, "strict": True,
+                              "failures": ["hook_strength=55<68"]},
+        "hard_gate": {"passed": True},
+        "issues": ["chapter_type_gate_failed:hook_strength=55<68"],
+    })
+    assert planner_blocker(q) is True, "strict章型 type_gate 未过 → 仍阻塞"
+    assert production_blocker(q) is True, "strict章型 type_gate 未过 → 仍阻塞"
 
 
 if __name__ == "__main__":
     tests = [
         test_planner_blocker_none_report,
         test_gate_passed_true_no_blocker,
-        test_gate_failed_no_soft_pass_blocks,
+        test_gate_failed_hard_gate_passed_does_not_block,
         test_gate_failed_with_soft_pass_does_not_block,
         test_hard_gate_failure_always_blocks,
-        test_issues_only_no_gate_object_still_blocks_without_soft_pass,
+        test_issues_only_no_gate_object_hard_gate_passed_does_not_block,
+        test_strict_chapter_type_gate_still_blocks_when_hard_gate_passed,
     ]
     fail = 0
     for t in tests:

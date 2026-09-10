@@ -4,6 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.entities import Chapter, ChapterBrief, ChapterVersion, QualityReport, StoryFoundation
+from app.services.world_logic import evaluate_world_logic
 
 QUALITY_DIAGNOSTIC_BRIEF_MARKERS = (
     "依据质检报告",
@@ -75,6 +76,7 @@ def latest_story_brief(session: Session, chapter_id: int, *, search_limit: int =
         session.scalars(
             select(ChapterBrief)
             .where(ChapterBrief.chapter_id == chapter_id)
+            .where(ChapterBrief.status.in_(["ready", "revision_ready"]))
             .order_by(ChapterBrief.id.desc())
             .limit(search_limit)
         )
@@ -137,25 +139,58 @@ def collect_version_scores(session: Session, chapter_id: int) -> list["VersionSc
     Returned in ascending version_number order. A version without a quality
     report contributes ``score=None, passed=False`` — the early-stop engine
     treats those as unscored and non-passing.
+
+    Early-stop is a promotion path, so its candidate history must only contain
+    versions that are still eligible to be promoted. Historical discarded
+    versions and current world-logic polluted restores are deliberately skipped;
+    otherwise a high-scoring old polluted incumbent can preempt a clean latest
+    candidate and be resurrected by ``accept_early_stop``.
     """
 
     from app.services.revision_early_stop import VersionScore  # local to avoid cycle
 
-    rows = session.execute(
-        select(ChapterVersion.version_number, QualityReport.score, QualityReport.passed)
-        .select_from(ChapterVersion)
-        .outerjoin(QualityReport, QualityReport.chapter_version_id == ChapterVersion.id)
-        .where(ChapterVersion.chapter_id == chapter_id)
-        .order_by(ChapterVersion.version_number.asc())
-    ).all()
+    versions = list(
+        session.scalars(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == chapter_id)
+            .where(ChapterVersion.status != "discarded")
+            .order_by(ChapterVersion.version_number.asc(), ChapterVersion.id.asc())
+        )
+    )
 
     scores: list[VersionScore] = []
-    for version_number, score, passed in rows:
+    for version in versions:
+        if not _version_safe_for_early_stop(version):
+            continue
+        quality = session.scalar(
+            select(QualityReport)
+            .where(QualityReport.chapter_version_id == version.id)
+            .order_by(QualityReport.id.desc())
+            .limit(1)
+        )
         scores.append(
             VersionScore(
-                version_number=int(version_number),
-                score=int(score) if score is not None else None,
-                passed=bool(passed) if passed is not None else False,
+                version_number=int(version.version_number),
+                score=int(quality.score) if quality is not None and quality.score is not None else None,
+                passed=bool(quality.passed) if quality is not None and quality.passed is not None else False,
             )
         )
     return scores
+
+
+def _version_safe_for_early_stop(version: ChapterVersion) -> bool:
+    """Return whether a version may participate in early-stop promotion.
+
+    Quality reports are historical snapshots. Book6 exposed that old reports
+    can score well even after newer world-logic rules classify the same text as
+    polluted. Re-evaluate the current text before letting early-stop see it.
+    """
+
+    report = evaluate_world_logic(version.content or "")
+    if report.score < 60:
+        return False
+    if report.checks.get("player_layer_intrusion", 100) < 60:
+        return False
+    if report.checks.get("character_knowledge_boundary", 100) < 60:
+        return False
+    return True

@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.services.chapter_standards import extract_max_chars, extract_min_chars
+from app.services.chapter_standards import REBUILD_MAX_CHARS, extract_max_chars, extract_min_chars
 
 
 @dataclass(frozen=True)
@@ -50,18 +50,21 @@ def build_production_blueprint(
     fresh_rewrite: bool = False,
     rewrite_mode: bool = False,
 ) -> ProductionBlueprint:
-    target_min = extract_min_chars(goal, required_beats, constraints, default=3000)
-    target_max = extract_max_chars(goal, required_beats, constraints, default=4500)
-    target_min = max(3000, target_min)
-    target_max = min(max(target_min, target_max), 5200)
+    # 番茄爆款基线（2026-07-10）: 中位2228字·上限2500 · 硬上限2800
+    target_min = extract_min_chars(goal, required_beats, constraints, default=2000)
+    explicit_target_max = extract_max_chars(goal, required_beats, constraints, default=0)
+    target_max = explicit_target_max or extract_max_chars(goal, required_beats, constraints, default=2500)
+    target_min = max(1800, target_min)  # 下限 1800 · 允许"短快紧"的一章
+    max_ceiling = max(REBUILD_MAX_CHARS, target_max) if explicit_target_max else REBUILD_MAX_CHARS
+    target_max = min(max(target_min + 200, target_max), max_ceiling)
     target_units = _target_units(chapter_unit_plan, target_min=target_min, target_max=target_max)
     compact_goal = _first_useful([goal], 180) or f"第{chapter_number}章完整成章"
     beats = _select_beats(required_beats, limit=8)
-    constraints_rows = _select_constraints(constraints, limit=8)
+    constraints_rows = _select_constraints("\n".join([constraints, required_beats]), limit=10)
     previous = _tail(previous_chapter_context, 700)
     canon = _select_canon(canon_context, limit=6)
     prefs = _select_preferences(author_preferences, book_aesthetic_standard, limit=6)
-    style_rows = _style_contract_rows(style_contract or {}, limit=14)
+    style_rows = _style_contract_rows(style_contract or {}, limit=20)
     quality = _quality_focus(quality_report)
     old_draft = _previous_content_focus(previous_content, enabled=bool(previous_content and (fresh_rewrite or rewrite_mode)))
     unit_rows = _unit_rows(chapter_unit_plan, limit=target_units)
@@ -174,29 +177,56 @@ def classify_quality_failure(report_data: dict[str, Any]) -> dict[str, Any]:
 def _target_units(plan: dict[str, Any], *, target_min: int, target_max: int) -> int:
     raw = int(plan.get("target_unit_count") or 0) if isinstance(plan, dict) else 0
     if raw:
-        return max(6, min(8, raw))
+        return max(5, min(6, raw))
     midpoint = (target_min + target_max) // 2
-    return max(6, min(8, round(midpoint / 560)))
+    return max(5, min(6, round(midpoint / 560)))
+
+
+NON_STORY_BLUEPRINT_MARKERS = (
+    "质检报告 #", "验收清单", "修订合同", "reading_assessment", "weak_", "score=",
+    "系统自动", "修订模式", "revision_mode", "系统修订判定", "处理强度", "置信度",
+    "意见理解规则", "禁止项", "[AUTHOR_STYLE_PROFILE]", "[/AUTHOR_STYLE_PROFILE]",
+    "[GENRE_TEMPLATE]", "[/GENRE_TEMPLATE]", "[GRAPH_CONTEXT]", "[GRAPH_CONTEXT_END]",
+    "[FEW_SHOT_STYLE]", "[FEW_SHOT_STYLE_END]", "作者风格示例", "平均句长", "平均段长",
+    "对话段比例", "高频词", "画像基线", "题材匹配", "本章是【", "风格漂移",
+    "章节骨架验收", "目标读者体验", "生成前必须", "合格章样本记忆",
+    "剧情基线", "自然网文正文约束", "短段不等于电报句", "自然语气和虚词",
+    "阅读评估重建", "阅读评估自动", "当前阅读层级", "内测", "武侠网游", "游戏里",
+    "同步要抽取", "现实身体", "按比例同步", "他一边在现实里", "每强一分",
+    "家里濒倒的小武馆",
+)
 
 
 def _select_beats(text: str, *, limit: int) -> list[str]:
-    blocked = (
-        "质检报告 #",
-        "验收清单",
-        "修订合同",
-        "reading_assessment",
-        "weak_",
-        "score=",
-        "系统自动",
-        "修订模式",
-        "revision_mode",
-        "系统修订判定",
-        "处理强度",
-        "置信度",
-        "意见理解规则",
-        "禁止项",
+    clean = _strip_non_story_blocks(text)
+    return _select_lines(clean, limit=limit, max_chars=130, blocked=NON_STORY_BLUEPRINT_MARKERS)
+
+
+def _strip_non_story_blocks(text: str) -> str:
+    pairs = (
+        ("[AUTHOR_STYLE_PROFILE]", "[/AUTHOR_STYLE_PROFILE]"),
+        ("[GENRE_TEMPLATE]", "[/GENRE_TEMPLATE]"),
+        ("[GRAPH_CONTEXT]", "[GRAPH_CONTEXT_END]"),
+        ("[FEW_SHOT_STYLE]", "[FEW_SHOT_STYLE_END]"),
     )
-    return _select_lines(text, limit=limit, max_chars=130, blocked=blocked)
+    cleaned = str(text or "")
+    for start, end in pairs:
+        cleaned = re.sub(rf"\n?{re.escape(start)}.*?{re.escape(end)}\n?", "\n", cleaned, flags=re.S)
+    cleaned = _drop_prefixed_story_baseline(cleaned)
+    return cleaned
+
+
+def _drop_prefixed_story_baseline(text: str) -> str:
+    # Story baseline is book-level memory. Feeding it as chapter beats makes the
+    # writer explain premise instead of executing the current scene.
+    prefixes = ("剧情基线", "自然网文正文约束", "短段不等于电报句", "自然语气和虚词", "阅读评估重建", "阅读评估自动")
+    rows = []
+    for line in str(text or "").splitlines():
+        compact = line.strip()
+        if any(compact.startswith(prefix) or compact.startswith(f"【{prefix}") for prefix in prefixes):
+            continue
+        rows.append(line)
+    return "\n".join(rows)
 
 
 def _select_constraints(text: str, *, limit: int) -> list[str]:
@@ -225,6 +255,12 @@ def _select_preferences(author_preferences: str, standard: dict[str, Any], *, li
 
 def _style_contract_rows(contract: dict[str, Any], *, limit: int) -> list[str]:
     rows: list[str] = []
+    reference_craft = str(contract.get("reference_craft_block") or "").strip()
+    if reference_craft:
+        craft_rows = _reference_craft_contract_rows(reference_craft, max_rows=14, max_chars=180)
+        if craft_rows:
+            rows.append("【范文技法卡】")
+            rows.extend(craft_rows)
     profile = str(contract.get("aesthetic_profile") or "").strip()
     if profile:
         rows.append("【作品审美画像】")
@@ -249,6 +285,49 @@ def _style_contract_rows(contract: dict[str, Any], *, limit: int) -> list[str]:
         rows.append("命名治理")
         rows.extend(_contract_block_rows(naming, max_rows=3, max_chars=160))
     return list(dict.fromkeys(item for item in rows if item))[:limit]
+
+
+def _reference_craft_contract_rows(text: str, *, max_rows: int, max_chars: int) -> list[str]:
+    craft_rows = []
+    relation_rows = []
+    in_relation = False
+    for line in str(text or "").splitlines():
+        compact = line.strip()
+        if not compact or compact.startswith("【"):
+            if "句子关系范式卡结束" in compact:
+                relation_rows.append(compact)
+                in_relation = False
+            elif "句子关系范式卡" in compact:
+                in_relation = True
+                relation_rows.append(_one_line(compact, max_chars))
+            continue
+        if compact.startswith("执行："):
+            craft_rows.append(_one_line(compact, max_chars))
+            continue
+        compact = re.sub(r"^[-*]\s*", "", compact)
+        is_relation_row = in_relation or any(
+            marker in compact
+            for marker in (
+                "当前场景判断", "硬规则", "当前优先关系", "当前感官链", "可用关系模板",
+                "先判关系类型", "感官句优先补完整链条", "可共存不等于可合成", "比喻两端必须同域",
+                "漂亮句先过搭配关", "环境/感官", "动作反应", "心理链", "对白声线",
+                "气味：", "声音：", "触感：", "光影：", "source", "reaction",
+            )
+        )
+        is_craft_row = any(
+            marker in compact
+            for marker in (
+                "场景描绘", "心理链", "修辞用词", "人物声音", "节奏留白", "因果钩子", "动作反应链",
+            )
+        )
+        if is_relation_row:
+            relation_rows.append(_one_line(compact, max_chars))
+        elif is_craft_row:
+            craft_rows.append(_one_line(compact, max_chars))
+    craft_limit = min(6, max_rows)
+    relation_limit = max(0, max_rows - craft_limit)
+    rows = craft_rows[:craft_limit] + relation_rows[:relation_limit]
+    return list(dict.fromkeys(rows))[:max_rows]
 
 
 def _contract_block_rows(text: str, *, max_rows: int, max_chars: int) -> list[str]:
@@ -303,11 +382,18 @@ def _unit_rows(plan: dict[str, Any], *, limit: int) -> list[str]:
             continue
         rows.append(
             _one_line(
-                f"{item.get('role')}:目标={item.get('goal')}；阻碍={item.get('obstacle')}；动作={item.get('action')}；承接={item.get('handoff')}",
+                f"{item.get('role')}:目标={_strip_unit_meta(item.get('goal'))}；阻碍={_strip_unit_meta(item.get('obstacle'))}；动作={_strip_unit_meta(item.get('action'))}；承接={_strip_unit_meta(item.get('handoff'))}",
                 180,
             )
         )
     return rows
+
+
+def _strip_unit_meta(value: Any) -> str:
+    text = _one_line(str(value or ""), 140)
+    if any(marker in text for marker in NON_STORY_BLUEPRINT_MARKERS):
+        return "按本单元角色推进具体场景"
+    return text
 
 
 def _select_lines(text: str, *, limit: int, max_chars: int, blocked: tuple[str, ...]) -> list[str]:
@@ -330,8 +416,11 @@ def _split(text: str) -> list[str]:
 def _first_useful(values: list[str], max_chars: int) -> str:
     for value in values:
         for item in _split(value):
-            if len(item) >= 4 and not any(marker in item for marker in ("质检", "系统自动", "修订合同")):
-                return _one_line(item, max_chars)
+            if len(item) < 4:
+                continue
+            if any(marker in item for marker in (*NON_STORY_BLUEPRINT_MARKERS, "质检", "系统自动", "修订合同")):
+                continue
+            return _one_line(item, max_chars)
     return ""
 
 

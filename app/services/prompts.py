@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,15 +15,176 @@ HUMANIZED_UNIT_BLOCK = humanized_unit_method_text()
 HUMANIZED_REVISION_BLOCK = humanized_revision_method_text()
 
 
+# 2026-07-22 新增：筛选版范式库 few-shot 正例注入
+#   数据源：writing_paradigm_curated.json（25章真爆款白名单·凡骨/十日终焉/我在精神病院学斩神/我不是戏神/诸神愚戏）
+#   目的：与其堆禁令告诉模型"别写成AI"，不如直接甩真爆款原文让它模仿质感。
+_CURATED_PARADIGM_PATH = Path(__file__).resolve().parents[2] / "reference_corpus" / "writing_paradigm_curated.json"
+
+
+def _load_curated_exemplars() -> str:
+    """读筛选版范式库·格式化成 few-shot 正例块。文件缺失时返回空串（优雅降级）。"""
+    try:
+        data = json.loads(_CURATED_PARADIGM_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return ""
+    lines: list[str] = []
+    books = data.get("meta", {}).get("whitelist_books", [])
+    lines.append(
+        "【真爆款范文·质感参照 · 必读】\n"
+        f"以下是番茄/起点验证过的头部作品（{('、'.join(books))}）的真实原文片段。\n"
+        "它们是你要模仿的\"质感基准\"——不是让你抄情节，而是让你写出这种：\n"
+        "画面能被读者看见、情绪落在具体身体动作上、对白有声线、叙述不堆标签。\n"
+        "对照这些正文，检查你自己的每一段是否达到同样的现场感。\n"
+    )
+    dim_labels = {
+        "opening_hook": "开篇钩子（怎么第一句就把读者拽进现场）",
+        "emotion_grounding": "情绪落地（情绪长在身体动作/细节上，不是'他很紧张'）",
+        "protagonist_inner_voice": "主角内心声线（自然、有个性，不是分析腔）",
+        "character_voice": "配角声线（带身份、欲望、旧怨）",
+        "setting_delivery": "设定交付（设定嵌进事件，不是百科式铺陈）",
+        "rhythm_and_restraint": "节奏与留白（张弛有度，不是每句一段的碎句流）",
+    }
+    micro = data.get("micro", {})
+    for dim, label in dim_labels.items():
+        anchors = micro.get(dim, {}).get("best_anchors", [])[:3]
+        if not anchors:
+            continue
+        lines.append(f"\n▸ {label}：")
+        for a in anchors:
+            lines.append(f"   · {a}")
+    # 剧情因果/钩子
+    pm = data.get("plot_mechanics", {}).get("best_anchors", [])[:3]
+    if pm:
+        lines.append("\n▸ 剧情推进与章末钩子（事件环环相扣·结尾留具体悬念）：")
+        for a in pm:
+            lines.append(f"   · {a}")
+    return "\n".join(lines)
+
+
+PARADIGM_EXEMPLARS_BLOCK = _load_curated_exemplars()
+
+
+# 2026-07-29 新增：题材匹配·整段原文范文注入（去 AI 味核心）
+#   数据源：writing_style_refs.json（对标书前几章真实正文·整段血肉，非碎锚点句）
+#   与 PARADIGM_EXEMPLARS_BLOCK 的区别：那个是全局通用碎句，这个是按题材匹配的【整段原文】，
+#   让模型直接照着对标书的文风/桥段质感/叙事节奏写，而不是照转写后的规则条文写。
+_STYLE_REFS_PATH = Path(__file__).resolve().parents[2] / "reference_corpus" / "writing_style_refs.json"
+
+
+def _load_style_refs() -> tuple[list[str], list[dict]]:
+    """读题材范文库·返回 (genre_tags, exemplars)。文件缺失时返回空（优雅降级）。"""
+    try:
+        data = json.loads(_STYLE_REFS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return [], []
+    tags = data.get("meta", {}).get("genre_tags", []) or []
+    exemplars = data.get("exemplars", []) or []
+    return tags, exemplars
+
+
+_STYLE_REF_TAGS, _STYLE_REF_EXEMPLARS = _load_style_refs()
+
+
+def style_refs_block_for_genre(genre: str | None) -> str:
+    """按题材返回整段原文范文块。题材不匹配或无范文时返回空串。
+
+    只在题材命中 genre_tags 时注入，避免给不相关题材喂错味儿。"""
+    if not _STYLE_REF_EXEMPLARS:
+        return ""
+    g = (genre or "").strip()
+    if not g:
+        return ""
+    if not any(tag in g or g in tag for tag in _STYLE_REF_TAGS):
+        return ""
+    src = "、".join(
+        json.loads(_STYLE_REFS_PATH.read_text(encoding="utf-8")).get("meta", {}).get("source_books", [])
+    ) if _STYLE_REFS_PATH.exists() else ""
+    lines = [
+        "【同题材爆款·整段原文范文 · 照这个味儿写】",
+        f"下面是与本作同题材的头部网文（{src}）前几章的**真实原文整段**。",
+        "这是你要模仿的“味儿”基准——不是抄情节，是学它的：",
+        "内心声线怎么像活人吐槽（而不是分析腔）、系统提示怎么带调侃、",
+        "穷困开局怎么写得真实不悬浮（具体的钱/干粮/借贷，不是抽象的“艰难”）、",
+        "配角怎么各有腔调、设定怎么嵌进事件自然交付。",
+        "对照这些原文，让你写的每一段都有同样的现场感和网感，去掉书面 AI 腔。",
+    ]
+    for ex in _STYLE_REF_EXEMPLARS:
+        lines.append(f"\n▸ {ex.get('dim', '')}")
+        why = ex.get("why", "")
+        if why:
+            lines.append(f"  （看点：{why}）")
+        lines.append("  ——原文——")
+        for para in str(ex.get("text", "")).split("\n"):
+            if para.strip():
+                lines.append(f"  {para}")
+    return "\n".join(lines)
+
+
+# 2026-07-16 新增：章节标题吸睛规范
+# 2026-07-19 v2 更新：基于番茄爆款 17000+ 章标题量化统计重写
+#   - 数据源：凡骨(4024章·72分) / 网游武侠金色词条(952章·66分) / 校园洪荒(70分)
+#   - 核心发现：8-12 字·双句式 99.7% · 老版 12-16 字太长
+# 问题：过去 LLM 生成的标题多是"试探""代价""七天""铁指环"这类抽象/空洞的词，
+# 番茄目录页里读者划过时完全没有点击欲望。
+# 规范强制标题必须带戏眼+口语+反差，模仿网文头部作品的钩子风格。
+TITLE_STYLE_BLOCK = """【章节标题硬要求 · 必须每章遵守 · 数据基于番茄 17000+ 章爆款统计】
+标题决定读者在番茄目录页要不要点进来。垃圾标题 = 0 点击 = 0 收益。
+
+★ 铁律 1【字数】：**8-12 字**（不含"第N章 "前缀），11 字最佳，禁止 >13 字。
+   数据来源：凡骨均值 11.8 字·金色词条均值 9.7 字·校园洪荒均值 8.7 字。
+
+★ 铁律 2【句式 · 二选一】：
+   A. **双句式**（推荐 · 占爆款 99.7%）
+      - 前 3-5 字：场景/物件/事件锚点
+      - 中间用「，」隔开
+      - 后 4-6 字：主角反应/悬念/反差
+      - 例：「送趟镖，他让我别打开」「他考我，我瞄他鞋底红泥」「思过崖一夜，起手式全错」
+   B. **单句+情绪符**（?！...）
+      - 主角内心吐槽 / 悬念钩子
+      - 例：「谁在查我」「这买卖有点亏」「走路都收不住」
+
+★ 铁律 3【禁用】：
+   ✗ 纯名词罗列：「规则惩罚」「纯阳导引术」「矿工装备」「代价」
+   ✗ 抽象概念：「宿命」「因果」「机缘」「试探」「秘密」「决断」
+   ✗ 系统腔/游戏腔：「任务奖励」「等级提升」「版本更新」
+   ✗ 剧透关键钩子：不要在标题里把本章高潮点说破，保留悬念
+
+★ 铁律 4【本书特调 · 武侠+网游+主角吐槽】：
+   - 主角林北是大三计算机系学生·意外把游戏武功带进现实
+   - 60% 双句式（武侠场景钩子）+ 40% 单句情绪型（口语吐槽）
+   - 反差感优先：现实/游戏、稳/慌、装/怕 之间的对比
+
+★ 铁律 5【同书查重】：不能和本书前面任何章节标题重复或高度相似（番茄 API 返回 -3011 拒收）。
+
+✅ 好例子（Ch29-49 定稿·参照）：
+- 第29章 念错一字，老乞丐差点杀我
+- 第32章 这趟镖，送的是我自己
+- 第39章 刚入内门，先挨一顿毒打
+- 第41章 他考我，我瞄他鞋底红泥
+- 第42章 挖矿时，师兄把我底裤套穿
+- 第48章 数据流小陈，锁定我了
+- 第49章 巷子里，他识破我像NPC
+
+❌ 坏例子（不要这么写 · 都是被 revise 掉的老标题）：
+- 第14章 规则惩罚          ← 纯名词 · 空洞
+- 第21章 纯阳导引术        ← 功法名 · 无戏眼
+- 第24章 饭钱三十两        ← 信息量不够
+- 第30章 顾剑棠的代价      ← "代价"是禁用词
+- 第38章 两个道士抱拳，像复制粘贴  ← 14 字超长
+"""
+
+
 DRAFT_CHAPTER_TEMPLATE = """你正在为 Python 小说生产系统生成章节草稿。
 
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，章节标题
+- title: 字符串，章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，章节正文草稿
 - self_check: 字符串数组，说明你如何遵守约束
 - used_brief_points: 字符串数组，列出使用了哪些 brief 点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -58,10 +222,12 @@ DRAFT_CHAPTER_TEMPLATE_V2 = """你正在为 Python 小说生产系统生成章�
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，章节标题
+- title: 字符串，章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，章节正文草稿
 - self_check: 字符串数组，说明你如何遵守约束、证据和章节 brief
 - used_brief_points: 字符串数组，列出使用了哪些 brief 点和证据点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -105,10 +271,12 @@ DRAFT_CHAPTER_TEMPLATE_V3 = """你正在为 Python 小说生产系统生成章�
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，章节标题
+- title: 字符串，章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，章节正文草稿
 - self_check: 字符串数组，说明你如何遵守约束、证据、Canon 和章节 brief
 - used_brief_points: 字符串数组，列出使用了哪些 brief 点、证据点和 Canon 点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -157,10 +325,12 @@ DRAFT_CHAPTER_TEMPLATE_V4 = """你是成熟的男频网文作者，不是表格�
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，章节标题
+- title: 字符串，章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，章节正文草稿
 - self_check: 字符串数组，简短说明你如何处理小单元衔接、人物、冲突、钩子和约束
 - used_brief_points: 字符串数组，列出真正进入正文的 brief / Canon 点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -202,7 +372,7 @@ Canon 长期设定：
 {HUMANIZED_PROCESS_BLOCK}
 - 小单元写作法：
 {HUMANIZED_UNIT_BLOCK}
-- 生成正文前，先在内部把本章拆成 6-9 个 300-500 字小单元：每个单元必须有小目标、阻碍、人物反应、信息增量和局面变化。
+- 生成正文前，先在内部把本章拆成 5-6 个 330-430 字小单元：每个单元必须有小目标、阻碍、人物反应、信息增量和局面变化。
 - 每个小单元都必须承接上一个单元的动作后果；不要跳成剧情梗概，不要只扩写设定说明。
 - 正文里不要标“单元一/单元二”，这些只是内部创作节奏。
 - 先让读者进入一个具体处境，再自然交代设定；开篇可以从人物欲望、关系张力、异常细节、利益交换、行动后果或悬念切入，不要开篇像百科、设定集或系统说明。
@@ -213,13 +383,15 @@ Canon 长期设定：
 - 新出现的地名、组织名、物件名和秘术名必须像作者精心设计过：至少让读者看到来源、外观、功能、利益关系或代价中的两项；不要一章内堆一串没有锚点的专名。
 - 每个主要场景必须能被读者画出来：人物站位、光源、空间边界、关键物件和动作轨迹要稳定，不要只写抽象压力和口头信息。
 - 语言必须像中文作者现场写出的小说正文，避免英译中式逻辑标签、分析腔和生硬直译句；不要用“普通解释是/证据推翻是/不是因为而是”这类标签替代叙事。
+- 禁止“不是X的。是Y的。”这类三段式否定断句作为节奏工具（如“不是吓的。是饿的。”“不是累的。是气的。”）。这是机械 AI 味重灾区，全书已滥用；同一章最多出现一次，且不得用在开篇前三段。改用正常的、有画面的叙述句。
+- 开篇多样性硬约束：本章开场不得复用最近数章的第一动作/第一场景/第一情绪。特别禁止连续章节都以“主角退出游戏舱/从舱里爬出来/睁眼醒来/被室友摇醒/手还在抖”这类现实切换套路开场；游戏内进行时、对话中途、他人视角、环境突变、一件具体物件或一句关键台词都是更好的切入口。
 - 人物对白要有声线和性格：主角的说话方式要贴合本书设定与当下处境，配角说话要带身份、顾虑、威胁、欲望或旧怨。不要让所有人都惜字如金、只说功能词。
 - 主角可以困惑、迟疑、误判，警觉应随着证据增加而升级，不要一开始就像知道全部危险。
 - 爽点来自“发现-试探-代价-更大麻烦”，不要用口号式独白替代情节推进。
 - 语言要像人在现场经历事情，少用冰冷总结句，避免“必须现在就做”这类突兀宣言。
 - 每章可以少量交代世界和体系，但必须嵌进人物正在经历的事件里。
 - 章末留下具体的新危险、新发现或新疑问。
-- 如果 brief 要求 3000-4500 中文字符，正文不要低于 3000 中文字符；不要用自检内容凑正文长度。self_check 控制在 3-5 条，优先把 token 用在正文。
+- 硬字数约束：正文 1800-2500 中文字符，绝对上限 2800；超过视为膨胀失败。self_check 控制在 3-5 条，优先把 token 用在正文。
 - self_check 必须至少说明：采用了哪类开篇策略、小单元如何连续推进、人物反应链如何递进、章末钩子如何由本章行动导致。
 
 禁止：
@@ -237,10 +409,12 @@ REVISE_CHAPTER_TEMPLATE_V1 = """你正在为 Python 小说生产系统修订章�
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，修订后章节标题
+- title: 字符串，修订后章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，修订后章节正文草稿
 - self_check: 字符串数组，说明你如何修复质量问题、遵守 Canon 和保留章节目标
 - used_brief_points: 字符串数组，列出使用了哪些 revision brief、质量报告和 Canon 点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -294,10 +468,12 @@ REVISE_CHAPTER_TEMPLATE_V2 = """你是负责重写章节的网文作者兼主编
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，修订后章节标题
+- title: 字符串，修订后章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，修订后章节正文草稿
 - self_check: 字符串数组，说明你如何回应最新修订方向、质量问题和 Canon
 - used_brief_points: 字符串数组，列出真正进入正文的修订点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -381,10 +557,12 @@ REVISE_CHAPTER_TEMPLATE_V4 = """你是负责结构性重写章节的男频网文
 请严格输出 JSON 对象，不要 Markdown，不要代码块，不要额外解释。
 
 JSON 字段：
-- title: 字符串，重写后章节标题
+- title: 字符串，重写后章节标题（**必须严格按下方【章节标题硬要求】生成**）
 - content: 字符串，重写后章节正文草稿
 - self_check: 字符串数组，逐条说明你如何回应小单元衔接、重写合同、最新生产骨架和 Canon
 - used_brief_points: 字符串数组，列出真正进入正文的重写点
+
+{TITLE_STYLE_BLOCK}
 
 作品：{book_title}
 题材：{genre}
@@ -436,7 +614,7 @@ Canon 长期设定：
 {HUMANIZED_PROCESS_BLOCK}
 - 小单元写作法：
 {HUMANIZED_UNIT_BLOCK}
-- 重写前，先在内部把本章拆成 6-9 个 300-500 字小单元：每个单元必须有小目标、阻碍、人物反应、信息增量和局面变化。
+- 重写前，先在内部把本章拆成 5-6 个 330-430 字小单元：每个单元必须有小目标、阻碍、人物反应、信息增量和局面变化。
 - 每个小单元都必须承接上一个单元的动作后果；不要跳成剧情梗概，不要只扩写设定说明。
 - 修订方向处理法：
 {HUMANIZED_REVISION_BLOCK}
@@ -451,13 +629,15 @@ Canon 长期设定：
 - 重写前先低成本比较 2-3 个开篇/章末组合，只把最适合读者承诺的一版扩写成正文。
 - 主角必须主动做选择，并让收益、代价、后果都在正文里可见。
 - 设定只能通过动作、对话、异常、误判、后果呈现，不要说明书式解释。
+- 网游/游戏入江湖题材的认知边界是硬约束：进入游戏内门派、山门、拜师、盘问、试炼等世界内现场后，正文和对白不得出现“内测”“论坛”“玩家”“NPC”“新手村”“任务栏”“任务面板”“系统分配我来的”“系统不会给你第二家门派”等元游戏解释；必须改用山门规矩、木牌/拜帖/衣着误判、道士怀疑、人物试探、可见物证和江湖话推进。
+- 系统提示/界面/任务面板只能在现实侧或主角独处的感知层极少量出现，不能替代人物行动、不能被世界内人物理解或接话，不能出现在盘问/拜师现场的对话逻辑里。
 - 去AI味儿是本轮重写硬标准：保留必要剧情事实，但必须消除临时设定感、抽象场景、翻译腔和功能化对白。
 - 专名、场景和关键物件必须有设计锚点：名字为什么这么叫、谁在乎它、外观有什么可记忆点、它如何改变局面，至少落实其中两项。
 - 读者闭眼应能想出本章主要画面；如果一个场景无法被画成分镜，重写空间、光源、人物站位和物件动作。
 - 修订语言时必须消除英译中感和分析腔：把逻辑标签改成具体动作、感官、误判和即时反应。
 - 重写对白时必须保留人物性格和声线，不要只给一两个字的答复；每句关键对白至少带出立场、情绪、试探、威胁或信息增量中的一项。
 - 章末必须留下具体危险、发现、转折或未解决压力。
-- 如果 brief 要求 3000-4500 中文字符，正文不要低于 3000 中文字符；不要用自检内容凑正文长度。self_check 控制在 3-5 条，优先把 token 用在正文。
+- 硬字数约束：正文 1800-2500 中文字符，绝对上限 2800；超过视为膨胀失败。self_check 控制在 3-5 条，优先把 token 用在正文。
 - self_check 必须说明“采用了哪类开篇策略”“小单元如何连续推进”“人物反应链如何递进”“哪些旧稿结构被替换”，不允许只写“已优化”。
 
 禁止：
@@ -579,6 +759,131 @@ Canon 长期设定：
 """
 
 
+# 2026-08-20 升级 v3.0: 合理评审 / 舒适评审 / 基础评审
+# 改造背景: v2.0 单 LLM 调, 抓不到"合理+舒适"双维度. v3.0 拆 3 个独立评审, 注入
+# WRITING_STANDARD.md v3.0 硬指标 (A段合理9条 + B段舒适10条 + C段基础4块).
+# 评审产物: logic_review / comfort_review / base_review 写入 report_data,
+# 总分 = (合理×0.45) + (舒适×0.45) + (基础×0.10), 任意条款 = 0 触发 hard_issue.
+# 关键升级: 旧合理-1~9 是"动作触发/认知来源/动机/时序"等抽象规则, 新版是"视觉光源/认知拍/动作链时序/单句新概念/5感收尾钩/动作心理同步/1:1对话/无闲笔/时间锚点"等具体可检条款.
+STYLE_REVIEW_LOGIC_TEMPLATE_V1 = """你是网文主编"合理性专员", 专门审章节的"合理"维度 — 9 条硬指标 (v3.0 升级版), 是否被章节满足. 每条 0 或 1 二元评, 必须在正文中找证据.
+
+【合理性 9 条硬指标 (引自 WRITING_STANDARD.md v3.0 A 段)】
+
+**【合理-1】视觉光源**: 任何视觉描写 (看见 X) 必须前 30 字内交代光源 (灯/月光/路光/手机屏/雪光/火光). 缺光源 = 0
+**【合理-2】认知拍**: 主角异常 (穿越/重生/失忆/被骗/头盔坏) 后 30-100 字内必须有"哦原来如此"的认知拍. 缺认知拍 = 0
+**【合理-3】动作链时序**: 物理动作链必须按真实时序写, 不能颠倒/插叙/跳. 例: 砸地→滚→撞树桩, 顺序错 = 0
+**【合理-4】单句新概念**: 单句新概念 (读者从未见过的名词) ≤3 个. 超过 4 个 = 0
+**【合理-5】5感收尾钩**: 5 感环境段必须有一个"即将打破"的钩子 (声/动作/光), 接到下段主角动作. 没钩子硬切 = 0
+**【合理-6】动作心理同步**: 主角紧张/害怕/焦虑时, 动作+心理必须同步. 动作不对应当前心理 = 0
+**【合理-7】1:1 对话**: 对话必须 1 句问 1 句答 1:1 对应. 老人/旁白跳过主角已说的话, 或替主角说主角没说的话 = 0
+**【合理-8】无闲笔**: 细节必须跟主线挂钩. 闲笔 (指纹/头发/装饰等与验机/生存/目标不相关) 占比 >5% = 0
+**【合理-9】时间锚点**: 时间必须明确 (年月日/时/分/段). "后半夜"含糊或前后矛盾 = 0
+
+【你的任务】
+对每一条款, 在正文中找证据 (引原文 1-2 句), 评 0 或 1 分:
+- 0: 该条在正文中被违反 (有反例证据)
+- 1: 该条在正文中被满足 (有正例证据)
+
+【输出格式 - 极严, 只输出 JSON】
+{{
+  "logic_score": <0-9 整数, 9 条中满足的条数>,
+  "logic_passed": <true/false, ≥6 条通过即 true>,
+  "logic_evidence": {{
+    "【合理-1】": {{"score": 0/1, "evidence": "原文引用"}},
+    "【合理-2】": {{"score": 0/1, "evidence": "原文引用"}},
+    ...
+    "【合理-9】": {{"score": 0/1, "evidence": "原文引用"}}
+  }},
+  "logic_hard_issues": [列出 score=0 的条款名, e.g. "【合理-4】单句新概念"]
+}}
+
+【章节正文】
+{chapter_content}
+
+【规则质检报告参考】
+{rule_report}
+
+直接输出 JSON:"""
+
+
+STYLE_REVIEW_COMFORT_TEMPLATE_V1 = """你是网文主编"文字感专员", 专门审章节的"读着舒服"维度 — 10 条硬指标 (v3.0 升级版), 是否被章节满足. 每条 0 或 1 二元评, 必须在正文中找证据.
+
+【舒适度 10 条硬指标 (引自 WRITING_STANDARD.md v3.0 B 段)】
+
+**【舒适-1】心理密度**: 主角内心独白密度 ≥1 句/300 字, 用主角口吻不用文艺腔. < 1 句/300 字 = 0
+**【舒适-2】排比 ≤3 句**: 排比 ≤3 句, 超过 3 句 = 0
+**【舒适-3】紧张时短句**: 主角紧张时, 句子 ≤10 字, 不用排比, 情绪单一. 笑+狠混搭 = 0
+**【舒适-4】口语化**: 心理活动用口语不用书面词 (例: "叫不上价" → "不值钱"). 出现书面词 = 0
+**【舒适-5】具体物**: 任何抽象描写 (墙/地/光/味) 必须给具体物 (石灰墙/碎石地/油灯光/铁锈土腥). 抽象无具象 = 0
+**【舒适-6】禁旁白**: 网文禁旁白腔. "世界不打算跟他解释" / 叙述者抒情 出现 = 0
+**【舒适-7】情绪单一**: 紧张时不抒情不幽默, 抒情时不突兀. 矛盾混搭 = 0
+**【舒适-8】拟人 ≤2 句**: 修辞拟人 (山影伏着/世界不打算/墙吸热) ≤2 句, 超过 3 句 = 0
+**【舒适-9】禁通感**: 通感 (跨色/跨感官) 禁. 例: "血像雪" 跨色 / "苦香熏眼" 跨感官. 出现 = 0
+**【舒适-10】段间钩子**: 段间收尾必须是钩子 (声/动作/光/心理). "做完这些" 等跳段 = 0
+
+【你的任务】
+对每一条款, 在正文中找证据 (引原文 1-2 句), 评 0 或 1 分:
+- 0: 该条在正文中被违反 (有反例证据)
+- 1: 该条在正文中被满足 (有正例证据)
+
+【输出格式 - 极严, 只输出 JSON】
+{{
+  "comfort_score": <0-10 整数, 10 条中满足的条数>,
+  "comfort_passed": <true/false, ≥7 条通过即 true>,
+  "comfort_evidence": {{
+    "【舒适-1】": {{"score": 0/1, "evidence": "原文引用"}},
+    "【舒适-2】": {{"score": 0/1, "evidence": "原文引用"}},
+    ...
+    "【舒适-10】": {{"score": 0/1, "evidence": "原文引用"}}
+  }},
+  "comfort_hard_issues": [列出 score=0 的条款名]
+}}
+
+【章节正文】
+{chapter_content}
+
+【规则质检报告参考】
+{rule_report}
+
+直接输出 JSON:"""
+
+
+STYLE_REVIEW_BASE_TEMPLATE_V1 = """你是网文主编"基础节奏专员", 专门审章节的"基础"维度 — 4 块硬指标 (v3.0 保留), 是否被章节规避. 每块 0 或 1 二元评, 必须在正文中找证据.
+
+【基础 4 块硬指标 (引自 WRITING_STANDARD.md v3.0 C 段)】
+
+**【C-1】开篇节奏 (前 500 字)**: 100 字内时空+主角双锚定, 300 字内异常信号, 单段 ≤3 行, 短句 ≤15 字
+**【C-2】人物对白**: 第一句对白 ≤600 字, 单句 ≤25 字必带三功能 (抛设定/立人设/逼行动), 禁纯寒暄
+**【C-3】钩子与悬念**: 600 字内埋 ≥1 个"不解释"异常, 章末 20 字内收新事件/对话/动作
+**【C-4】死亡陷阱**: 禁世界观铺陈 >100 字/反问"我在做梦？" ≥3 次/3 个有名有姓同时出场/旁白直判人设/失恋抒情 >2 句/纯台词接龙 ≥3 句/闹钟+照镜子+梦境三件套
+
+【你的任务】
+对每一块, 在正文中找证据 (引原文 1-2 句), 评 0 或 1 分:
+- 0: 该块在正文中被违反
+- 1: 该块在正文中被满足
+
+【输出格式 - 极严, 只输出 JSON】
+{{
+  "base_score": <0-4 整数, 4 块中满足的块数>,
+  "base_passed": <true/false, ≥3 块通过即 true>,
+  "base_evidence": {{
+    "【C-1】开篇节奏": {{"score": 0/1, "evidence": "原文引用"}},
+    "【C-2】人物对白": {{"score": 0/1, "evidence": "原文引用"}},
+    "【C-3】钩子与悬念": {{"score": 0/1, "evidence": "原文引用"}},
+    "【C-4】死亡陷阱": {{"score": 0/1, "evidence": "原文引用"}}
+  }},
+  "base_hard_issues": [列出 score=0 的块名]
+}}
+
+【章节正文】
+{chapter_content}
+
+【规则质检报告参考】
+{rule_report}
+
+直接输出 JSON:"""
+
+
 def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
     templates: list[PromptTemplate] = []
     for version, body in (
@@ -586,6 +891,8 @@ def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
         ("v2", DRAFT_CHAPTER_TEMPLATE_V2),
         ("v3", DRAFT_CHAPTER_TEMPLATE_V3),
         ("v4", DRAFT_CHAPTER_TEMPLATE_V4),
+        ("v5", DRAFT_CHAPTER_TEMPLATE_V4),
+        ("v6", DRAFT_CHAPTER_TEMPLATE_V4),
     ):
         existing = session.scalar(
             select(PromptTemplate).where(
@@ -612,6 +919,7 @@ def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
         ("v2", REVISE_CHAPTER_TEMPLATE_V2),
         ("v3", REVISE_CHAPTER_TEMPLATE_V3),
         ("v4", REVISE_CHAPTER_TEMPLATE_V4),
+        ("v5", REVISE_CHAPTER_TEMPLATE_V4),
     ):
         existing_revision = session.scalar(
             select(PromptTemplate).where(
@@ -657,6 +965,32 @@ def seed_prompt_templates(session: Session) -> list[PromptTemplate]:
         )
         session.add(review_template)
         templates.append(review_template)
+    # 2026-08-19 新增: 合理/舒适/基础 三评审模板
+    for template_name, version, body in (
+        ("style_review_logic", "v1", STYLE_REVIEW_LOGIC_TEMPLATE_V1),
+        ("style_review_comfort", "v1", STYLE_REVIEW_COMFORT_TEMPLATE_V1),
+        ("style_review_base", "v1", STYLE_REVIEW_BASE_TEMPLATE_V1),
+    ):
+        existing_style = session.scalar(
+            select(PromptTemplate).where(
+                PromptTemplate.name == template_name,
+                PromptTemplate.version == version,
+            )
+        )
+        if existing_style:
+            if existing_style.template != body:
+                existing_style.template = body
+                existing_style.status = "active"
+            templates.append(existing_style)
+            continue
+        style_template = PromptTemplate(
+            name=template_name,
+            version=version,
+            template=body,
+            status="active",
+        )
+        session.add(style_template)
+        templates.append(style_template)
     session.flush()
     return templates
 
@@ -679,4 +1013,6 @@ def render_template(template: PromptTemplate, **values: object) -> str:
     safe_values.setdefault("HUMANIZED_PROCESS_BLOCK", HUMANIZED_PROCESS_BLOCK)
     safe_values.setdefault("HUMANIZED_UNIT_BLOCK", HUMANIZED_UNIT_BLOCK)
     safe_values.setdefault("HUMANIZED_REVISION_BLOCK", HUMANIZED_REVISION_BLOCK)
+    safe_values.setdefault("PARADIGM_EXEMPLARS_BLOCK", PARADIGM_EXEMPLARS_BLOCK)
+    safe_values["TITLE_STYLE_BLOCK"] = TITLE_STYLE_BLOCK
     return template.template.format(**safe_values)

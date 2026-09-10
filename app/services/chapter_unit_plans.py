@@ -101,7 +101,7 @@ def build_chapter_unit_plan_payload(
     beats = _split_beats(required_beats)
     if not beats:
         beats = _fallback_beats(chapter_number=chapter_number, goal=goal, previous_chapter_context=previous_chapter_context)
-    unit_count = max(6, min(8, len(beats)))
+    unit_count = max(5, min(6, len(beats)))
     selected = _spread(beats, unit_count)
     units = [
         _planned_unit(
@@ -123,7 +123,7 @@ def build_chapter_unit_plan_payload(
         "mode": mode,
         "target_unit_count": unit_count,
         "target_chars_per_unit": "300-700",
-        "chapter_goal": _one_line(goal, 220),
+        "chapter_goal": _safe_chapter_goal(goal, chapter_number=chapter_number),
         "units": units,
         "pattern_memory": _compact_pattern_memory(pattern_memory),
         "aesthetic_standard": _compact_aesthetic_standard(aesthetic_standard),
@@ -254,18 +254,76 @@ def _role(index: int, total: int) -> str:
 
 
 def _split_beats(value: str) -> list[str]:
-    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = _strip_non_story_blocks(str(value or ""))
+    text = re.sub(r"\s+", " ", text.strip())
     parts = re.split(r"[；;\n]+|(?<=。)", text)
     items = [_one_line(part, 180) for part in parts if _useful_beat(part)]
     return list(dict.fromkeys(items))[:12]
+
+
+def _strip_non_story_blocks(text: str) -> str:
+    pairs = (
+        ("[AUTHOR_STYLE_PROFILE]", "[/AUTHOR_STYLE_PROFILE]"),
+        ("[GENRE_TEMPLATE]", "[/GENRE_TEMPLATE]"),
+        ("[GRAPH_CONTEXT]", "[GRAPH_CONTEXT_END]"),
+        ("[FEW_SHOT_STYLE]", "[FEW_SHOT_STYLE_END]"),
+    )
+    cleaned = text or ""
+    for start, end in pairs:
+        cleaned = re.sub(rf"\n?{re.escape(start)}.*?{re.escape(end)}\n?", "\n", cleaned, flags=re.S)
+    cleaned = _drop_prefixed_story_baseline(cleaned)
+    return cleaned
+
+
+def _drop_prefixed_story_baseline(text: str) -> str:
+    prefixes = ("剧情基线", "自然网文正文约束", "短段不等于电报句", "自然语气和虚词", "阅读评估重建", "阅读评估自动")
+    rows = []
+    for line in str(text or "").splitlines():
+        compact = line.strip()
+        if any(compact.startswith(prefix) or compact.startswith(f"【{prefix}") for prefix in prefixes):
+            continue
+        rows.append(line)
+    return "\n".join(rows)
+
+
+NON_STORY_BEAT_MARKERS = (
+    "质检报告 #", "weak_", "修订模式:", "验收方式", "禁止输出", "self_check",
+    "[AUTHOR_STYLE_PROFILE]", "[/AUTHOR_STYLE_PROFILE]", "[GENRE_TEMPLATE]", "[/GENRE_TEMPLATE]",
+    "[GRAPH_CONTEXT]", "[GRAPH_CONTEXT_END]", "[FEW_SHOT_STYLE]", "[FEW_SHOT_STYLE_END]",
+    "作者风格示例", "平均句长", "平均段长", "对话段比例", "高频词", "画像基线",
+    "题材匹配", "本章是【", "风格漂移", "范文", "金句", "合格章样本记忆",
+    "章节骨架验收", "目标读者体验", "生成前必须", "复盘避坑", "剧情基线",
+    "自然网文正文约束", "短段不等于电报句", "自然语气和虚词", "画面和因果",
+    "阅读评估重建", "阅读评估自动", "当前阅读层级", "内测", "武侠网游", "游戏里",
+    "同步要抽取", "现实身体", "按比例同步", "他一边在现实里", "每强一分",
+    "家里濒倒的小武馆",
+)
+
+
+def _safe_chapter_goal(goal: str, *, chapter_number: int) -> str:
+    text = _one_line(goal, 220)
+    if len(text) < 4 or any(marker in text for marker in NON_STORY_BEAT_MARKERS):
+        return f"第{chapter_number}章完整成章"
+    return text
 
 
 def _useful_beat(value: str) -> bool:
     text = _one_line(value, 220)
     if len(text) < 4:
         return False
-    blocked = ("质检报告 #", "weak_", "修订模式:", "验收方式", "禁止输出", "self_check")
-    return not any(marker in text for marker in blocked)
+    if any(marker in text for marker in NON_STORY_BEAT_MARKERS):
+        return False
+    # A useful beat should describe something that can happen in the chapter,
+    # not an instruction about style, metrics, or validation.
+    story_markers = (
+        "主角", "顾晚", "老道", "父亲", "周胖子", "现实", "游戏", "入梦", "清虚观",
+        "场", "发现", "进入", "登录", "下线", "遇", "拿", "救", "逃", "问", "换",
+        "阻碍", "危机", "代价", "后果", "钩子", "章末", "第一场", "第二场", "第三场",
+    )
+    instruction_only = ("必须", "禁止", "不得", "不要", "验收", "标准", "约束")
+    if any(marker in text for marker in instruction_only) and not any(marker in text for marker in story_markers):
+        return False
+    return True
 
 
 def _fallback_beats(*, chapter_number: int, goal: str, previous_chapter_context: str) -> list[str]:
@@ -297,7 +355,10 @@ def _spread(items: list[str], count: int) -> list[str]:
 def _goal_from_beat(beat: str, *, fallback: str) -> str:
     if any(marker in beat for marker in ("找到", "拿到", "救", "逃", "查", "问", "换", "进入")):
         return beat
-    return _one_line(fallback, 120) or beat
+    compact_fallback = _one_line(fallback, 120)
+    if compact_fallback and not any(marker in compact_fallback for marker in NON_STORY_BEAT_MARKERS):
+        return compact_fallback
+    return beat or "按本单元角色推进具体场景"
 
 
 def _obstacle_from_text(text: str) -> str:

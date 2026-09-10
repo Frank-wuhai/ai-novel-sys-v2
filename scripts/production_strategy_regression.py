@@ -76,7 +76,7 @@ def main() -> int:
         item = plan_chapters(session, book_id=book.id, start=2, count=1)[0]
         if item.next_action != "generate_rebuild_candidates":
             failures.append(f"planner_did_not_apply_strategy:{item.next_action}:{item.reason}")
-        if "多候选" not in item.reason:
+        if not any(marker in item.reason for marker in ("受控", "候选重建", "候选")):
             failures.append(f"strategy_reason_not_visible:{item.reason}")
 
     with session_scope() as session:
@@ -109,6 +109,54 @@ def main() -> int:
         item = plan_chapters(session, book_id=book.id, start=2, count=1)[0]
         if item.next_action != "revise_chapter":
             failures.append(f"active_budget_recovery_looped:{item.next_action}:{item.reason}")
+
+    with session_scope() as session:
+        book = Book(title="polluted restore strategy", genre="网游武侠", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="briefing")
+        session.add(chapter)
+        session.flush()
+        latest = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=1,
+            title="第一章",
+            content=(
+                "瘦高道士问：谁让你来的？顾晚把我是来参加内测的咽回去。"
+                "游戏里 NPC 不吃这套，得按规矩来。"
+            ) * 400,
+            status="needs_revision",
+            source="rebuild_candidate_incumbent_restore:v99",
+        )
+        brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="阅读评估自动修订第1章：以 v1 为底稿，把能读修到想追。",
+            required_beats="reading_assessment_auto_quality#1\n源版本锁定：v1；不得换开场、不得换主事件。",
+            constraints="revision_mode:targeted\n保留当前场景链，只做文风和对白定点修订。",
+            status="revision_ready",
+        )
+        session.add_all([latest, brief])
+        session.flush()
+        quality = QualityReport(
+            chapter_version_id=latest.id,
+            score=79,
+            passed=False,
+            report=json.dumps({"score": 79, "issues": ["prose_naturalness_blocker: 69"]}, ensure_ascii=False),
+        )
+        session.add(quality)
+        session.flush()
+        strategy = assess_production_strategy(
+            session,
+            chapter_id=chapter.id,
+            latest_version=latest,
+            latest_quality=quality,
+            revision_brief=brief,
+        )
+        if strategy.action != "generate_rebuild_candidates" or strategy.category != "restore_world_logic_blocked":
+            failures.append(f"polluted_restore_not_forced_rebuild:{strategy}")
+        item = plan_chapters(session, book_id=book.id, start=1, count=1)[0]
+        if item.next_action != "generate_rebuild_candidates":
+            failures.append(f"planner_polluted_restore_not_rebuild:{item.next_action}:{item.reason}")
 
     with session_scope() as session:
         book = Book(title="active readable restore with stale contract", genre="test", target_platform="manual")
@@ -210,6 +258,74 @@ def main() -> int:
         item = plan_chapters(session, book_id=book.id, start=2, count=1)[0]
         if item.next_action != "revise_chapter":
             failures.append(f"active_rebuild_candidate_looped:{item.next_action}:{item.reason}")
+
+    with session_scope() as session:
+        book = Book(title="retained clean rebuild candidate", genre="网游武侠", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="briefing")
+        session.add(chapter)
+        session.flush()
+        session.add(ChapterBrief(chapter_id=chapter.id, goal="第1章说明", required_beats="承接", constraints="", status="ready"))
+        revision_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="阅读评估重建第1章：以当前作品剧情承诺为准，旧稿只保留可用素材。",
+            required_beats="reading_assessment_auto_quality#2025\n当前阅读层级：结构需重建\n失败结构不得沿用。",
+            constraints="revision_mode:fresh\n禁止系统面板直接解题。",
+            status="revision_ready",
+        )
+        latest = ChapterVersion(
+            chapter_id=chapter.id,
+            version_number=27,
+            title="山门外，他让木牌替他答",
+            content=(
+                "拂尘柄抵到鼻尖前三寸，顾晚后脑勺磕在门框上。"
+                "瘦高道士问他木牌哪来，他按住枣木牌，只说茶摊老道指了路。"
+                "老道捏他肩井穴，又让他握木剑试反应。"
+                "顾晚借学医的说法换来入观机会，最后手心留下热痕。"
+            ) * 500,
+            status="needs_revision",
+            source="rebuild_candidate:2490:1",
+        )
+        session.add_all([revision_brief, latest])
+        session.flush()
+        quality = QualityReport(
+            chapter_version_id=latest.id,
+            score=68,
+            passed=False,
+            report=json.dumps(
+                {
+                    "score": 68,
+                    "passed": False,
+                    "dimensions": {
+                        "world_logic": 88,
+                        "player_layer_intrusion": 88,
+                        "quest_source_plausibility": 88,
+                        "brief_coverage": 47,
+                        "dialogue_fullness": 43,
+                        "imageable_paragraphs": 47,
+                        "prose_naturalness": 67,
+                    },
+                    "issues": ["imageable_underdeveloped: 47", "prose_naturalness_blocker: 67", "dialogue_underdeveloped: 43"],
+                    "reading_assessment": {"action": "auto_rebuild", "level": "structure_rebuild_required"},
+                },
+                ensure_ascii=False,
+            ),
+        )
+        session.add(quality)
+        session.flush()
+        strategy = assess_production_strategy(
+            session,
+            chapter_id=chapter.id,
+            latest_version=latest,
+            latest_quality=quality,
+            revision_brief=revision_brief,
+        )
+        if strategy.action:
+            failures.append(f"retained_clean_candidate_should_continue_revision_strategy:{strategy}")
+        item = plan_chapters(session, book_id=book.id, start=1, count=1)[0]
+        if item.next_action != "revise_chapter":
+            failures.append(f"retained_clean_candidate_looped_rebuild:{item.next_action}:{item.reason}")
 
     with session_scope() as session:
         book = Book(title="regressed rebuild candidate", genre="test", target_platform="manual")

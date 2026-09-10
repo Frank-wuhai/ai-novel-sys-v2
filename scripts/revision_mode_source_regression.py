@@ -36,6 +36,10 @@ def main() -> int:
         failures.append("local_patch_contract_contains_whole_chapter_checklist")
     if "必须按最小范围处理" not in local_contract:
         failures.append("local_patch_contract_missing_scope_rule")
+    if "不得只概括为整体不好" not in local_contract:
+        failures.append("local_patch_contract_missing_author_rejection_protocol")
+    if "禁止重排场景、改主线、改章末钩子" not in local_contract:
+        failures.append("local_patch_contract_missing_rejection_scope_guard")
 
     targeted_contract = build_brief_revision_contract(
         "修订模式:targeted\n保留可用结构，只重写明确不合格的段落。",
@@ -50,6 +54,8 @@ def main() -> int:
     )
     if _revision_requires_rewrite(targeted_brief):
         failures.append("targeted_rewrite_word_triggers_rewrite")
+    if "只替换明确失败的句段或场景单元" not in targeted_contract:
+        failures.append("targeted_contract_missing_author_rejection_bounds")
     targeted_with_stale_local = ChapterBrief(
         chapter_id=1,
         goal="定点修订第2章",
@@ -84,8 +90,8 @@ def main() -> int:
         max_chars=500,
         constraints=local_contract,
     )
-    if quality.dimensions.get("brief_coverage", 0) < 65:
-        failures.append("revision_contract_meta_hurts_brief_coverage")
+    if "修订合同" in quality.report or "作者驳回协议" in quality.report:
+        failures.append("revision_contract_meta_leaked_into_quality_report")
 
     heavy_brief = ChapterBrief(
         chapter_id=1,

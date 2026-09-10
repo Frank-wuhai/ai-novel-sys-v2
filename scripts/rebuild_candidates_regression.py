@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.db.session import session_scope
-from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, QualityReport, StoryArc
+from app.llm.providers import LLMResponse
+from app.llm.schemas import StructuredOutputError
+from app.models.entities import Chapter, ChapterBrief, ChapterVersion, GenerationTask, PromptTemplate, QualityReport, StoryArc
 from app.services.feedback import record_platform_feedback
 from app.services.planning import plan_chapters, run_next_action
 from app.services.production import create_book, create_foundation
+from app.services.prompts import seed_prompt_templates
 from app.services.rebuild_candidates import (
     TASK_TYPE_REBUILD_CANDIDATES,
     IncumbentDraft,
+    _author_sample_anchor_prompt_block,
+    _author_sample_anchor_rejection,
     _best_incumbent_draft,
+    _prepare_candidate_prompt,
+    _run_candidate_llm,
     _should_restore_incumbent_over_candidate,
     generate_rebuild_candidates,
 )
@@ -33,6 +40,45 @@ def main() -> int:
             protagonist_engine="主角靠观察、试探、交易和行动破局。",
             conflict_engine="冲突来自桥段误判、现实同步和江湖规矩。",
         )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS chapter_exit_states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chapter_id INTEGER,
+                    chapter_version_id INTEGER,
+                    main_character_state TEXT,
+                    relationship_delta TEXT,
+                    plot_hook TEXT,
+                    new_facts TEXT,
+                    physical_location TEXT,
+                    time_marker TEXT,
+                    raw_summary TEXT,
+                    hook_keywords TEXT
+                )
+                """
+            )
+        )
+        seed_prompt_templates(session)
+        revise_v4 = session.scalar(
+            select(PromptTemplate).where(PromptTemplate.name == "revise_chapter", PromptTemplate.version == "v4")
+        )
+        revise_v5 = session.scalar(
+            select(PromptTemplate).where(PromptTemplate.name == "revise_chapter", PromptTemplate.version == "v5")
+        )
+        if revise_v5:
+            revise_v5.template = revise_v4.template if revise_v4 else revise_v5.template
+            revise_v5.status = "active"
+        else:
+            session.add(
+                PromptTemplate(
+                    name="revise_chapter",
+                    version="v5",
+                    template=revise_v4.template if revise_v4 else "{revision_goal}\n{revision_required_beats}\n{revision_constraints}",
+                    status="active",
+                )
+            )
+        session.flush()
         arc = StoryArc(
             book_id=book.id,
             arc_number=1,
@@ -82,7 +128,7 @@ def main() -> int:
                 chapter_id=chapter.id,
                 version_number=index,
                 title=f"失败稿{index}",
-                content="旧稿内容。" * 1200,
+                content="旧稿内容。清虚观门口，道士盘问，顾晚差点说内测和NPC。" * 700,
                 status="needs_revision",
                 source="revision:regression",
             )
@@ -106,36 +152,139 @@ def main() -> int:
             )
             session.flush()
 
+        latest_source = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+        latest_quality = session.scalar(
+            select(QualityReport).where(QualityReport.chapter_version_id == latest_source.id).order_by(QualityReport.id.desc())
+        )
+        prepared_prompt = _prepare_candidate_prompt(
+            session,
+            book=book,
+            chapter=chapter,
+            chapter_number=1,
+            source_version=latest_source,
+            brief=brief,
+            quality=latest_quality,
+            foundation_premise=foundation.premise,
+            reader_promise=foundation.reader_promise,
+            template=revise_v5,
+            strategy={"name": "盘问破局", "opening": "山门盘问", "middle": "江湖话套规矩", "ending": "现实副作用"},
+        )
+        prompt_text = prepared_prompt["prompt"]
+        for marker in ("游戏内世界现场零元概念泄漏", "不得出现：内测、论坛、玩家、NPC", "系统分配我来的", "山门规矩、旧木牌/拜帖/衣着误判"):
+            if marker not in prompt_text:
+                failures.append(f"rebuild_prompt_missing_world_logic_hard_constraint:{marker}")
+
         plan = plan_chapters(session, book_id=book.id, start=1, count=1)[0]
         if plan.next_action != "generate_rebuild_candidates":
             failures.append(f"plan_not_candidate_rebuild:{plan.next_action}")
         preview = run_next_action(session, book_id=book.id, chapter_number=1, dry_run=True)
         if preview.action != "generate_rebuild_candidates" or preview.status != "preview":
             failures.append(f"preview_not_candidate_rebuild:{preview.action}:{preview.status}:{preview.message}")
+        author_anchor_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="第1章《旧盔》返修",
+            required_beats="标题：旧盔；章末保留“第二个”压力；敲门求伤药。",
+            constraints="用户作者样稿约束：旧盔、雪花、药味、伤药、第二个。",
+            status="revision_ready",
+        )
+        anchor_prompt = _author_sample_anchor_prompt_block(author_anchor_brief)
+        if "用户样稿不可漂移锚点" not in anchor_prompt or "不得出现：道观、道童" not in anchor_prompt:
+            failures.append("author_sample_anchor_prompt_missing")
+        prompt_with_anchor = "用户样稿不可漂移锚点\n" + anchor_prompt
+        valid_anchor_content = (
+            "沈渡抱着旧盔接单，屏幕里雪花乱跳，下一刻整个人摔进山里。"
+            "他抬头看见星星，胳膊上全是血，顺着药味摸到窝棚门口，"
+            "哑声求一碗伤药，说拿活抵。门后老人说：这个月你是第二个。"
+        )
+        if _author_sample_anchor_rejection(prompt_with_anchor, valid_anchor_content):
+            failures.append("author_sample_anchor_rejected_valid_content")
+        drift_content = (
+            "沈渡抱着旧盔来到清虚观，屏幕雪花之后摔进山里。"
+            "道童捡起铁牌，说这是外门执事身份牌，问他是不是来投师。"
+        )
+        drift_rejection = _author_sample_anchor_rejection(prompt_with_anchor, drift_content)
+        if "forbidden_storyline" not in drift_rejection:
+            failures.append(f"author_sample_anchor_failed_to_reject_drift:{drift_rejection}")
+        repairable_provider = _RepairingCandidateProvider()
+        try:
+            repaired_out = _run_candidate_llm(
+                repairable_provider,
+                prompt="生成清虚观入门候选",
+                min_chars=300,
+                max_tokens=2000,
+                temperature=0.5,
+                model="fake",
+                candidate_index=1,
+                dry_run=False,
+            )
+            repaired_content = repaired_out["draft"].content or ""
+            forbidden_markers = ("系统分配", "内测", "论坛", "玩家", "NPC", "任务栏", "任务面板", "界面", "系统提示", "新手村")
+            if any(marker in repaired_content for marker in forbidden_markers):
+                failures.append("rebuild_candidate_meta_leak_repair_kept_forbidden_marker")
+            repair_meta = (repaired_out["length_repair"] or {}).get("meta_leak_repair") or {}
+            if not repair_meta.get("accepted"):
+                failures.append("rebuild_candidate_meta_leak_repair_missing_trace")
+        except StructuredOutputError as exc:
+            failures.append(f"rebuild_candidate_meta_leak_repair_rejected:{exc}")
+
+        leaking_provider = _LeakingCandidateProvider()
+        try:
+            _run_candidate_llm(
+                leaking_provider,
+                prompt="生成清虚观入门候选",
+                min_chars=300,
+                max_tokens=2000,
+                temperature=0.5,
+                model="fake",
+                candidate_index=1,
+                dry_run=False,
+            )
+            failures.append("rebuild_candidate_meta_leak_not_rejected_before_persist")
+        except StructuredOutputError as exc:
+            if "game-world meta leakage" not in str(exc):
+                failures.append(f"rebuild_candidate_meta_leak_wrong_error:{exc}")
+
         result = generate_rebuild_candidates(session, book_id=book.id, chapter_number=1, dry_run=True)
         selected = session.get(ChapterVersion, int(result.selected_version_id or 0))
-        if not selected or not selected.source.startswith("rebuild_candidate_selected:v"):
-            failures.append(f"selected_version_missing:{result.selected_version_id}")
         candidate_count = session.scalar(
             select(func.count())
             .select_from(ChapterVersion)
-            .where(ChapterVersion.chapter_id == chapter.id, ChapterVersion.status == "candidate")
+            .where(ChapterVersion.chapter_id == chapter.id, ChapterVersion.source.like("rebuild_candidate:%"))
         )
-        if candidate_count != 3:
+        if candidate_count != 1:
             failures.append(f"candidate_count_wrong:{candidate_count}")
-        latest = session.scalar(
-            select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc())
+        rebuild_task = session.scalar(
+            select(GenerationTask)
+            .where(GenerationTask.id == result.task_id, GenerationTask.task_type == TASK_TYPE_REBUILD_CANDIDATES)
         )
-        if selected and (not latest or latest.id != selected.id):
-            failures.append("latest_version_not_selected_copy")
-        if selected:
-            selected_quality = session.scalar(
-                select(QualityReport).where(QualityReport.chapter_version_id == selected.id).order_by(QualityReport.id.desc())
+        task_output = json.loads(rebuild_task.output_json or "{}") if rebuild_task else {}
+        if not rebuild_task or rebuild_task.status != "completed":
+            failures.append(f"rebuild_task_not_completed:{rebuild_task.status if rebuild_task else None}")
+        selection_reason = task_output.get("selection_reason")
+        if selection_reason == "best_failed_candidate_retained":
+            if not selected or selected.status != "needs_revision" or not selected.source.startswith("rebuild_candidate:"):
+                failures.append(f"failed_candidate_not_retained:{result.selected_version_id}")
+        elif selection_reason == "incumbent_ranked_higher_than_candidates":
+            if not selected or not selected.source.startswith("rebuild_candidate_incumbent_restore:"):
+                failures.append(f"incumbent_restore_missing:{result.selected_version_id}")
+        else:
+            if selection_reason != "best_ranked_candidate":
+                failures.append("unexpected_selection_reason:" + str(selection_reason))
+            if not selected or not selected.source.startswith("rebuild_candidate_selected:v"):
+                failures.append(f"selected_version_missing:{result.selected_version_id}")
+            latest = session.scalar(
+                select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc())
             )
-            if not selected_quality:
-                failures.append("selected_quality_missing")
-            elif "selected_from_candidate_version_id" not in json.loads(selected_quality.report or "{}"):
-                failures.append("selected_quality_missing_candidate_trace")
+            if selected and (not latest or latest.id != selected.id):
+                failures.append("latest_version_not_selected_copy")
+            if selected:
+                selected_quality = session.scalar(
+                    select(QualityReport).where(QualityReport.chapter_version_id == selected.id).order_by(QualityReport.id.desc())
+                )
+                if not selected_quality:
+                    failures.append("selected_quality_missing")
+                elif "selected_from_candidate_version_id" not in json.loads(selected_quality.report or "{}"):
+                    failures.append("selected_quality_missing_candidate_trace")
 
         budget_chapter = Chapter(book_id=book.id, chapter_number=2, title="第2章", status="briefing")
         session.add(budget_chapter)
@@ -341,6 +490,49 @@ def main() -> int:
         if should_restore:
             failures.append("rebuild_selection_preferred_blocking_incumbent_over_clean_candidate")
 
+        stale_world_logic_incumbent = ChapterVersion(
+            chapter_id=floor_chapter.id,
+            version_number=101,
+            title="第4章",
+            content=(
+                "瘦高道士问：谁让你来的？顾晚把我是来参加内测的咽回去。"
+                "游戏里 NPC 不吃这套，得按规矩来。"
+            ) * 400,
+            status="needs_revision",
+            source="regression:stale_world_logic_incumbent",
+        )
+        stale_candidate_version = ChapterVersion(
+            chapter_id=floor_chapter.id,
+            version_number=102,
+            title="第4章",
+            content="低分新候选但无玩家层泄漏。" * 1200,
+            status="candidate",
+            source="regression:world_logic_clean_candidate",
+        )
+        session.add_all([stale_world_logic_incumbent, stale_candidate_version])
+        session.flush()
+        stale_quality = QualityReport(
+            chapter_version_id=stale_world_logic_incumbent.id,
+            score=90,
+            passed=False,
+            report=json.dumps({"score": 90, "passed": False, "issues": ["old_report_before_world_logic_fix"]}, ensure_ascii=False),
+        )
+        stale_candidate_quality = QualityReport(
+            chapter_version_id=stale_candidate_version.id,
+            score=42,
+            passed=False,
+            report=json.dumps({"score": 42, "passed": False, "issues": ["new_candidate_low_score"]}, ensure_ascii=False),
+        )
+        session.add_all([stale_quality, stale_candidate_quality])
+        session.flush()
+        stale_should_restore = _should_restore_incumbent_over_candidate(
+            incumbent=IncumbentDraft(stale_world_logic_incumbent, stale_quality, 90, False),
+            candidate={"version_id": stale_candidate_version.id, "score": 42, "passed": False},
+            candidate_quality=stale_candidate_quality,
+        )
+        if stale_should_restore:
+            failures.append("rebuild_selection_restored_stale_world_logic_incumbent")
+
         source_only_chapter = Chapter(book_id=book.id, chapter_number=5, title="第5章", status="briefing")
         session.add(source_only_chapter)
         session.flush()
@@ -432,6 +624,65 @@ def main() -> int:
         return 1
     print("rebuild-candidates-regression: PASS")
     return 0
+
+
+class _RepairingCandidateProvider:
+    name = "fake"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature=None, response_format=None, model: str | None = None) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            content = (
+                "道士问：哪来的木牌？顾晚想说系统分配的，话到嘴边咽回去。"
+                "他记得进游戏前签过协议，内测期间必须完成一次门派入门任务。"
+                "他从怀里掏出拜帖，这是刚才在界面里唯一能点开的东西。"
+            ) * 8
+            title = "待修复候选"
+        else:
+            content = (
+                "瘦高道士把拂尘横在顾晚肩上，问他腰间木牌从哪来。"
+                "顾晚按住那块枣木牌，把半截实话吞回去，只说山门口有人塞给他，清虚观认牌不认人。"
+                "道士眯眼去看牌背，火漆边缘还软，像是刚从拜帖上揭下来的。"
+                "顾晚顺势递上那封皱巴巴的拜帖，说三日内拜入一门，过期银钱作废，旁的规矩没人肯明说。"
+                "道士没有接话，只捏了捏他的腕骨，又让他去井边挑两担水。"
+                "顾晚听出这是试探，便先认错后讨价，说若挑完水还不收人，至少把送牌的人名告诉他。"
+                "院里几个小道童停下扫帚看热闹，道士脸色沉了沉，终于让开半步。"
+            ) * 5
+            title = "木牌入山门"
+        text = json.dumps(
+            {
+                "title": title,
+                "content": content,
+                "self_check": ["已把来历解释改成木牌、拜帖和山门规矩。"],
+                "used_brief_points": ["清虚观盘问", "主角主动试探"],
+            },
+            ensure_ascii=False,
+        )
+        return LLMResponse(text=text, provider=self.name, model=model or "fake", response_chars=len(text), prompt_chars=len(prompt))
+
+
+class _LeakingCandidateProvider:
+    name = "fake"
+
+    def generate(self, prompt: str, *, max_tokens: int = 2000, temperature=None, response_format=None, model: str | None = None) -> LLMResponse:
+        content = (
+            "道士问：哪来的木牌？顾晚想说系统分配的，话到嘴边咽回去。"
+            "他记得进游戏前签过协议，内测期间必须完成一次门派入门任务。"
+            "他从怀里掏出拜帖，这是刚才在界面里唯一能点开的东西。"
+        ) * 4
+        text = json.dumps(
+            {
+                "title": "泄漏候选",
+                "content": content,
+                "self_check": [],
+                "used_brief_points": [],
+            },
+            ensure_ascii=False,
+        )
+        return LLMResponse(text=text, provider=self.name, model=model or "fake", response_chars=len(text), prompt_chars=len(prompt))
 
 
 if __name__ == "__main__":

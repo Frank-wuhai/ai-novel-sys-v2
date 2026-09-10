@@ -49,18 +49,72 @@ class ReviewOutput:
         }
 
 
+def _find_balanced_json_objects(text: str) -> list[str]:
+    """扫描文本,返回所有括号配平的顶层 {...} 子串(按出现顺序)。
+
+    thinking 模型常把 JSON 埋在思维链中间/末尾,前后带解释文字。简单的
+    text.find('{')..rfind('}') 会把多个对象或对象外的杂散花括号一起截进来导致
+    解析失败。这里做括号配平扫描(尊重字符串内的转义与花括号),稳健切出候选对象。
+    """
+    objs: list[str] = []
+    depth = 0
+    start = -1
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    objs.append(text[start : i + 1])
+                    start = -1
+    return objs
+
+
 def _extract_json(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
         stripped = re.sub(r"\s*```$", "", stripped)
+    # 1) 首选:整串就是合法 JSON
     try:
         data = json.loads(stripped)
-    except json.JSONDecodeError as exc:
-        raise StructuredOutputError(f"LLM output is not valid JSON: {exc}") from exc
-    if not isinstance(data, dict):
-        raise StructuredOutputError("LLM output JSON must be an object")
-    return data
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    # 2) 兜底:从"思维链+JSON混杂"文本里提取 balanced 对象。
+    #    优先取含 title+content 的对象(草稿结构);否则取最后一个能解析的对象。
+    candidates = _find_balanced_json_objects(stripped)
+    best: dict[str, Any] | None = None
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if "title" in obj and "content" in obj:
+            best = obj  # 草稿结构优先,继续找更靠后的(取最终定稿)
+        elif best is None:
+            best = obj
+    if best is not None:
+        return best
+    raise StructuredOutputError("LLM output is not valid JSON (no balanced object found)")
 
 
 def parse_draft_output(text: str) -> DraftOutput:

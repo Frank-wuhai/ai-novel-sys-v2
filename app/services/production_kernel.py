@@ -80,7 +80,7 @@ class ProductionKernel:
 
     def step(self, *, dry_run: bool = False, preview_only: bool = False, mode: ExecutionMode | str | None = None) -> KernelStepResult:
         execution_mode = execution_mode_from_flags(dry_run=dry_run, preview_only=preview_only, mode=mode)
-        plan = self.plan(apply_state_repairs=True)
+        plan = self.plan(apply_state_repairs=not execution_mode.is_preview)
         item = plan.item
         decision = plan.decision
         action = item.next_action
@@ -146,14 +146,24 @@ class ProductionKernel:
             if _is_terminal_event(event):
                 break
         else:
-            executed.append(
-                {
-                    "action": "kernel_step_limit",
-                    "status": "blocked",
-                    "message": "生产内核达到本轮安全步数上限，已暂停以避免流程失控。",
-                    "object_id": None,
-                }
-            )
+            if max(1, min(80, int(max_steps or 30))) == 1 and executed:
+                executed.append(
+                    {
+                        "action": "single_step_completed",
+                        "status": "completed",
+                        "message": "生产内核已按单步模式执行 1 个动作并停止。",
+                        "object_id": executed[-1].get("object_id"),
+                    }
+                )
+            else:
+                executed.append(
+                    {
+                        "action": "kernel_step_limit",
+                        "status": "blocked",
+                        "message": "生产内核达到本轮安全步数上限，已暂停以避免流程失控。",
+                        "object_id": None,
+                    }
+                )
             if on_progress:
                 on_progress(list(executed))
         terminal = kernel_terminal_status(executed)

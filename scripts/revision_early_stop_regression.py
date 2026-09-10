@@ -166,37 +166,46 @@ def main() -> int:
         )
     )
 
-    # ---------------- no_improvement_window ----------------
-
-    # FIRE: enough passing versions where the best never moves.
-    # Setup: 15 versions, all passing at 76 (no improvement across last 10).
-    # But we also need scoring above threshold NOT to trigger accept first...
-    # accept fires immediately at version 5+, so no_improvement_window is
-    # only reachable when scores are BELOW the accept bar. Use policy
-    # accept=100 (unreachable) to test the plateau logic in isolation.
+    # ---------------- plateau_stop / no_improvement_window ----------------
+    #
+    # 2026-07-29 路径②语义更新（重要）：新增的 rule 2a("存在 passed 版 + 过
+    # warm-up 即达标停止")优先级高于所有兜底分支。这带来一个必须诚实记录的
+    # 架构后果——
+    #
+    #   * no_improvement_window 规则遍历的是 *passing* 版本(见实现)，但只要
+    #     出现任何 passing 版，rule 2a 会先接管并停止；因此在新架构下
+    #     no_improvement_window 实际上已被 rule 2a 完全遮蔽，永远轮不到触发。
+    #     它作为历史兜底保留在代码里(无害)，但不再有可达路径。
+    #   * plateau_stop 遍历的是全体 scored 版本，在【无 passing 版】(反复生成
+    #     但始终不合格)时仍是有效且必要的止损——这正是它现在的唯一职责。
+    #
+    # 故此处只验证 plateau_stop 在无合格版时的兜底行为；rule 2a 遮蔽后的
+    # 合格路径由下方独立的 quality_gate_passed 用例覆盖。
     plateau_policy = EarlyStopPolicy(accept_score_threshold=100, no_improvement_window=5)
+    # FIRE: 无合格版，末段 4 窗 [74,74,74,74] drift=0 <= 2 → plateau_stop 兜底止损。
     failures.append(
         _check(
-            "plateau_fires",
+            "plateau_fires_no_passing",
             _mk(
                 12,
                 [60, 62, 65, 70, 72, 74, 74, 74, 74, 74, 74, 74],
-                [False, False, False, False, True, True, True, True, True, True, True, True],
+                [False] * 12,
             ),
             expected_should_stop=True,
-            expected_rule="no_improvement_window",
+            expected_rule="plateau_stop",
             policy=plateau_policy,
         )
     )
 
-    # DOES NOT FIRE: score improved inside the window.
+    # DOES NOT FIRE: 分数单调上升，任何 4 窗 drift 都 > plateau_delta(2)，
+    # 且无 passing 版(no_improvement 不可达)→ 不停，继续生成。
     failures.append(
         _check(
             "plateau_still_improving",
             _mk(
                 12,
-                [60, 62, 65, 70, 72, 74, 75, 76, 77, 78, 79, 80],
-                [False, False, False, False, True, True, True, True, True, True, True, True],
+                [40, 44, 48, 52, 56, 60, 64, 68, 71, 74, 77, 80],
+                [False] * 12,
             ),
             expected_should_stop=False,
             expected_rule=None,
@@ -204,19 +213,65 @@ def main() -> int:
         )
     )
 
-    # DOES NOT FIRE: window[-4:] delta = 74-60 = 14 > plateau_delta(2), plateau doesn't trigger.
-    # Also passing rate is high (5/12 ≈ 42%, not the reason but for clarity).
+    # DOES NOT FIRE: 分数在末段大幅震荡(74/60/74/60)，4 窗 drift=14 > 2，
+    # plateau 不触发；无 passing 版 → 不停。
     failures.append(
         _check(
-            "plateau_too_few_passing",
+            "plateau_volatile_no_stop",
             _mk(
                 12,
-                [60, 62, 65, 70, 72, 74, 74, 74, 74, 60, 74, 60],
-                [False, False, False, False, True, True, True, True, True, False, True, False],
+                [40, 44, 48, 52, 56, 60, 64, 68, 74, 60, 74, 60],
+                [False] * 12,
             ),
             expected_should_stop=False,
             expected_rule=None,
             policy=plateau_policy,
+        )
+    )
+
+    # ---------------- rule 2a: quality_gate_passed (2026-07-29 路径②) ----------------
+    #
+    # 核心新行为：存在 passed=True 版(已过 hard_gate + 章型门72/soft_pass 完整
+    # 质检链) + 过 min_versions_before_stop warm-up → 立即达标停止，best 落到
+    # 最高分 passed 版。即使分数 72-74 低于 accept_score_threshold(75)也停——
+    # 这消除了"合格B版被判没到75、反复踢rebuild"的72-75鸿沟(book4/book5 前5章根因)。
+    failures.append(
+        _check(
+            "quality_gate_passed_stops_at_72",
+            _mk(
+                8,
+                [60, 62, 65, 70, 72, 72, 72, 72],
+                [False, False, False, False, True, True, True, True],
+            ),
+            expected_should_stop=True,
+            expected_rule="quality_gate_passed",
+            # 默认策略(accept=75)：v5@72 passed 但 <75，靠 quality_gate_passed 停
+        )
+    )
+    # warm-up 守卫：首版就 passed 但未过 min_versions_before_stop(5) → 不停。
+    failures.append(
+        _check(
+            "quality_gate_passed_respects_warmup",
+            _mk(
+                3,
+                [72, 72, 72],
+                [True, True, True],
+            ),
+            expected_should_stop=False,
+            expected_rule=None,
+        )
+    )
+    # 高分 passed 版仍走 accept_score_threshold 规则(向后兼容)。
+    failures.append(
+        _check(
+            "high_score_still_accept_threshold",
+            _mk(
+                6,
+                [60, 65, 70, 76, 77, 78],
+                [False, False, False, True, True, True],
+            ),
+            expected_should_stop=True,
+            expected_rule="accept_score_threshold",
         )
     )
 

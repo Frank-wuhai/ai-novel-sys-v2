@@ -847,6 +847,79 @@ def _sample_learning_prompt(learning: dict) -> str:
     return "\n".join(lines)
 
 
+def _cross_chapter_opening_memory(
+    session: Session,
+    *,
+    book_id: int,
+    chapter_number: int,
+    lookback: int = 8,
+) -> str:
+    """跨章开篇记忆：拉最近 N 章已落地正文的开篇首句 + 首动作，
+    强制本章开篇与它们拉开差异。
+
+    背景：旧的 _recent_sample_avoidance 只在“同一章多次重试”内做反雷同，
+    没有跨章记忆，导致 42% 章节撞成同一套“退出游戏舱/醒来/回宿舍”开篇。
+    这个函数补齐跨章维度。"""
+    if chapter_number <= 1:
+        return "本章为开篇章，无历史开篇记忆；但仍需保证开场独特、直接进入具体处境。"
+
+    start = max(1, chapter_number - lookback)
+    chapters = list(
+        session.scalars(
+            select(Chapter)
+            .where(
+                Chapter.book_id == book_id,
+                Chapter.chapter_number >= start,
+                Chapter.chapter_number < chapter_number,
+            )
+            .order_by(Chapter.chapter_number.asc())
+        )
+    )
+    if not chapters:
+        return "暂无历史开篇记忆；本章开场仍需直接、独特、进入具体处境。"
+
+    rows: list[str] = []
+    exit_game_count = 0
+    for ch in chapters:
+        latest = session.scalar(
+            select(ChapterVersion)
+            .where(ChapterVersion.chapter_id == ch.id)
+            .order_by(ChapterVersion.version_number.desc(), ChapterVersion.id.desc())
+        )
+        if not latest or not latest.content:
+            continue
+        paras = [p.strip() for p in latest.content.split("\n") if p.strip()]
+        if not paras:
+            continue
+        head = "".join(paras[:3])[:60]
+        rows.append(f"- 第{ch.chapter_number}章开场：{head}")
+        # 统计"退出游戏/醒来/爬出舱"这类现实切换开篇
+        if re.search(r"(游戏舱|退出游戏|爬出来|睁开眼|醒来|被.{0,4}摇醒|呛醒|疼醒)", head):
+            exit_game_count += 1
+
+    if not rows:
+        return "暂无历史开篇记忆；本章开场仍需直接、独特、进入具体处境。"
+
+    lines = [
+        "跨章开篇记忆（最近若干章的实际开场，本章必须明显不同）：",
+        *rows,
+        "",
+        "硬性规避规则：",
+        "- 禁止复用上述任何一章的第一动作、第一场景、第一情绪。",
+    ]
+    if exit_game_count >= 2:
+        lines.append(
+            f"- ⚠️ 最近已有 {exit_game_count} 章用“退出游戏舱/醒来/回宿舍”式现实切换开篇，"
+            "本章严禁再用此套路开场。可从游戏内正在发生的动作、对话中途、"
+            "他人视角、环境突变、一件具体物件或一句关键台词切入。"
+        )
+    lines.append(
+        "- 禁止使用“不是X的。是Y的。”这类三段式否定断句作为开篇节奏"
+        "（如“不是吓的。是饿的。”）——全书已滥用，属于机械 AI 味，一律换成正常叙述。"
+    )
+    return "\n".join(lines)
+
+
 def _recent_sample_avoidance(
     session: Session,
     *,
@@ -951,6 +1024,8 @@ def _build_sample_prompt_context(
 
 同章反模板约束：
 {_recent_sample_avoidance(session, book_id=book.id, chapter_number=chapter_number)}
+
+{_cross_chapter_opening_memory(session, book_id=book.id, chapter_number=chapter_number)}
 
 Canon 与世界规则：
 {packet.context.canon_context}
@@ -1448,6 +1523,13 @@ def _opening_has_embodied_pov(text: str) -> bool:
 def _sample_motifs(text: str) -> set[str]:
     source = str(text or "")
     motif_map = {
+        # —— 本书（大学生+游戏舱+武侠）实际雷同模式 2026-07-21 补 ——
+        "退舱现实切换": ("游戏舱", "退出游戏", "爬出来", "游戏舱里爬", "从游戏里退"),
+        "醒来开篇": ("睁开眼", "醒来", "摇醒", "呛醒", "疼醒", "叫醒"),
+        "宿舍室友": ("宿舍", "室友", "天花板", "日光灯", "泡面", "手机震"),
+        "游戏词入侵": ("NPC", "账号", "数据流", "熟练度", "同步", "私信", "实验模块", "玩家"),
+        "手抖开篇": ("手还在抖", "手在抖", "虎口发麻", "手心全是汗", "手心发烫"),
+        # —— 旧书残留（横店片场题材·本书基本不用，保留避免误伤）——
         "现实片场": ("横店", "片场", "导演", "副导演", "群演", "替身", "剧组", "道具"),
         "出租屋登录": ("出租屋", "头盔", "内测卡", "登录", "内测资格"),
         "茶棚欠账": ("茶棚", "老板娘", "饭钱", "茶钱", "赊账", "欠账", "劈柴换饭"),

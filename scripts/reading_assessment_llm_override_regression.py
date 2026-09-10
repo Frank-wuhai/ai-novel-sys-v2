@@ -71,6 +71,55 @@ def _report(**over: Any) -> dict:
     return base
 
 
+def _prose_gate_soft_structure_report() -> dict:
+    return {
+        "score": 78,
+        "passed": False,
+        "base_quality_passed": False,
+        "hard_gate": {
+            "passed": False,
+            "status": "FAIL",
+            "issues": [
+                "fanqie_para_avg_too_long: 45.6 > 45",
+                "fanqie_para_density_too_low: 21.9 < 25",
+                "prose_naturalness_blocker: 71",
+            ],
+        },
+        "dimensions": {
+            "brief_coverage": 48,
+            "reader_momentum": 100,
+            "conflict_pressure": 74,
+            "choice_and_cost": 74,
+            "hook_strength": 83,
+            "prose_naturalness": 71,
+            "natural_sentence_glue": 75,
+            "decorative_restraint": 51,
+            "dialogue_particle_flow": 66,
+            "dialogue_fullness": 54,
+            "imageable_paragraphs": 70,
+            "chapter_unit_flow": 78,
+        },
+        "issues": [
+            "fanqie_para_avg_too_long: 45.6 > 45",
+            "fanqie_para_density_too_low: 21.9 < 25",
+            "prose_naturalness_blocker: 71",
+        ],
+        "production_failure_classification": {
+            "schema": "quality_failure_classification_v1",
+            "category": "structure_rewrite",
+            "structural_reasons": ["brief_coverage_structural"],
+            "local_reasons": ["dialogue_fullness", "payoff_grounding"],
+            "recommended_revision_mode": "rewrite",
+        },
+        "llm_review": {
+            "status": "completed",
+            "verdict": "pass",
+            "score": 76,
+            "strengths": ["visible pressure, choice, cost, and hook"],
+        },
+    }
+
+
 def _case(label: str, report: dict, expected_action: str, expected_level: str | None = None) -> str | None:
     assessment = assess_reading_quality(report)
     if assessment.action != expected_action:
@@ -89,6 +138,13 @@ def main() -> int:
         _report(),
         expected_action="auto_polish",
         expected_level="polish_ready",
+    ))
+
+    failures.append(_case(
+        "prose_gate_soft_structure_targets_revision",
+        _prose_gate_soft_structure_report(),
+        expected_action="auto_revise",
+        expected_level="usable_draft_needs_prose_revision",
     ))
 
     # LLM verdict != pass -> keep auto_rebuild (LLM disagrees with itself)
@@ -141,7 +197,7 @@ def main() -> int:
         return 1
 
     print("reading_assessment_llm_override_regression=PASS")
-    print("cases_evaluated=7")
+    print("cases_evaluated=8")
     return 0
 
 

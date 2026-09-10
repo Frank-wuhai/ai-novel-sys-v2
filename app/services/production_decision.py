@@ -138,8 +138,8 @@ def decide_chapter_production(item: Any | None) -> ProductionDecision:
             return ProductionDecision(
                 status="candidate_rebuild",
                 stage="revise",
-                label="多候选择优",
-                headline="单稿重建连续失败，改用多候选自动择优",
+                label="候选择优",
+                headline="单稿重建连续失败，改用候选自动择优",
                 next_step="点击继续生产，让系统生成多个完整候选稿并自动选择最高分版本。",
                 primary_label="生成候选并择优",
                 primary_intent="continue",

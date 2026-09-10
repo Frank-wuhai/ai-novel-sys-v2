@@ -25,12 +25,14 @@ class AuthorWorkbenchReport:
     quality_profile: dict
     continuity_memory: dict
     revision_director: dict
+    action_cards: dict
 
     def to_dict(self) -> dict:
         return {
             "quality_profile": self.quality_profile,
             "continuity_memory": self.continuity_memory,
             "revision_director": self.revision_director,
+            "action_cards": self.action_cards,
         }
 
     @property
@@ -54,6 +56,7 @@ def build_author_workbench_report(
         quality_profile=build_author_quality_profile(session, book_id=book_id, limit=sample_limit),
         continuity_memory=build_continuity_memory(session, book_id=book_id, chapter_number=chapter_number),
         revision_director=build_revision_director(session, book_id=book_id, chapter_number=chapter_number),
+        action_cards=build_author_action_cards(session, book_id=book_id, chapter_number=chapter_number),
     )
 
 
@@ -210,6 +213,73 @@ def build_revision_director(session: Session, *, book_id: int, chapter_number: i
     }
 
 
+def build_author_action_cards(session: Session, *, book_id: int, chapter_number: int) -> dict:
+    chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
+    if not chapter:
+        return {
+            "status": "missing_chapter",
+            "headline": f"第{chapter_number}章尚未建章",
+            "next_action": "create_chapter_brief",
+            "cards": [{"type": "setup", "title": "先补章节 brief", "body": "没有章节记录，不能进入生成或返修。"}],
+        }
+    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    if not version:
+        return {
+            "status": "missing_version",
+            "headline": f"第{chapter_number}章已有 brief，但没有正文",
+            "next_action": "draft_chapter",
+            "cards": [{"type": "draft", "title": "生成首版正文", "body": "先按当前 brief 和 Canon 生成正文，再进入单元审核。"}],
+        }
+    quality = session.scalar(
+        select(QualityReport).where(QualityReport.chapter_version_id == version.id).order_by(QualityReport.id.desc())
+    )
+    data = _loads_json(quality.report if quality else "")
+    dimensions = data.get("dimensions") if isinstance(data.get("dimensions"), dict) else {}
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    unit_report = data.get("chapter_unit_report") if isinstance(data.get("chapter_unit_report"), dict) else {}
+    cards: list[dict] = []
+    if quality:
+        cards.append(
+            {
+                "type": "status",
+                "title": "当前质检",
+                "body": f"version#{version.id} status={version.status}，质量分 {quality.score}，{'已过硬闸' if quality.passed else '未过硬闸'}。",
+                "severity": "ok" if quality.passed else "blocker",
+            }
+        )
+    else:
+        cards.append(
+            {
+                "type": "status",
+                "title": "缺少质检",
+                "body": f"version#{version.id} 尚无质量报告，不能判断是否可发布。",
+                "severity": "blocker",
+            }
+        )
+    for issue in (hard_gate.get("issues") or [])[:4]:
+        cards.append(
+            {
+                "type": "hard_gate",
+                "title": "硬门禁问题",
+                "body": str(issue),
+                "recommendation": _action_for_issue(str(issue)),
+                "severity": "blocker",
+            }
+        )
+    weak_dimensions = _weak_dimension_cards(dimensions)
+    cards.extend(weak_dimensions[:5])
+    cards.extend(_unit_action_cards(unit_report)[:5])
+    next_action = _next_author_action(quality_passed=bool(quality and quality.passed), cards=cards)
+    return {
+        "status": "ready" if quality and quality.passed else "attention",
+        "headline": _action_headline(chapter_number=chapter_number, quality=quality, cards=cards),
+        "next_action": next_action,
+        "chapter_version_id": version.id,
+        "quality_report_id": quality.id if quality else None,
+        "cards": cards[:12],
+    }
+
+
 def _latest_character_states(session: Session, *, book_id: int, limit: int) -> list[dict]:
     characters = list(session.scalars(select(Character).where(Character.book_id == book_id).order_by(Character.id).limit(16)))
     rows = []
@@ -280,6 +350,105 @@ def _quality_recommendations(weak: list[str]) -> list[str]:
         "scene_continuity": "每个场景单元必须承接上一段动作后果。",
     }
     return [mapping[item] for item in weak if item in mapping]
+
+
+def _weak_dimension_cards(dimensions: dict) -> list[dict]:
+    cards = []
+    watched = {
+        "brief_coverage": ("写作说明没兑现", "回到 brief，把缺失情节点写成正文场景。"),
+        "chapter_unit_flow": ("小单元衔接不稳", "只修弱单元，补目标、阻碍、动作后果和交接点。"),
+        "scene_craft": ("场景描写不足", "用范文技法卡补空间边界、光源/声音/气味、人物站位。"),
+        "psychological_chain": ("心理链断", "补身体反应->误判/判断->迟疑->选择动作。"),
+        "reference_craft": ("范文技法吸收不足", "按技法卡补场景、心理、修辞用词、人物声音，不做泛润色。"),
+        "reader_momentum": ("追读动力弱", "让本章选择带来新麻烦、新证据或新代价。"),
+        "hook_strength": ("章末钩子弱", "章末只留一个清晰未完成压力，不堆说明。"),
+        "readability": ("读感不顺", "清理机械短句和说明段，补自然承接。"),
+    }
+    for name, (title, recommendation) in watched.items():
+        try:
+            score = int(dimensions.get(name) or 0)
+        except (TypeError, ValueError):
+            score = 0
+        if score and score < 65:
+            cards.append(
+                {
+                    "type": "dimension",
+                    "dimension": name,
+                    "title": title,
+                    "body": f"{name}={score}",
+                    "recommendation": recommendation,
+                    "severity": "warning" if score >= 55 else "blocker",
+                }
+            )
+    return sorted(cards, key=lambda item: 0 if item["severity"] == "blocker" else 1)
+
+
+def _unit_action_cards(unit_report: dict) -> list[dict]:
+    rows = []
+    units = unit_report.get("units") if isinstance(unit_report.get("units"), list) else []
+    for unit in units:
+        if not isinstance(unit, dict):
+            continue
+        score = int(unit.get("score") or 0)
+        if score >= 70:
+            continue
+        issues = "、".join(str(item) for item in (unit.get("issues") or [])[:4]) or "单元推进弱"
+        rows.append(
+            {
+                "type": "unit",
+                "unit_index": unit.get("index"),
+                "title": f"第{unit.get('index')}单元局部返修",
+                "body": f"单元分 {score}；问题：{issues}",
+                "recommendation": "只替换这个单元：保留有效事实，补目标、阻碍、动作后果、人物反应和下一单元承接。",
+                "severity": "warning" if score >= 60 else "blocker",
+            }
+        )
+    for idx, contract in enumerate(unit_report.get("repair_contract") or [], start=1):
+        if idx > 3:
+            break
+        rows.append(
+            {
+                "type": "unit_repair_contract",
+                "title": "单元返修合同",
+                "body": str(contract),
+                "recommendation": "按合同做局部补丁，不整章重写。",
+                "severity": "warning",
+            }
+        )
+    return rows
+
+
+def _next_author_action(*, quality_passed: bool, cards: list[dict]) -> str:
+    if any(card.get("type") == "hard_gate" for card in cards):
+        return "repair_hard_gate"
+    if any(card.get("type") == "unit" for card in cards):
+        return "repair_failed_units"
+    if any(card.get("dimension") in {"scene_craft", "psychological_chain", "reference_craft"} for card in cards):
+        return "apply_reference_craft_patch"
+    if not quality_passed:
+        return "rerun_quality_or_targeted_revision"
+    return "publish_review"
+
+
+def _action_headline(*, chapter_number: int, quality, cards: list[dict]) -> str:
+    if not quality:
+        return f"第{chapter_number}章需要先补质检"
+    blockers = [card for card in cards if card.get("severity") == "blocker"]
+    if blockers:
+        return f"第{chapter_number}章有 {len(blockers)} 个阻断项，先局部修最严重问题"
+    if quality.passed:
+        return f"第{chapter_number}章已过硬闸，可进入人工审读"
+    return f"第{chapter_number}章未过闸，建议按卡片定向返修"
+
+
+def _action_for_issue(issue: str) -> str:
+    if "story_bible" in issue or "canon" in issue or "设定" in issue:
+        return "先修 Story Bible/Canon 冲突，再重跑质检。"
+    if "chapter_unit" in issue or "unit" in issue:
+        return "只修失败小单元，不整章重写。"
+    if "artifact" in issue or "prompt" in issue:
+        return "删除系统残留、JSON、说明文字。"
+    return "按硬门禁问题做定向返修。"
 
 
 def _handoff_points(summary: str, ending: str) -> list[str]:

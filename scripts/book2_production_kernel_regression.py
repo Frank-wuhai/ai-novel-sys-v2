@@ -41,7 +41,7 @@ def main() -> int:
         # fixture. Book2 Ch2 was originally in a "needs_revision / must
         # re-review" state, but Sprint 2 Phase E may have advanced it all the
         # way to approved+queued for publish. Accept EITHER shape.
-        acceptable_pre_pass = {"generate_rebuild_candidates", "revise_chapter", "review_chapter", "accept_early_stop"}
+        acceptable_pre_pass = {"generate_rebuild_candidates", "revise_chapter", "review_chapter", "accept_early_stop", "wait_previous_chapter_readable"}
         acceptable_post_pass = {"approve_chapter", "mark_publish_job", "done"}
         acceptable_all = acceptable_pre_pass | acceptable_post_pass
         if not ch2:

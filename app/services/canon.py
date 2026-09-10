@@ -13,6 +13,8 @@ from app.models.entities import (
     WorldRule,
 )
 from app.services.story import format_story_control_context
+from app.services.canon_card_governance import format_approved_canon_cards
+from app.services.canon_authority import authority_prompt_lines
 
 
 def add_character(
@@ -130,6 +132,7 @@ def format_canon_context(
         "character_state_ids": [],
         "world_rule_ids": [],
         "power_system_ids": [],
+        "canon_card_ids": [],
         "plot_thread_ids": [],
         "foreshadow_ids": [],
     }
@@ -139,6 +142,9 @@ def format_canon_context(
         sections.append(story_context)
         refs["story_bible_ids"] = story_refs["story_bible_ids"]
         refs["story_arc_ids"] = story_refs["story_arc_ids"]
+    authority_lines = authority_prompt_lines(session, book_id=book_id, include_deprecated=True)
+    if authority_lines:
+        sections.append("设定裁决：\n" + "\n".join(f"- {line}" for line in authority_lines))
 
     characters = list(session.scalars(select(Character).where(Character.book_id == book_id).order_by(Character.id).limit(limit)))
     if characters:
@@ -163,7 +169,7 @@ def format_canon_context(
         session.scalars(
             select(WorldRule)
             .where(WorldRule.book_id == book_id, WorldRule.status == "active")
-            .order_by(WorldRule.id)
+            .order_by(WorldRule.id.desc())
             .limit(limit)
         )
     )
@@ -187,6 +193,11 @@ def format_canon_context(
                 f"- power#{power.id} {power.name}｜规则：{power.rules}｜代价：{power.costs}｜限制：{power.limits}" for power in powers
             )
         )
+
+    governance_cards, canon_card_ids = format_approved_canon_cards(session, book_id=book_id, limit=limit)
+    if governance_cards:
+        refs["canon_card_ids"] = canon_card_ids
+        sections.append(governance_cards)
 
     threads = list(
         session.scalars(

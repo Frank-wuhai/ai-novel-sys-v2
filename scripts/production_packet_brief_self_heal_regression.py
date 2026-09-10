@@ -71,6 +71,22 @@ def main() -> int:
             print("production packet did not self-heal contaminated brief")
             print(contamination)
             return 1
+        isolation = packet.audit.get("prompt_isolation") or {}
+        if not isinstance(isolation, dict) or "cleaned" not in isolation:
+            print("production packet missing prompt isolation audit")
+            print(packet.audit)
+            return 1
+        packet_text = "\n".join([
+            packet.blueprint.goal or "",
+            packet.blueprint.required_beats or "",
+            packet.blueprint.constraints or "",
+            packet.effective_required_beats or "",
+            packet.constraints or "",
+        ])
+        if any(marker in packet_text for marker in ("修复质检问题", "修订合同:", "原始机器修订建议", "质检报告 #")):
+            print("production packet leaked stale prompt contract")
+            print(packet_text)
+            return 1
         latest = session.scalar(select(ChapterBrief).where(ChapterBrief.chapter_id == chapter.id).order_by(ChapterBrief.id.desc()))
         text = "\n".join([latest.goal or "", latest.required_beats or "", latest.constraints or ""])
         if "万象江湖" not in text or "已废弃" in text:

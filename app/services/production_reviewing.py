@@ -21,6 +21,7 @@ from app.services.production_llm import (
 from app.services.prompts import get_prompt_template, render_template, seed_prompt_templates
 from app.services.production_optimization import enrich_quality_report_with_optimization
 from app.services.quality import evaluate_chapter
+from app.services.quality_evidence import build_quality_evidence_chain
 from app.services.production_blueprint import classify_quality_failure
 from app.services.production_gate import assert_production_gate
 from app.services.reading_assessment import maybe_apply_reading_assessment
@@ -45,36 +46,119 @@ def review_chapter(
     version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
     if not version:
         raise ValueError("chapter version not found")
+    was_approved = version.status == "approved"
     brief = _latest_brief(session, chapter.id)
+    book = session.get(Book, book_id)
+    review_goal = brief.goal if brief else ""
+    review_required_beats = brief.required_beats if brief else ""
+    review_constraints = brief.constraints if brief else ""
+    if book and brief:
+        try:
+            from app.services.production_packet import build_chapter_production_packet
+            packet = build_chapter_production_packet(
+                session,
+                book=book,
+                goal=brief.goal,
+                required_beats=brief.required_beats,
+                constraints=brief.constraints,
+                chapter_number=chapter_number,
+                mode="review",
+                chapter_id=chapter.id,
+                chapter_brief_id=brief.id,
+            )
+            review_goal = packet.blueprint.goal or brief.goal
+            review_required_beats = packet.blueprint.required_beats or brief.required_beats
+            review_constraints = "\n\n".join(
+                item for item in [packet.blueprint.constraints or "", packet.constraints or ""] if item
+            ) or brief.constraints
+        except Exception:
+            review_goal = brief.goal
+            review_required_beats = brief.required_beats
+            review_constraints = brief.constraints
     canon_context, _ = format_canon_context(session, book_id=book_id)
+    # 2026-08-18: 注入 active CanonAuthorityProfile 到 canon_context, 让 _canon_score
+    # 读 active profile 的 must_keep / opening_contract 关键词命中 bonus
+    # （避免被"没写玩家/面板"误判扣分 / 也不让 brief 6011/6012 旧描述当硬扣分）
+    from app.models.entities import CanonAuthorityProfile
+    active_profile = session.scalar(
+        select(CanonAuthorityProfile).where(
+            CanonAuthorityProfile.book_id == book_id,
+            CanonAuthorityProfile.status == "active",
+        )
+    )
+    if active_profile and active_profile.profile_json:
+        import json as _json
+        pj = _json.loads(active_profile.profile_json)
+        profile_block_parts: list[str] = ["[active Canon Authority Profile]"]
+        for k in ("must_keep", "opening_contract", "allowed_but_limited", "forbidden_misread", "deprecated_pollution"):
+            items = pj.get(k) or []
+            if items:
+                profile_block_parts.append(f"{k}:")
+                for item in items:
+                    profile_block_parts.append(f"  - {item}")
+        canon_context = (canon_context or "") + "\n\n" + "\n".join(profile_block_parts)
+    from app.services.context_contamination import context_anchor_terms
+    from app.services.production_packet import load_previous_hook_keywords
+    _anchor_terms = context_anchor_terms(session, book_id=book_id)
+    _prev_kws = load_previous_hook_keywords(session, book_id=book_id, chapter_number=chapter_number)
+    # 2026-07-14 · 项目规范：番茄章节字数区间 1800-2500 · 老 brief 可能残留 3000-4500 硬编码
+    # 硬 clip：min_chars 不得超过 2500 · 避免残留老规范阻塞 review
+    _min_chars_raw = extract_min_chars(
+        brief.goal if brief else "",
+        brief.required_beats if brief else "",
+        brief.constraints if brief else "",
+        default=1800,
+    )
+    _min_chars = min(_min_chars_raw, 1800)  # 与 blueprint target_min 一致 · 番茄区间 1800-2500
+    # 字数上限单一真源（消除裸字数漂移·2026-07-29 D3门归并）：default 直接取
+    # REBUILD_MAX_CHARS，不再硬编码 2800。这样 chapter_standards 改上限时本处自动跟随。
+    from app.services.chapter_standards import REBUILD_MAX_CHARS
+    _max_chars_raw = extract_max_chars(
+        brief.goal if brief else "",
+        brief.required_beats if brief else "",
+        brief.constraints if brief else "",
+        default=REBUILD_MAX_CHARS,
+    )
+    # 字数门（2026-07-28 D方案 Phase1·容差带·单一真源见 chapter_standards）：
+    # 传给 evaluate_chapter 的 max_chars 用 REBUILD_MAX(2800) — 决定 too_long 硬 issue 与
+    # thresholds.max_chars（classify 的 over_target_max_chars 判定基准）的触发点。
+    # 2600-2800 容差带内只记 length_soft_over 观感 warning（软·不触发硬重建），
+    # 实现用户「字数不管=比旧版±200可接受」；真超 2800（失控膨胀）才强制重建。
+    # （REBUILD_MAX_CHARS 已在上方 line65 导入）
+    _max_chars = min(max(_max_chars_raw, 2500), REBUILD_MAX_CHARS)
     result = evaluate_chapter(
         version.content,
-        min_chars=extract_min_chars(
-            brief.goal if brief else "",
-            brief.required_beats if brief else "",
-            brief.constraints if brief else "",
-            default=3000,
-        ),
-        max_chars=extract_max_chars(
-            brief.goal if brief else "",
-            brief.required_beats if brief else "",
-            brief.constraints if brief else "",
-            default=4500,
-        ),
-        goal=brief.goal if brief else "",
-        required_beats=brief.required_beats if brief else "",
-        constraints=brief.constraints if brief else "",
+        min_chars=_min_chars,
+        max_chars=_max_chars,
+        goal=review_goal,
+        required_beats=review_required_beats,
+        constraints=review_constraints,
         canon_context=canon_context,
+        authority_terms=_anchor_terms,
+        previous_hook_keywords=_prev_kws,
+        book_id=book_id,
+        chapter_number=chapter_number,
+        session=session,
     )
     report_data = json.loads(result.report)
     report_data.setdefault("passed", bool(result.passed))
     report_data["production_failure_classification"] = classify_quality_failure(report_data)
+    # 打通 soft_pass 死锁 (2026-07-26 A方案): soft_pass 在 enrich_quality_report_with_optimization
+    # (下方) 内计算,其判定条件之一 editorial_ok 读 report_data["editorial_gate"].passed。
+    # 但 editorial_gate 原先只在 LLM 复核分支(更下方)生成,纯规则质检链路(llm_review=False,
+    # 如 promote 入库脚本)从不写此字段 → soft_pass 恒 editorial_ok=False → 死锁:
+    # quality 层判可发(≥65)但 type_gate 结构维度贴门槛(gap≤15)的口语化B版永远救不了。
+    # 必须在 enrich 之前写入 editorial_gate,soft_pass 才能拿到数据。apply_review_decision
+    # 在 llm_review 缺失时写 editorial_gate.passed=True(采用规则结果),顶层 passed 仍取
+    # rule_result.passed,硬伤/规则fail 依旧被拦,不放水。LLM 复核分支会在下方重算覆盖。
+    if "editorial_gate" not in report_data:
+        _apply_editorial_gate(result, report_data)
     report_data = enrich_quality_report_with_optimization(
         report_data,
         chapter_number=chapter_number,
-        goal=brief.goal if brief else "",
-        required_beats=brief.required_beats if brief else "",
-        constraints=brief.constraints if brief else "",
+        goal=review_goal,
+        required_beats=review_required_beats,
+        constraints=review_constraints,
         enforce_gate=not _is_dry_run_version(version),
     )
     # Enrich report_data with per-chapter revision history so
@@ -107,9 +191,9 @@ def review_chapter(
             book=session.get(Book, book_id),
             version=version,
             chapter_number=chapter_number,
-            goal=brief.goal if brief else "",
-            required_beats=brief.required_beats if brief else "",
-            constraints=brief.constraints if brief else "",
+            goal=review_goal,
+            required_beats=review_required_beats,
+            constraints=review_constraints,
             canon_context=canon_context,
             rule_report=result.report,
             dry_run=review_dry_run,
@@ -121,6 +205,15 @@ def review_chapter(
             "reason": llm_skip_reason,
             "source": "rule_precondition",
         }
+    report_data["evidence_chain"] = build_quality_evidence_chain(version.content or "", report_data)
+    if was_approved and not bool(report_data.get("passed", result.passed)):
+        existing_pass = session.scalar(
+            select(QualityReport)
+            .where(QualityReport.chapter_version_id == version.id, QualityReport.passed.is_(True))
+            .order_by(QualityReport.id.desc())
+        )
+        if existing_pass is not None:
+            return existing_pass
     quality = QualityReport(
         chapter_version_id=version.id,
         score=int(report_data.get("score") or result.score),
@@ -162,7 +255,20 @@ def review_chapter(
         failed_version=version,
         quality=quality,
     )
-    compare_and_restore_if_regressed(session, current_version=version, current_quality=quality)
+    comparison = compare_and_restore_if_regressed(session, current_version=version, current_quality=quality)
+    if comparison.restored_version_id is not None:
+        restored_quality = session.scalar(
+            select(QualityReport)
+            .where(QualityReport.chapter_version_id == comparison.restored_version_id)
+            .order_by(QualityReport.id.desc())
+        )
+        if restored_quality is not None:
+            maybe_apply_reading_assessment(
+                session,
+                book_id=book_id,
+                chapter_number=chapter_number,
+                quality=restored_quality,
+            )
     if auto_revision_brief and not quality.passed and not _has_protected_revision_brief(session, chapter_id=chapter.id):
         from app.services.production import create_revision_brief
 
@@ -282,6 +388,46 @@ def _soft_override_blockers(dimensions: dict) -> list[str]:
     return soft_override_blockers(dimensions)
 
 
+def _aggregate_reviews(reviews: list):
+    """聚合多次主编采样，消除单次 LLM 评分抖动，保证入库判定可复现。
+
+    - score: 取中位数（对 [70,73,86] 这类抖动取 73，屏蔽极值）。
+    - verdict: 多数决；平局时按中位数分数 >=75 判 pass，否则 needs_revision。
+    - strengths/issues/suggestions/risk_flags: 采用最接近中位数分数的那次采样的
+      完整内容（保留可读性与一致性，不做跨样本拼接以免语义错乱）。
+    单次采样时直接返回该次，行为与旧逻辑一致。
+    """
+    import statistics as _stats
+
+    if len(reviews) == 1:
+        return reviews[0]
+    scores = [int(getattr(r, "score", 0) or 0) for r in reviews]
+    median_score = int(round(_stats.median(scores)))
+    verdicts = [str(getattr(r, "verdict", "") or "") for r in reviews]
+    pass_votes = sum(1 for v in verdicts if v == "pass")
+    nonpass_votes = len(verdicts) - pass_votes
+    if pass_votes > nonpass_votes:
+        median_verdict = "pass"
+    elif nonpass_votes > pass_votes:
+        # 多数为非 pass；沿用出现最多的非 pass verdict（通常 needs_revision）
+        nonpass = [v for v in verdicts if v != "pass"] or ["needs_revision"]
+        median_verdict = max(set(nonpass), key=nonpass.count)
+    else:
+        median_verdict = "pass" if median_score >= 75 else "needs_revision"
+    # 选内容代表：分数最接近中位数的那次采样
+    representative = min(reviews, key=lambda r: abs(int(getattr(r, "score", 0) or 0) - median_score))
+    from app.llm.schemas import ReviewOutput
+
+    return ReviewOutput(
+        verdict=median_verdict,
+        score=median_score,
+        strengths=list(getattr(representative, "strengths", []) or []),
+        issues=list(getattr(representative, "issues", []) or []),
+        revision_suggestions=list(getattr(representative, "revision_suggestions", []) or []),
+        risk_flags=list(getattr(representative, "risk_flags", []) or []),
+    )
+
+
 def _run_llm_chapter_review(
     session: Session,
     *,
@@ -328,13 +474,29 @@ def _run_llm_chapter_review(
         "version_id": version.id,
     }
     try:
-        response = provider.generate(
-            prompt,
-            max_tokens=settings.llm_review_max_tokens,
-            temperature=temperature,
-            model=model,
-        )
-        review = parse_review_output(response.text)
+        samples = max(1, int(getattr(settings, "llm_review_samples", 1) or 1))
+        reviews: list = []
+        responses: list = []
+        last_exc: Exception | None = None
+        for _ in range(samples):
+            try:
+                resp = provider.generate(
+                    prompt,
+                    max_tokens=settings.llm_review_max_tokens,
+                    temperature=temperature,
+                    model=model,
+                )
+                rev = parse_review_output(resp.text)
+            except Exception as exc:  # noqa: BLE001 — 单次采样失败不应中断，容错继续
+                last_exc = exc
+                continue
+            reviews.append(rev)
+            responses.append(resp)
+        if not reviews:
+            # 全部采样失败 → 抛出最后一次异常走下方 except 的失败落库
+            raise last_exc if last_exc is not None else RuntimeError("llm review produced no samples")
+        response = responses[-1]
+        review = _aggregate_reviews(reviews)
     except Exception as exc:
         classification = classify_exception(exc)
         task = GenerationTask(
@@ -361,6 +523,16 @@ def _run_llm_chapter_review(
             "error_type": type(exc).__name__,
             "error": str(exc),
         }
+    # 2026-08-19 新增: 合理/舒适/基础 三评审 (注入 WRITING_STANDARD.md 硬指标)
+    # 在主评审完成后, 跑 3 个独立 LLM 调, 各自评 0-1, 结果合并到 llm_review 子字段.
+    style_results = _run_style_review(
+        session,
+        book=book,
+        version=version,
+        chapter_number=chapter_number,
+        rule_report=rule_report,
+        dry_run=dry_run,
+    )
     task = GenerationTask(
         book_id=book.id,
         task_type="llm_review_chapter",
@@ -374,6 +546,7 @@ def _run_llm_chapter_review(
                 "llm_parameters": llm_parameters,
                 **llm_usage_payload(response, prompt=prompt),
                 "review": review.to_dict(),
+                "style_review": style_results,
             },
             ensure_ascii=False,
         ),
@@ -388,14 +561,124 @@ def _run_llm_chapter_review(
         prompt=prompt,
         status="completed",
     )
-    return {
+    result = {
         "status": "completed",
         "generation_task_id": task.id,
         "provider": response.provider,
         "model": response.model,
         "request_id": response.request_id,
         **review.to_dict(),
+        "style_review": style_results,
     }
+    # 2026-08-19 新增: 合并 style_review 到总分, 公式: 总分 = (合理×0.45) + (舒适×0.45) + (基础×0.10)
+    # 任一条款 = 0 时, 给 hard_issue 标记, 不可放行.
+    _merge_style_score(result, style_results)
+    return result
+
+
+def _run_style_review(
+    session: Session,
+    *,
+    book: Book,
+    version: ChapterVersion,
+    chapter_number: int,
+    rule_report: str,
+    dry_run: bool,
+) -> dict:
+    """2026-08-19 新增: 跑 3 个独立 LLM 评审 (合理/舒适/基础), 注入 WRITING_STANDARD.md 硬指标.
+
+    每个评审只评 0/1 二元, 不打主观分. 评审失败时不阻塞, 写 status=failed 即可.
+    """
+    provider = get_provider(dry_run)
+    model = settings.llm_review_model
+    temperature = 0.1  # 硬指标评审温度低, 减少噪声
+    results: dict = {"status": "completed", "logic_review": None, "comfort_review": None, "base_review": None}
+
+    for slot, template_name, max_tok in (
+        ("logic_review", "style_review_logic", 2500),
+        ("comfort_review", "style_review_comfort", 3000),
+        ("base_review", "style_review_base", 2000),
+    ):
+        try:
+            template = get_prompt_template(session, name=template_name, version="v1")
+            prompt = render_template(
+                template,
+                chapter_content=version.content,
+                rule_report=rule_report,
+            )
+            resp = provider.generate(
+                prompt,
+                max_tokens=max_tok,
+                temperature=temperature,
+                model=model,
+            )
+            # 解析 JSON, 容错
+            import re as _re
+            txt = resp.text
+            json_match = _re.search(r"\{[\s\S]*\}", txt)
+            if not json_match:
+                results[slot] = {"status": "parse_failed", "raw": txt[:500]}
+                continue
+            data = json.loads(json_match.group(0))
+            data["status"] = "completed"
+            data["model"] = resp.model
+            results[slot] = data
+            # 落库 GenerationTask (审计轨迹)
+            task = GenerationTask(
+                book_id=book.id,
+                task_type=f"llm_{template_name}",
+                status="completed",
+                input_json=json.dumps(
+                    {"chapter_number": chapter_number, "version_id": version.id, "template": f"{template_name}@v1"},
+                    ensure_ascii=False,
+                ),
+                output_json=json.dumps(data, ensure_ascii=False),
+            )
+            session.add(task)
+        except Exception as exc:
+            # 单评审失败不阻塞其他评审
+            results[slot] = {"status": "failed", "error": str(exc), "error_type": type(exc).__name__}
+    session.flush()
+    return results
+
+
+def _merge_style_score(llm_review_result: dict, style_results: dict) -> None:
+    """2026-08-19 新增: 把 style_review 的硬指标分合并到 LLM 评审结果.
+
+    公式: 总分 = (合理×0.45) + (舒适×0.45) + (基础×0.10)
+    阈值: logic_passed = (logic_score >= 6), comfort_passed = (comfort_score >= 7), base_passed = (base_score >= 3)
+    任一 hard_issue (score=0 的条款) → 整体 verdict 改 needs_revision
+    """
+    if not isinstance(style_results, dict):
+        return
+    logic = style_results.get("logic_review") or {}
+    comfort = style_results.get("comfort_review") or {}
+    base = style_results.get("base_review") or {}
+    logic_score = int(logic.get("logic_score") or 0) if isinstance(logic, dict) else 0
+    comfort_score = int(comfort.get("comfort_score") or 0) if isinstance(comfort, dict) else 0
+    base_score = int(base.get("base_score") or 0) if isinstance(base, dict) else 0
+    # 0-100 标尺: 把 9/10/4 折算成百分制, 加权
+    style_pct = (logic_score / 9.0) * 100 * 0.45 + (comfort_score / 10.0) * 100 * 0.45 + (base_score / 4.0) * 100 * 0.10
+    # 把 style_pct 覆盖 score (只在原 score < style_pct 时, 提升; 否则保留原 score)
+    original_score = int(llm_review_result.get("score") or 0)
+    new_score = max(original_score, int(round(style_pct)))
+    llm_review_result["score"] = new_score
+    # 把 3 个分项写到顶层, 方便 dashboard 看
+    llm_review_result["logic_score"] = logic_score
+    llm_review_result["comfort_score"] = comfort_score
+    llm_review_result["base_score"] = base_score
+    llm_review_result["style_pct"] = int(round(style_pct))
+    # 任一 hard_issue 触发, verdict 改 needs_revision
+    hard_issues = []
+    for k in ("logic_hard_issues", "comfort_hard_issues", "base_hard_issues"):
+        v = (logic if "logic" in k else comfort if "comfort" in k else base).get(k) or []
+        if isinstance(v, list):
+            hard_issues.extend([str(x) for x in v])
+    if hard_issues:
+        llm_review_result["style_hard_issues"] = hard_issues
+        if llm_review_result.get("verdict") == "pass":
+            llm_review_result["verdict"] = "needs_revision"
+            llm_review_result["score"] = min(new_score, 70)
 
 
 def _latest_brief(session: Session, chapter_id: int) -> ChapterBrief | None:

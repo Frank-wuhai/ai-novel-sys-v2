@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.llm.providers import ArkOpenAIProvider
-from app.models.entities import Book, Character, EvidenceSource, MarketSignal, PlatformFeedback, PowerSystem, StoryArc, StoryBible, StoryFoundation, Volume, WorldRule
+from app.models.entities import Book, CanonAuthorityProfile, Character, EvidenceSource, MarketSignal, PlatformFeedback, PowerSystem, StoryArc, StoryBible, StoryFoundation, Volume, WorldRule
 from app.services.agent_plan_utilization import build_agent_plan_utilization_report
 from app.services.agent_plan_intelligence import summarize_semantic_memory
 from app.services.evidence import list_market_signals
@@ -107,6 +107,14 @@ def _story_bible_check(session: Session, book_id: int, start: int, count: int) -
 
 
 def _skeleton_approval_check(session: Session, book_id: int) -> ReadinessCheck:
+    authority = _active_human_authority_profile(session, book_id)
+    if authority is not None:
+        return ReadinessCheck(
+            "skeleton_approval",
+            True,
+            f"canon_authority_profile_id={authority.id} source={authority.source}",
+            severity="info",
+        )
     values = _skeleton_values(session, book_id)
     required = {
         "premise": "一句话核心设定",
@@ -137,6 +145,7 @@ def _skeleton_approval_check(session: Session, book_id: int) -> ReadinessCheck:
 
 def _skeleton_governance_check(session: Session, book_id: int) -> ReadinessCheck:
     report = audit_story_skeleton_with_agent_evidence(session, book_id=book_id)
+    authority = _active_human_authority_profile(session, book_id)
     if report.passed:
         detail = f"score={report.score}"
         if report.evidence_summary:
@@ -148,6 +157,14 @@ def _skeleton_governance_check(session: Session, book_id: int) -> ReadinessCheck
     if team_decisions:
         action = team_decisions[0]
     has_blocker = any(issue.severity == "blocker" for issue in report.issues)
+    if authority is not None and has_blocker:
+        return ReadinessCheck(
+            "skeleton_governance",
+            True,
+            f"score={report.score} issues={issue_text} overridden_by=canon_authority_profile#{authority.id}",
+            severity="warning",
+            action="已由 active Canon Authority Profile 接管设定裁决；后续以裁决层为准。",
+        )
     return ReadinessCheck(
         "skeleton_governance",
         not has_blocker,
@@ -192,6 +209,15 @@ def _evidence_check(session: Session, book_id: int) -> ReadinessCheck:
         select(func.count(EvidenceSource.id)).where(EvidenceSource.status == "verified", EvidenceSource.reliability >= 3)
     )
     if not signals:
+        authority = _active_human_authority_profile(session, book_id)
+        if authority is not None:
+            return ReadinessCheck(
+                "evidence",
+                True,
+                f"no usable market signals for genre={book.genre}; overridden_by=canon_authority_profile#{authority.id}",
+                severity="warning",
+                action="建议后续补市场证据；当前用户确认的设定裁决层允许继续生产验证。",
+            )
         return ReadinessCheck(
             "evidence",
             False,
@@ -225,7 +251,7 @@ def _canon_check(session: Session, book_id: int) -> ReadinessCheck:
     character_count = session.scalar(select(func.count(Character.id)).where(Character.book_id == book_id)) or 0
     world_rule_count = session.scalar(select(func.count(WorldRule.id)).where(WorldRule.book_id == book_id, WorldRule.status == "active")) or 0
     power_count = session.scalar(
-        select(func.count(PowerSystem.id)).where(PowerSystem.book_id == book_id, PowerSystem.status.in_(["active", "locked"]))
+        select(func.count(PowerSystem.id)).where(PowerSystem.book_id == book_id, PowerSystem.status.in_(["active", "locked", "approved"]))
     ) or 0
     missing = []
     if character_count < 1:
@@ -237,6 +263,17 @@ def _canon_check(session: Session, book_id: int) -> ReadinessCheck:
     if missing:
         return ReadinessCheck("canon", False, "missing canon: " + ",".join(missing), action="补齐人物、世界规则和力量体系。")
     return ReadinessCheck("canon", True, f"characters={character_count} world_rules={world_rule_count} power_systems={power_count}", severity="info")
+
+
+def _active_human_authority_profile(session: Session, book_id: int) -> CanonAuthorityProfile | None:
+    profile = session.scalar(
+        select(CanonAuthorityProfile)
+        .where(CanonAuthorityProfile.book_id == book_id, CanonAuthorityProfile.status == "active")
+        .order_by(CanonAuthorityProfile.id.desc())
+    )
+    if profile and (profile.source or "").startswith("human_confirmed"):
+        return profile
+    return None
 
 
 def _semantic_memory_check(session: Session, book_id: int) -> ReadinessCheck:

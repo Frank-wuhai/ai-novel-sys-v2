@@ -156,11 +156,32 @@ def _taste_memory(rows: list[tuple[ChapterVersion, QualityReport]]) -> list[str]
     return memory
 
 
+PROMPT_BENCHMARK_META_MARKERS = (
+    "游戏论坛",
+    "内测公告",
+    "内测资格",
+    "系统分配",
+    "任务面板",
+    "任务栏",
+    "NPC",
+    "玩家",
+)
+
+
 def _benchmark_fragment(text: str) -> str:
     paragraphs = [re.sub(r"\s+", " ", item).strip() for item in str(text or "").splitlines() if len(item.strip()) >= 80]
-    if not paragraphs:
-        return ""
-    return max(paragraphs[:12], key=len)[:220]
+    for paragraph in paragraphs[:12]:
+        if _fragment_safe_for_prompt(paragraph):
+            return paragraph[:220]
+    return ""
+
+
+def _fragment_safe_for_prompt(fragment: str) -> bool:
+    # Benchmark fragments are copied verbatim into prompts. Do not teach the
+    # generator polluted shortcuts such as forum/closed-beta explanations or
+    # NPC/player interface language; style memory is useful only when it is
+    # safe to imitate directly.
+    return not any(marker in (fragment or "") for marker in PROMPT_BENCHMARK_META_MARKERS)
 
 
 def _loads_json(value: str | None) -> dict[str, Any]:

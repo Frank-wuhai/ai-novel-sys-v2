@@ -68,13 +68,24 @@ class Settings:
     llm_draft_temperature: float = _float_env("LLM_DRAFT_TEMPERATURE", _float_env("LLM_TEMPERATURE", 0.55))
     llm_revision_temperature: float = _float_env("LLM_REVISION_TEMPERATURE", _float_env("LLM_TEMPERATURE", 0.55))
     llm_review_temperature: float = _float_env("LLM_REVIEW_TEMPERATURE", 0.35)
-    llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 8000)
-    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 8000)
+    # 主编评审多次采样次数：LLM 评分在 70-86 间抖动会让 75 门禁沦为抛硬币。
+    # 采样 N 次取中位数分数+多数 verdict 消除单次波动，保证入库判定可复现。
+    # 默认 3；设为 1 退化为单次采样（旧行为）。
+    llm_review_samples: int = _int_env("LLM_REVIEW_SAMPLES", 3)
+    llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 5000)
+    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 5000)
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
-    llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 1800)
+    llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 300)
+    llm_revision_prompt_max_chars: int = _int_env("LLM_REVISION_PROMPT_MAX_CHARS", 9000)
+    llm_revision_candidate_count: int = _int_env("LLM_REVISION_CANDIDATE_COUNT", 1)
     revision_persistent_max_full_revisions: int = _int_env("REVISION_PERSISTENT_MAX_FULL_REVISIONS", 2)
     production_auto_revision_loop_max_rounds: int = _int_env("PRODUCTION_AUTO_REVISION_LOOP_MAX_ROUNDS", 2)
+    paradigm_refine_enabled: bool = _bool_env("PARADIGM_REFINE_ENABLED", False)
+    b_pipeline_enabled: bool = _bool_env("B_PIPELINE_ENABLED", False)
+    draft_inline_quality_loop_enabled: bool = _bool_env("DRAFT_INLINE_QUALITY_LOOP_ENABLED", False)
+    draft_llm_repair_enabled: bool = _bool_env("DRAFT_LLM_REPAIR_ENABLED", False)
+    b_pipeline_model: str = os.getenv("B_PIPELINE_MODEL", "deepseek-v4-pro-thinking")
     production_profile: str = os.getenv("PRODUCTION_PROFILE", "standard").strip().lower() or "standard"
     production_mode: str = os.getenv("PRODUCTION_MODE", "trial").strip().lower() or "trial"
     llm_input_price_per_1m_tokens: float = _float_env("LLM_INPUT_PRICE_PER_1M_TOKENS", 0.0)

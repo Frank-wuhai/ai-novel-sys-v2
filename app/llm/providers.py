@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 
-from openai import BadRequestError, OpenAI
+import httpx
+from openai import NOT_GIVEN, BadRequestError, OpenAI
 
 from app.core.config import settings
 
@@ -36,6 +40,10 @@ class BaseLLMProvider:
         model: str | None = None,
     ) -> LLMResponse:
         raise NotImplementedError
+
+
+class LLMRequestTimeoutError(TimeoutError):
+    pass
 
 
 class DryRunProvider(BaseLLMProvider):
@@ -150,10 +158,17 @@ class ArkOpenAIProvider(BaseLLMProvider):
         if not api_key or not settings.ark_base_url:
             raise RuntimeError(_missing_ark_credentials_message())
         _validate_ark_plan_base_url(settings.ark_base_url)
-        kwargs = {"api_key": api_key, "base_url": settings.ark_base_url}
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        self.client = OpenAI(**kwargs)
+        self.timeout = timeout
+        # 显式重试:单次请求超时/瞬时网络错误时,SDK 自动重试,避免长章偶发 hang
+        # 直接判失败(之前 6 章 JSON 失败 + 一次 hang 死均与无重试保护相关)。
+        # 2026-08-07 v25.10:max_retries 2→1(撞代理墙时多次重试总超时更长,不如快失败)
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=settings.ark_base_url,
+            timeout=timeout if timeout is not None else NOT_GIVEN,
+            max_retries=1,
+            http_client=httpx.Client(trust_env=False),
+        )
 
     def generate(
         self,
@@ -178,17 +193,19 @@ class ArkOpenAIProvider(BaseLLMProvider):
         if response_format is not None:
             kwargs["response_format"] = response_format
         try:
-            result = self.client.chat.completions.create(
-                **kwargs,
-            )
+            result = self._create_completion(kwargs)
         except BadRequestError as exc:
             if response_format is None or not _is_unsupported_response_format_error(exc):
                 raise
             kwargs.pop("response_format", None)
-            result = self.client.chat.completions.create(
-                **kwargs,
-            )
-        text = result.choices[0].message.content or ""
+            result = self._create_completion(kwargs)
+        _msg = result.choices[0].message
+        text = _msg.content or ""
+        # thinking 类模型有时把 JSON 结果放进 reasoning_content 而 content 为空,
+        # 导致下游拿到空文本(no_json)。content 为空时兜底取 reasoning,增益无损。
+        if not text.strip():
+            text = (getattr(_msg, "reasoning_content", None)
+                    or getattr(_msg, "reasoning", None) or "")
         usage = _usage_dict(getattr(result, "usage", None))
         request_id = getattr(result, "id", "") or ""
         return LLMResponse(
@@ -204,11 +221,34 @@ class ArkOpenAIProvider(BaseLLMProvider):
             request_id=request_id,
         )
 
+    def _create_completion(self, kwargs: dict):
+        with _hard_timeout(self.timeout, label=f"OpenAI-compatible request model={kwargs.get('model')}"):
+            return self.client.chat.completions.create(**kwargs)
+
 
 def get_provider(dry_run: bool) -> BaseLLMProvider:
     if dry_run:
         return DryRunProvider()
     return ArkOpenAIProvider(timeout=settings.llm_request_timeout_seconds)
+
+
+@contextmanager
+def _hard_timeout(seconds: float | None, *, label: str):
+    if not seconds or seconds <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(signum, frame):
+        raise LLMRequestTimeoutError(f"{label} exceeded hard timeout {seconds:g}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _is_unsupported_response_format_error(exc: BadRequestError) -> bool:

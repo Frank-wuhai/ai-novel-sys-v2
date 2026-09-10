@@ -16,6 +16,7 @@ from app.services.llm_errors import classify_exception
 from app.services.production import draft_chapter, revise_chapter
 from app.services.production_gate import assert_production_gate
 from app.services.rebuild_candidates import generate_rebuild_candidates
+from app.services.revision_candidates import run_revision_candidates
 from app.services.revision_supervisor import persistent_revision_budget
 
 
@@ -151,7 +152,7 @@ def enqueue_rebuild_candidates(
     book_id: int,
     chapter_number: int,
     dry_run: bool = True,
-    candidate_count: int = 3,
+    candidate_count: int = 1,
     max_attempts: int = 2,
     timeout_seconds: int = 3600,
 ) -> GenerationTask:
@@ -165,7 +166,7 @@ def enqueue_rebuild_candidates(
         queue_type=QUEUE_REBUILD_CANDIDATES,
         max_attempts=max_attempts,
         timeout_seconds=timeout_seconds,
-        extra_input={"candidate_count": max(2, min(5, int(candidate_count or 3)))},
+        extra_input={"candidate_count": max(1, min(3, int(candidate_count or 1)))},
     )
 
 def list_generation_queue(
@@ -463,14 +464,27 @@ def _execute_generation_task_body(
             version = draft_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)
             version_id = version.id
         elif task.task_type == QUEUE_REVISE:
-            version = revise_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)
-            version_id = version.id
+            candidate_count = int(input_data.get("candidate_count") or settings.llm_revision_candidate_count or 1)
+            if candidate_count > 1:
+                candidate_result = run_revision_candidates(
+                    session,
+                    book_id=task.book_id,
+                    chapter_number=chapter_number,
+                    dry_run=dry_run,
+                    candidate_count=candidate_count,
+                )
+                version = candidate_result.selected_version
+                version_id = version.id
+                llm_parameters["revision_candidates"] = candidate_result.audit_payload()
+            else:
+                version = revise_chapter(session, book_id=task.book_id, chapter_number=chapter_number, dry_run=dry_run)
+                version_id = version.id
         elif task.task_type == QUEUE_REBUILD_CANDIDATES:
             result = generate_rebuild_candidates(
                 session,
                 book_id=task.book_id,
                 chapter_number=chapter_number,
-                candidate_count=int(input_data.get("candidate_count") or 3),
+                candidate_count=int(input_data.get("candidate_count") or 1),
                 dry_run=dry_run,
                 existing_task_id=task.id,
             )
@@ -718,7 +732,11 @@ def _guard_revision_enqueue_policy(session: Session, *, book_id: int, chapter_nu
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
         raise ValueError("chapter not found")
-    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    version = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id, ChapterVersion.status != "discarded")
+        .order_by(ChapterVersion.id.desc())
+    )
     if not version or version.status != "needs_revision":
         raise ValueError("revision queue requires latest chapter version to be needs_revision")
     brief = session.scalar(
@@ -730,6 +748,8 @@ def _guard_revision_enqueue_policy(session: Session, *, book_id: int, chapter_nu
         raise ValueError("revision queue requires active revision brief")
     if _active_budget_recovery_revision(version, brief) or _revision_brief_targets_version(brief, version):
         return
+    if _active_rebuild_candidate_revision(version, brief):
+        return
     budget = persistent_revision_budget(
         session,
         book_id=book_id,
@@ -738,6 +758,35 @@ def _guard_revision_enqueue_policy(session: Session, *, book_id: int, chapter_nu
     )
     if budget.exceeded:
         raise ValueError(f"revision queue blocked by {budget.reason}; run next action first to apply recovery strategy")
+
+
+def _active_rebuild_candidate_revision(version: ChapterVersion, brief: ChapterBrief) -> bool:
+    source = str(version.source or "")
+    if not source.startswith(("rebuild_candidate:", "rebuild_candidate_selected:")):
+        return False
+    return _revision_brief_has_protected_review_marker(brief)
+
+
+def _revision_brief_has_protected_review_marker(brief: ChapterBrief | None) -> bool:
+    if not brief:
+        return False
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    if any(
+        marker in text
+        for marker in (
+            "reading_assessment_contract",
+            "reading_assessment_auto_quality#",
+            "阅读评估结论",
+            "当前稿不是正式批准稿",
+            "clean_rebuild_contract@v1",
+        )
+    ):
+        return True
+    normalized = text.lower()
+    is_unit_flow = "unit_flow" in normalized or "单元流" in text or "小单元" in text
+    is_local_contract = "revision_mode:local_patch" in normalized or "revision_mode:targeted" in normalized
+    has_explicit_target = any(marker in text for marker in ("只修第", "只重写第", "只替换第", "只改第", "只动第"))
+    return is_unit_flow and is_local_contract and has_explicit_target
 
 
 def _active_budget_recovery_revision(version: ChapterVersion, brief: ChapterBrief) -> bool:
@@ -758,6 +807,7 @@ def _revision_brief_targets_version(brief: ChapterBrief, version: ChapterVersion
     current_markers = (
         rf"合同当前底稿\s*[：:]\s*{version_label}",
         rf"源版本锁定\s*[：:]\s*{version_label}",
+        rf"旧稿\s*{version_label}",
         rf"当前待修底稿\s*[：:]\s*{version_label}",
         rf"以\s*{version_label}\s*为底稿",
         rf"source_version_id\s*[=:]\s*{int(version.id)}(?!\d)",

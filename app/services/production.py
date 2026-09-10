@@ -17,7 +17,7 @@ from app.models.entities import (
 )
 from app.services.chapter_drafting import draft_chapter
 from app.services.chapter_revision import create_revision_brief, revise_chapter
-from app.services.chapter_standards import ensure_chapter_production_standard
+from app.services.chapter_standards import ensure_chapter_production_standard, _resolve_chapter_type
 from app.services.context_contamination import context_anchor_lines
 from app.services.brief_sanitizer import sanitize_chapter_brief_fields
 from app.services.prompts import seed_prompt_templates
@@ -102,7 +102,7 @@ def create_chapter_brief(
         chapter_id=chapter.id,
         goal=goal,
         required_beats=effective_required_beats,
-        constraints=ensure_chapter_production_standard(constraints, chapter_number=chapter_number),
+        constraints=ensure_chapter_production_standard(constraints, chapter_number=chapter_number, chapter_type=_resolve_chapter_type(chapter_number)),
         status="ready",
     )
     session.add(brief)
@@ -148,13 +148,15 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
         .where(QualityReport.chapter_version_id == version.id)
         .order_by(QualityReport.id.desc())
     )
-    # Sprint 2 Phase E: approve_chapter is a workflow-progression step, not a
-    # second content review. All content gates (hard_gate, chapter_type_gate,
-    # editorial, continuity) have already run upstream in planning; adding a
-    # duplicate blocker check here would only re-reject chapters that the
-    # planner already blessed. The only content-integrity check we keep is
-    # the classic "you cannot promote a still-in-revision version".
+    # approve_chapter is workflow progression; content gates already ran upstream.
     if version.status == "needs_revision":
+        if quality and not quality.passed and _quality_allows_human_soft_acceptance(quality) and _is_human_reviewer(reviewer):
+            quality = _record_human_soft_acceptance_quality(
+                session,
+                quality=quality,
+                reviewer=reviewer,
+                reason="硬门槛通过，规则软质检未满；作者/人工确认小瑕疵不影响整体阅读，准许采用。",
+            )
         if not quality or not quality.passed:
             raise ValueError("当前版本仍未通过质检，不能采用。")
         version.status = move("chapter_version", version.status, "reviewed_pass", "quality_pass")
@@ -163,9 +165,113 @@ def approve_chapter(session: Session, *, version_id: int, reviewer: str) -> Chap
     ):
         brief.status = "superseded"
     version.status = move("chapter_version", version.status, "approved", "human_approve")
-    session.add(ChapterReview(chapter_version_id=version.id, verdict="approved", reviewer=reviewer, notes="manual approval"))
+    if chapter := session.get(Chapter, version.chapter_id):
+        chapter.status = "approved"
+        chapter.title = version.title or chapter.title
+    review = ChapterReview(chapter_version_id=version.id, verdict="approved", reviewer=reviewer, notes="manual approval")
+    session.add(review)
+    session.flush()
+    memory_result: dict[str, int | str] = {"states": 0, "facts": 0, "hooks": 0, "summaries": 0}
+    try:
+        from app.services.long_term_memory import sync_long_term_memory_for_version
+        memory_result = sync_long_term_memory_for_version(session, chapter_version_id=version.id)
+    except Exception as exc:
+        memory_result = {"states": 0, "facts": 0, "hooks": 0, "summaries": 0, "error": exc.__class__.__name__}
+    review.notes = "manual approval; long_term_memory=" + json.dumps(memory_result, ensure_ascii=False, sort_keys=True)
     session.flush()
     return version
+
+
+def _is_human_reviewer(reviewer: str) -> bool:
+    value = (reviewer or "").strip().lower()
+    if not value:
+        return False
+    return not value.startswith(("auto", "system", "pipeline", "cron", "worker"))
+
+
+def _record_human_soft_acceptance_quality(
+    session: Session,
+    *,
+    quality: QualityReport,
+    reviewer: str,
+    reason: str,
+) -> QualityReport:
+    try:
+        report_data = json.loads(quality.report or "{}")
+    except json.JSONDecodeError:
+        report_data = {"raw_report": quality.report or ""}
+    if not isinstance(report_data, dict):
+        report_data = {"raw_report": str(report_data)}
+    report_data["status"] = "PASS"
+    report_data["passed"] = True
+    report_data["human_acceptance"] = {
+        "schema": "human_acceptance_v1",
+        "reviewer": reviewer,
+        "decision": "pass",
+        "reason": reason,
+        "based_on_quality_report_id": quality.id,
+    }
+    final_verdict = report_data.setdefault("final_verdict", {})
+    if isinstance(final_verdict, dict):
+        final_verdict.update(
+            {
+                "status": "reviewed_pass",
+                "label": "人工确认通过",
+                "reason": reason,
+                "source": "human_acceptance_v1",
+            }
+        )
+    accepted = QualityReport(
+        chapter_version_id=quality.chapter_version_id,
+        score=quality.score,
+        passed=True,
+        report=json.dumps(report_data, ensure_ascii=False),
+    )
+    session.add(accepted)
+    session.add(
+        ChapterReview(
+            chapter_version_id=quality.chapter_version_id,
+            verdict="pass",
+            reviewer=reviewer,
+            notes=reason,
+        )
+    )
+    session.flush()
+    return accepted
+
+
+def _quality_allows_human_soft_acceptance(quality: QualityReport) -> bool:
+    try:
+        data = json.loads(quality.report or "{}")
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    if not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+        return False
+    issues = [str(item) for item in data.get("issues", []) if item]
+    hard_prefixes = (
+        "bias_blocker",
+        "forbidden_marker",
+        "setting_contradiction",
+        "system_artifact",
+        "platform_risk",
+        "too_short",
+        "too_long",
+    )
+    if any(issue.startswith(hard_prefixes) for issue in issues):
+        return False
+    chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
+    if chapter_type_gate and not bool(chapter_type_gate.get("passed") or chapter_type_gate.get("soft_pass")):
+        return False
+    stratification = data.get("editorial_stratification") if isinstance(data.get("editorial_stratification"), dict) else {}
+    tier = str(stratification.get("tier") or "")
+    if tier in {"A_near_final", "B_solid_draft"}:
+        return True
+    guidance = data.get("editorial_guidance") if isinstance(data.get("editorial_guidance"), dict) else {}
+    level = str(guidance.get("level") or "")
+    return level in {"准定稿", "合格底稿"}
 
 
 def _quality_has_unresolved_gate_blocker(quality: QualityReport | None) -> bool:
@@ -176,15 +282,21 @@ def _quality_has_unresolved_gate_blocker(quality: QualityReport | None) -> bool:
     except json.JSONDecodeError:
         return False
     chapter_type_gate = data.get("chapter_type_gate") if isinstance(data.get("chapter_type_gate"), dict) else {}
-    # Sprint 2 P2-Ch44 soft-pass: same rationale as planning.py mirror.
-    soft_pass_active = bool(chapter_type_gate.get("soft_pass"))
+    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
+    hard_gate_ok = bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS")
+    # A 方案（2026-07-23）· type_gate 越权否决清理（精准边界）：
+    # 常规连载推进章(serial_progress) → quality 层已放行(hard_gate过)时 type_gate
+    # 不阻塞。生死线章型(strict=True: opening/early_serial/turning_point) → 保留
+    # type_gate 否决权，即使 hard_gate 过、type_gate 未过仍阻塞。soft_pass 逃生阀保留。
+    is_strict_chapter = bool(chapter_type_gate.get("strict"))
+    quality_layer_cleared = hard_gate_ok and not is_strict_chapter
+    soft_pass_active = bool(chapter_type_gate.get("soft_pass")) or quality_layer_cleared
     issues = [str(item) for item in data.get("issues") or []]
     if any(item.startswith("chapter_type_gate_failed") for item in issues) and not soft_pass_active:
         return True
     if chapter_type_gate and not bool(chapter_type_gate.get("passed")) and not soft_pass_active:
         return True
-    hard_gate = data.get("hard_gate") if isinstance(data.get("hard_gate"), dict) else {}
-    if hard_gate and not bool(hard_gate.get("passed") or hard_gate.get("status") == "PASS"):
+    if hard_gate and not hard_gate_ok:
         return True
     return False
 
@@ -206,3 +318,21 @@ def list_chapters(session: Session, *, book_id: int) -> list[Chapter]:
 
 def latest_chapter_version(session: Session, *, chapter_id: int) -> ChapterVersion | None:
     return session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter_id).order_by(ChapterVersion.id.desc()))
+
+
+def current_chapter_version(session: Session, *, chapter_id: int) -> ChapterVersion | None:
+    approved = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter_id, ChapterVersion.status == "approved")
+        .order_by(ChapterVersion.id.desc())
+    )
+    if approved:
+        return approved
+    reviewed = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter_id, ChapterVersion.status == "reviewed_pass")
+        .order_by(ChapterVersion.id.desc())
+    )
+    if reviewed:
+        return reviewed
+    return latest_chapter_version(session, chapter_id=chapter_id)

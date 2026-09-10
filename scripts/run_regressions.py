@@ -88,6 +88,7 @@ def main() -> int:
     args = parser.parse_args()
 
     checks: list[tuple[str, list[str]]] = []
+    checks.append(("repo_hygiene_guard", ["scripts/repo_hygiene_guard.py"]))
     if not args.skip_smoke:
         checks.append(("smoke", ["scripts/smoke_test.py"]))
     checks.extend(
@@ -146,6 +147,9 @@ def main() -> int:
             ("production_action_consistency", ["scripts/production_action_consistency_regression.py"]),
             ("agent_plan_utilization", ["scripts/agent_plan_utilization_regression.py"]),
             ("rebuild_candidates", ["scripts/rebuild_candidates_regression.py"]),
+            ("revision_world_logic_guard", ["scripts/revision_world_logic_guard_regression.py"]),
+            ("revision_length_guard", ["scripts/revision_length_guard_regression.py"]),
+            ("revision_queue_discarded_latest", ["scripts/revision_queue_discarded_latest_regression.py"]),
             ("rebuild_exhaustion_escalation", ["scripts/rebuild_exhaustion_escalation_regression.py"]),
             ("reading_assessment_rebind", ["scripts/reading_assessment_rebind_regression.py"]),
             ("reading_assessment_state", ["scripts/reading_assessment_state_regression.py"]),
@@ -176,6 +180,7 @@ def main() -> int:
             ("editorial_slack", ["scripts/editorial_slack_regression.py"]),
             ("scene_expansion", ["scripts/scene_expansion_regression.py"]),
             ("production_llm_json_repair", ["scripts/production_llm_json_repair_regression.py"]),
+            ("length_repair_contamination", ["scripts/length_repair_contamination_regression.py"]),
             ("chapter_sample_json_repair", ["scripts/chapter_sample_json_repair_regression.py"]),
             ("sample_adoption_continuity", ["scripts/sample_adoption_continuity_regression.py"]),
             ("chapter_unit", ["scripts/chapter_unit_regression.py"]),
