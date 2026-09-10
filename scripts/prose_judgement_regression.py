@@ -132,17 +132,21 @@ def main() -> int:
         elif task.status != "completed":
             failures.append(f"generation_task_status:{task.status}")
 
+        # session 关闭前取出所需值（对象随 session_scope 结束后 detached）
+        result_control = {"passed": bool(control.passed), "score": int(control.score or 0)}
+        result_judged = {
+            "passed": bool(judged.passed),
+            "score": int(judged.score or 0),
+            "prose_judgement": judged_data.get("prose_judgement"),
+        }
+
     print(
         json.dumps(
             {
                 "status": "fail" if failures else "pass",
                 "failures": failures,
-                "control": {"passed": control.passed, "score": control.score},
-                "judged": {
-                    "passed": judged.passed,
-                    "score": judged.score,
-                    "prose_judgement": judged_data.get("prose_judgement"),
-                },
+                "control": result_control,
+                "judged": result_judged,
             },
             ensure_ascii=False,
             indent=2,
