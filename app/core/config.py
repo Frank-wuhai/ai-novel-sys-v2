@@ -79,7 +79,9 @@ class Settings:
     # 固定模型，产出缺口表 (无 verdict/score，不自动 FAIL)。
     prose_judge_model: str = os.getenv("PROSE_JUDGE_MODEL", os.getenv("MODEL_NAME", "deepseek-v4-flash"))
     prose_judge_temperature: float = _float_env("PROSE_JUDGE_TEMPERATURE", 0.0)
-    prose_judge_max_tokens: int = _int_env("PROSE_JUDGE_MAX_TOKENS", 2600)
+    # 默认 8000: thinking 类模型(如 kimi-k3)判卷 reasoning 约 2000 Token,
+    # 2600 会在真机上截断 JSON (2026-09-17 第4步端到端实测 StructuredOutputError)。
+    prose_judge_max_tokens: int = _int_env("PROSE_JUDGE_MAX_TOKENS", 8000)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
     llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 300)
     llm_revision_prompt_max_chars: int = _int_env("LLM_REVISION_PROMPT_MAX_CHARS", 9000)

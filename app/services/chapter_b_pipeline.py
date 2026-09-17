@@ -457,7 +457,12 @@ def _fallback_content_from_non_json(text: str) -> str:
         return ""
     if any(marker in value for marker in ("无法", "不能", "抱歉", "JSON", "json", "质检报告", "修订合同")):
         return ""
-    if hanzi_count(value) < 80:
+    count = hanzi_count(value)
+    if count < 80:
+        return ""
+    # 2026-09-17 真机实测: 失控输出(模型抛开 JSON 契约直接长篇跑题)可达 3600+ 字
+    # 且混入废弃设定词; 单元预算上限 520, 超过 1500 字一律视为失控, 拒收走重试。
+    if count > 1500:
         return ""
     return value
 
@@ -594,9 +599,12 @@ def rewrite_failed_unit(
 严格输出 JSON：{{"content":"替换后的小说正文","note":"修复点"}}"""
     data, _ = _call_json(
         provider, prompt,
-        max_tokens=max(max_tokens // 2, 3200), temperature=temperature, model=model,
+        # 2026-09-17 真机实测: kimi-k3 思考Token ~2000-4000+, 6000 上限下返修仍
+        # 出现空响应/截断; 下限 8000 + 3 次尝试(_retries=2)吸收抖动尾部。
+        max_tokens=max(max_tokens // 2, 8000), temperature=temperature, model=model,
         tag=f"B管道重写失败单元{unit.get('index')}",
         schema='{"content":"..","note":".."}',
+        _retries=2,
     )
     return str(data.get("content") or "").strip()
 
@@ -715,9 +723,13 @@ def write_unit(
 严格输出 JSON：{{"content":"这个场景的正文（可直接接在前文后面，正文内含分段换行）","note":"本场景完成的小变化"}}"""
     data, _ = _call_json(
         provider, prompt,
-        max_tokens=max(max_tokens // 2, 4000), temperature=temperature, model=model,
+        # 2026-09-17 真机实测: kimi-k3 单元写作在 4000 上限下约半数单元 reasoning
+        # 烧满额度、content 为空(0字单元); 8000 时 finish_reason=stop 正常出稿;
+        # 偶发空响应/截断由 3 次尝试(_retries=2)吸收。
+        max_tokens=max(max_tokens // 2, 8000), temperature=temperature, model=model,
         tag=f"B管道精写单元{unit.get('index')}",
         schema='{"content":"..","note":".."}',
+        _retries=2,
     )
     return str(data.get("content") or "").strip()
 
@@ -1368,15 +1380,25 @@ def generate_draft_via_b_pipeline(
             failure_contract = "\n".join(
                 part for part in (round_contract, unit_repair_contract(unit_gate), structure_contract) if part
             )
-            repair_text = rewrite_failed_unit(
-                provider,
-                book_title=book_title, genre=genre, unit=unit, failed_text=text,
-                failure_contract=failure_contract,
-                prev_tail=prev_tail, next_scene=next_scene, canon_context=canon_context,
-                constraints=constraints,
-                unit_min=unit_min, unit_max=unit_max,
-                max_tokens=max_tokens, temperature=temperature, model=model,
-            )
+            try:
+                repair_text = rewrite_failed_unit(
+                    provider,
+                    book_title=book_title, genre=genre, unit=unit, failed_text=text,
+                    failure_contract=failure_contract,
+                    prev_tail=prev_tail, next_scene=next_scene, canon_context=canon_context,
+                    constraints=constraints,
+                    unit_min=unit_min, unit_max=unit_max,
+                    max_tokens=max_tokens, temperature=temperature, model=model,
+                )
+            except Exception as _repair_exc:
+                # 2026-09-17 真机实测: 返修 LLM 调用本身可能多次失败(空响应/截断)
+                # 而抛 StructuredOutputError; 不得让单个单元的返修异常杀掉整章,
+                # 丢弃本轮、交给下一轮返修; 原文若硬违规仍由循环后终检兜底。
+                print(
+                    f"[B-pipe] 单元{i+1} 第{repair_round}轮返修调用失败, 跳过本轮: {_repair_exc}",
+                    flush=True,
+                )
+                continue
             repair_text = _force_paragraphs(repair_text)
             repair_gate = evaluate_unit_quality(
                 repair_text,
@@ -1391,9 +1413,16 @@ def generate_draft_via_b_pipeline(
                 is_last=(i == len(units) - 1),
             )
             if _has_hard_story_bible_issue(repair_gate.issues):
-                raise ValueError(
-                    f"B pipeline: 单元{i+1} 返修后仍违反 Story Bible，拒绝继续：{repair_gate.issues[:6]}"
+                # 2026-09-17 真机实测: 返修稿硬违规(失控输出混入废弃设定词)不得接受,
+                # 但立即整章放弃会让 40 分钟 Draft 被单个失控单元杀掉;
+                # 改为丢弃该返修稿、留给下一轮返修(温度采样)机会,
+                # 全部轮次仍违规由循环后的终检(下文 raise)兜底, 安全性不变。
+                print(
+                    f"[B-pipe] 单元{i+1} 第{repair_round}轮返修稿硬违规已拒收: "
+                    f"{repair_gate.issues[:4]}",
+                    flush=True,
                 )
+                continue
             repair_structure_contract, repair_structure_report = _unit_structure_repair_contract(
                 repair_text,
                 unit_min=unit_min,
