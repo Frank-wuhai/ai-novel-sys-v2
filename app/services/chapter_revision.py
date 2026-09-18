@@ -1506,7 +1506,9 @@ def _try_ending_hook_patch_revision(
     try:
         response = provider.generate(
             prompt,
-            max_tokens=min(settings.llm_revision_max_tokens, 2200),
+            # 2026-09-18: 2200 装不下 thinking 模型推理(~2000)+替换尾(≤650字),
+            # kimi-k3 真机空响应; 下限抬到 4500。
+            max_tokens=min(settings.llm_revision_max_tokens, 4500),
             temperature=temperature,
             model=model,
             response_format={"type": "json_object"} if provider.name != "dry_run" else None,
@@ -1516,7 +1518,7 @@ def _try_ending_hook_patch_revision(
             response_text=response.text,
             original_prompt=prompt,
             expected_schema='{"replacement_tail":"替换后的章末正文","patch_note":"说明改了哪里"}',
-            max_tokens=2200,
+            max_tokens=4500,
             temperature=temperature,
             model=model,
             task_label="章末钩子局部补丁",

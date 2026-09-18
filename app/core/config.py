@@ -73,7 +73,9 @@ class Settings:
     # 默认 3；设为 1 退化为单次采样（旧行为）。
     llm_review_samples: int = _int_env("LLM_REVIEW_SAMPLES", 3)
     llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 5000)
-    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 5000)
+    # 默认 9000: 修订调用要装下全章正文(~2500 Token)+thinking 推理(2000-4000),
+    # 5000 在 kimi-k3 真机上空响应/截断(2026-09-18 修订流实测)。
+    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 9000)
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
     # 成文判据判卷 (2026-09-10 第3步): prose_judgement_v1 要求温度 0、固定判卷 prompt、
     # 固定模型，产出缺口表 (无 verdict/score，不自动 FAIL)。
