@@ -268,7 +268,12 @@ def review_chapter(
         failed_version=version,
         quality=quality,
     )
-    comparison = compare_and_restore_if_regressed(session, current_version=version, current_quality=quality)
+    # 2026-09-20 第 4.5 步: QC 评审只读。对比结论仍记入报告 revision_comparison 节,
+    # 但评审命令不再改版本状态(曾把用户裁决驳回的正文按噪声分自动恢复回最新);
+    # 回退恢复收归修订管线 revise-chapter 入口(见 chapter_revision.revise_chapter)。
+    comparison = compare_and_restore_if_regressed(
+        session, current_version=version, current_quality=quality, allow_restore=False
+    )
     if comparison.restored_version_id is not None:
         restored_quality = session.scalar(
             select(QualityReport)

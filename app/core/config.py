@@ -72,6 +72,9 @@ class Settings:
     # 采样 N 次取中位数分数+多数 verdict 消除单次波动，保证入库判定可复现。
     # 默认 3；设为 1 退化为单次采样（旧行为）。
     llm_review_samples: int = _int_env("LLM_REVIEW_SAMPLES", 3)
+    # intent_acceptance 语义复核采样数: 与 llm_review 同源抖动(2026-09-18 同文两次
+    # 评审意图分 71 vs 33, 全是单发复核的随机性), 逐点多数票, 默认 3; 设 1 退化旧行为。
+    intent_acceptance_samples: int = _int_env("INTENT_ACCEPTANCE_SAMPLES", 3)
     llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 5000)
     # 默认 9000: 修订调用要装下全章正文(~2500 Token)+thinking 推理(2000-4000),
     # 5000 在 kimi-k3 真机上空响应/截断(2026-09-18 修订流实测)。
@@ -81,9 +84,10 @@ class Settings:
     # 固定模型，产出缺口表 (无 verdict/score，不自动 FAIL)。
     prose_judge_model: str = os.getenv("PROSE_JUDGE_MODEL", os.getenv("MODEL_NAME", "deepseek-v4-flash"))
     prose_judge_temperature: float = _float_env("PROSE_JUDGE_TEMPERATURE", 0.0)
-    # 默认 8000: thinking 类模型(如 kimi-k3)判卷 reasoning 约 2000 Token,
-    # 2600 会在真机上截断 JSON (2026-09-17 第4步端到端实测 StructuredOutputError)。
-    prose_judge_max_tokens: int = _int_env("PROSE_JUDGE_MAX_TOKENS", 8000)
+    # 默认 16000: thinking 类模型(如 kimi-k3)判卷 reasoning 实测 7400-11000+ Token,
+    # 成功那次用掉 7921/8000(踩在悬崖上), 8000 与 12000 上限均实测 StructuredOutputError,
+    # 16000 才稳定 (2026-09-18 第4步/v6 复审三次真机对照, 2026-09-20 第 4.5 步提默认)。
+    prose_judge_max_tokens: int = _int_env("PROSE_JUDGE_MAX_TOKENS", 16000)
     llm_smoke_max_tokens: int = _int_env("LLM_SMOKE_MAX_TOKENS", 20)
     llm_request_timeout_seconds: int = _int_env("LLM_REQUEST_TIMEOUT_SECONDS", 300)
     llm_revision_prompt_max_chars: int = _int_env("LLM_REVISION_PROMPT_MAX_CHARS", 9000)

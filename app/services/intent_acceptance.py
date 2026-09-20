@@ -657,6 +657,32 @@ _SEMANTIC_COVERAGE_SYSTEM = (
 )
 
 
+def _parse_semantic_coverage(raw: str, point_count: int) -> dict[int, bool] | None:
+    """解析单次语义覆盖判定输出；解析失败返回 None（该次采样作废）。"""
+    import json as _json
+
+    raw = (raw or "").strip()
+    # 容错：剥离 ```json ``` 围栏
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1] if raw.count("```") >= 2 else raw.strip("`")
+        if raw.lstrip().startswith("json"):
+            raw = raw.lstrip()[4:]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        parsed = _json.loads(raw[start : end + 1])
+    except Exception:
+        return None
+    out: dict[int, bool] = {}
+    for item in parsed.get("results", []):
+        idx = item.get("index")
+        if isinstance(idx, int) and 0 <= idx < point_count:
+            out[idx] = bool(item.get("fulfilled"))
+    return out
+
+
 def _llm_semantic_coverage(
     *,
     content: str,
@@ -668,12 +694,15 @@ def _llm_semantic_coverage(
 
     provider 为 None 时自行获取 live provider；任何异常都返回空 dict（调用方
     回退到纯字面匹配结果，保证质检不因 LLM 故障而硬失败）。
+
+    2026-09-20 第 4.5 步：单发改多采样多数票。同一正文单发复核曾一次挽回 5 条、
+    一次只挽回 1 条（report 3 vs report 4，同文分差 26），与 llm_review 的
+    「70-86 抖动让 75 门禁沦为抛硬币」同源。现按 settings.intent_acceptance_samples
+    （默认 3，对齐 llm_review_samples）逐点多数票：≥半数有效采样判 fulfilled 才算挽回。
     """
     if not points:
         return {}
     try:
-        import json as _json
-
         from app.core.config import settings
 
         if provider is None:
@@ -681,6 +710,7 @@ def _llm_semantic_coverage(
 
             provider = get_provider(False)
         model = model or settings.llm_review_model
+        samples = max(1, int(getattr(settings, "intent_acceptance_samples", 3) or 3))
         numbered = "\n".join(f"[{i}] {p}" for i, p in enumerate(points))
         prompt = (
             f"{_SEMANTIC_COVERAGE_SYSTEM}\n\n"
@@ -688,28 +718,31 @@ def _llm_semantic_coverage(
             f"=== 待判定的剧情承诺（逐条）===\n{numbered}\n\n"
             "请对每一条给出 fulfilled 判定，index 必须与上面的编号一一对应。只输出 JSON。"
         )
-        response = provider.generate(
-            prompt,
-            max_tokens=800,
-            temperature=0.0,
-            model=model,
-        )
-        raw = (response.text or "").strip()
-        # 容错：剥离 ```json ``` 围栏
-        if raw.startswith("```"):
-            raw = raw.split("```", 2)[1] if raw.count("```") >= 2 else raw.strip("`")
-            if raw.lstrip().startswith("json"):
-                raw = raw.lstrip()[4:]
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1:
+        fulfilled_votes: dict[int, int] = {}
+        valid_samples = 0
+        for _ in range(samples):
+            try:
+                response = provider.generate(
+                    prompt,
+                    max_tokens=800,
+                    temperature=0.0,
+                    model=model,
+                )
+                verdicts = _parse_semantic_coverage(response.text, len(points))
+            except Exception:  # noqa: BLE001 — 单次采样失败不中断，容错继续
+                continue
+            if verdicts is None:
+                continue
+            valid_samples += 1
+            for idx, fulfilled in verdicts.items():
+                if fulfilled:
+                    fulfilled_votes[idx] = fulfilled_votes.get(idx, 0) + 1
+        if valid_samples == 0:
             return {}
-        parsed = _json.loads(raw[start : end + 1])
-        out: dict[int, bool] = {}
-        for item in parsed.get("results", []):
-            idx = item.get("index")
-            if isinstance(idx, int) and 0 <= idx < len(points):
-                out[idx] = bool(item.get("fulfilled"))
-        return out
+        # 多数票：有效采样中过半判 fulfilled 才成立（缺票视为不 fulfilled，偏保守）
+        return {
+            idx: votes * 2 > valid_samples
+            for idx, votes in fulfilled_votes.items()
+        }
     except Exception:
         return {}

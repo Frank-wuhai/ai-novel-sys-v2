@@ -173,6 +173,22 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
         )
     if not quality and not _brief_has_feedback_marker(revision_brief) and not _brief_has_actionable_revision_plan(revision_brief):
         raise ValueError("quality report is required before revise")
+    # 2026-09-20 第 4.5 步: 版本回退恢复从 QC 评审收归修订入口。进入修订流时若
+    # 最新稿是相对其源稿的回退修订(revision: 链), 先恢复源稿再修订, 避免沿更差
+    # 版本继续修; 含用户裁决指令的修订稿受 compare_and_restore 保护, 不会被逆转。
+    if quality and str(source_version.source or "").startswith("revision:"):
+        from app.services.revision_comparison import compare_and_restore_if_regressed
+
+        comparison = compare_and_restore_if_regressed(
+            session, current_version=source_version, current_quality=quality
+        )
+        if comparison.restored_version_id is not None:
+            source_version = session.get(ChapterVersion, comparison.restored_version_id) or source_version
+            quality = session.scalar(
+                select(QualityReport)
+                .where(QualityReport.chapter_version_id == source_version.id)
+                .order_by(QualityReport.id.desc())
+            ) or quality
     boost = apply_revision_success_boost(session, book_id=book_id, chapter_number=chapter_number)
     if boost.applied:
         revision_brief = session.get(ChapterBrief, revision_brief.id) or revision_brief

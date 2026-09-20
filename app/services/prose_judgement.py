@@ -70,6 +70,7 @@ def run_prose_judgement(
         "llm_parameters": llm_parameters,
         "version_id": version.id,
     }
+    response = None
     try:
         response = provider.generate(
             prompt,
@@ -80,23 +81,40 @@ def run_prose_judgement(
         judgement = parse_prose_judgement_output(response.text)
     except Exception as exc:  # noqa: BLE001 — 判卷失败不阻塞质检主流程
         classification = classify_exception(exc)
+        # 2026-09-20 第 4.5 步: 判卷失败必须可观测。此前失败 task 只记 error 不记
+        # 原始响应、不落 llm_request_log, kimi-k3 两次 StructuredOutputError 不可考
+        # (无法区分 thinking 烧光预算的截断 vs 非 JSON 散文)。现: 有 response 就把
+        # 首尾各 500 字存进 output_json, 并补一条 status=failed 的 llm_request_log。
+        failure_payload = {
+            "error_category": classification.category,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "llm_parameters": llm_parameters,
+        }
+        if response is not None:
+            raw = response.text or ""
+            failure_payload["raw_response_head"] = raw[:500]
+            failure_payload["raw_response_tail"] = raw[-500:] if len(raw) > 500 else ""
+            failure_payload["raw_response_chars"] = len(raw)
         task = GenerationTask(
             book_id=book.id,
             task_type="prose_judgement",
             status="failed",
             input_json=json.dumps(input_json, ensure_ascii=False),
-            output_json=json.dumps(
-                {
-                    "error_category": classification.category,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                    "llm_parameters": llm_parameters,
-                },
-                ensure_ascii=False,
-            ),
+            output_json=json.dumps(failure_payload, ensure_ascii=False),
         )
         session.add(task)
         session.flush()
+        if response is not None:
+            record_generation_llm_log(
+                session,
+                task=task,
+                response=response,
+                prompt_template=f"{template.name}@{template.version}",
+                prompt=prompt,
+                status="failed",
+                error_category=classification.category,
+            )
         return {
             "status": "failed",
             "generation_task_id": task.id,

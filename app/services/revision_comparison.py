@@ -46,12 +46,26 @@ class RevisionComparisonResult:
         }
 
 
+USER_ADJUDICATION_MARKER = "用户裁决"
+
+
 def compare_and_restore_if_regressed(
     session: Session,
     *,
     current_version: ChapterVersion,
     current_quality: QualityReport,
+    allow_restore: bool = True,
 ) -> RevisionComparisonResult:
+    """修订稿 vs 源稿对比；回退时恢复源稿。
+
+    2026-09-20 第 4.5 步两处收紧（QC 只读化 + 用户裁决保护）：
+    - allow_restore=False（QC 评审路径）：只记录对比结论，不改版本状态。
+      恢复动作收归修订管线 revise-chapter 入口——QC 命令必须只读，
+      且恢复阈值（score_delta<=-5）曾小于门禁噪声（同文两次评审差 26 分），
+      在评审路径自动恢复等于让测量抖动直接改写版本状态。
+    - 含「用户裁决」指令的修订稿（创意门禁已终审）任何路径都禁止被分数对比
+      单方面逆转，只能人工确认后处置。
+    """
     if not str(current_version.source or "").startswith("revision:"):
         return RevisionComparisonResult("skipped", None, current_version.id, None, 0, [], "不是修订稿，不做版本对比。")
     if str(current_version.source or "").startswith(("revision_compare_restore:", "revision_recovery:", "editorial_rollback:")):
@@ -77,7 +91,19 @@ def compare_and_restore_if_regressed(
     result_status = "regressed" if should_restore else "improved_or_stable"
     restored_id = None
     decision = "修订稿未明显变差，保留当前稿继续流程。"
-    if should_restore:
+    if should_restore and _is_user_adjudicated_revision(session, version_id=current_version.id):
+        result_status = "regressed_protected"
+        decision = (
+            "修订稿低于源稿，但产出该稿的修订简报含用户裁决指令——创意门禁的裁决"
+            "禁止被分数对比单方面逆转，未自动恢复；请人工核验（注意排除评审噪声误判）后处置。"
+        )
+    elif should_restore and not allow_restore:
+        result_status = "regressed_readonly"
+        decision = (
+            "修订稿低于源稿；QC 评审路径只读（2026-09-20 第 4.5 步），未自动恢复。"
+            "如需回退请进入修订管线（revise-chapter 入口会先做回退恢复再修订）。"
+        )
+    elif should_restore:
         restored = _restore_source_version(
             session,
             source_version=source_version,
@@ -101,6 +127,27 @@ def compare_and_restore_if_regressed(
     _attach_comparison(current_quality, result)
     session.flush()
     return result
+
+
+def _is_user_adjudicated_revision(session: Session, *, version_id: int) -> bool:
+    """产出该版本的修订简报是否含「用户裁决」指令（创意门禁终审标记）。"""
+    for candidate in session.scalars(
+        select(GenerationTask)
+        .where(GenerationTask.task_type == "revise_chapter", GenerationTask.status == "completed")
+        .order_by(GenerationTask.id.desc())
+        .limit(80)
+    ):
+        output = _loads_json(candidate.output_json)
+        if int(output.get("version_id") or 0) != version_id:
+            continue
+        input_data = _loads_json(candidate.input_json)
+        brief_id = int(input_data.get("revision_brief_id") or 0)
+        brief = session.get(ChapterBrief, brief_id) if brief_id else None
+        if brief is None:
+            return False
+        text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+        return USER_ADJUDICATION_MARKER in text
+    return False
 
 
 def _source_version_for_revision(session: Session, *, version_id: int) -> ChapterVersion | None:

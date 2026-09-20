@@ -289,6 +289,93 @@ def main() -> int:
         session.flush()
         base_pass_result = compare_and_restore_if_regressed(session, current_version=current, current_quality=current_quality)
 
+    # 2026-09-20 第 4.5 步场景 A: QC 只读路径(allow_restore=False)——检出回退但不得改版本状态
+    with session_scope() as session:
+        book = Book(title="Revision Comparison Readonly QC", genre="玄幻", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        source = ChapterVersion(
+            chapter_id=chapter.id, version_number=1, title="源稿", content="源稿正文" * 900,
+            status="reviewed_pass", source="draft:regression",
+        )
+        current = ChapterVersion(
+            chapter_id=chapter.id, version_number=2, title="回退修订稿", content="回退正文" * 900,
+            status="needs_revision", source="revision:regression",
+        )
+        session.add_all([source, current])
+        session.flush()
+        source_quality = QualityReport(
+            chapter_version_id=source.id, score=80, passed=True,
+            report=json.dumps({"status": "PASS", "score": 80, "passed": True, "dimensions": {"readability": 75}}, ensure_ascii=False),
+        )
+        current_quality = QualityReport(
+            chapter_version_id=current.id, score=60, passed=False,
+            report=json.dumps({"status": "FAIL", "score": 60, "passed": False, "dimensions": {"readability": 50}}, ensure_ascii=False),
+        )
+        task = GenerationTask(
+            book_id=book.id, task_type="revise_chapter", status="completed",
+            input_json=json.dumps({"chapter_number": 1, "source_version_id": source.id}, ensure_ascii=False),
+            output_json=json.dumps({"version_id": current.id}, ensure_ascii=False),
+        )
+        session.add_all([source_quality, current_quality, task])
+        session.flush()
+        version_count_before = session.query(ChapterVersion).filter(ChapterVersion.chapter_id == chapter.id).count()
+        readonly_result = compare_and_restore_if_regressed(
+            session, current_version=current, current_quality=current_quality, allow_restore=False
+        )
+        version_count_after = session.query(ChapterVersion).filter(ChapterVersion.chapter_id == chapter.id).count()
+        readonly_current_report = json.loads(current_quality.report or "{}")
+
+    # 2026-09-20 第 4.5 步场景 B: 用户裁决保护——简报含「用户裁决」指令的修订稿禁止自动恢复
+    with session_scope() as session:
+        book = Book(title="Revision Comparison User Adjudication Guard", genre="玄幻", target_platform="manual")
+        session.add(book)
+        session.flush()
+        chapter = Chapter(book_id=book.id, chapter_number=1, title="第一章", status="draft")
+        session.add(chapter)
+        session.flush()
+        source = ChapterVersion(
+            chapter_id=chapter.id, version_number=1, title="源稿", content="源稿正文" * 900,
+            status="reviewed_pass", source="draft:regression",
+        )
+        current = ChapterVersion(
+            chapter_id=chapter.id, version_number=2, title="用户裁决修订稿", content="裁决正文" * 900,
+            status="needs_revision", source="revision:unit_flow_patch",
+        )
+        adjudicated_brief = ChapterBrief(
+            chapter_id=chapter.id,
+            goal="【用户裁决修订指令·最高优先级】删去老道问句，其余保留。",
+            required_beats="只做最小必要删改。",
+            constraints="revision_mode:local_patch",
+            status="superseded",
+        )
+        session.add_all([source, current, adjudicated_brief])
+        session.flush()
+        source_quality = QualityReport(
+            chapter_version_id=source.id, score=80, passed=True,
+            report=json.dumps({"status": "PASS", "score": 80, "passed": True, "dimensions": {"readability": 75}}, ensure_ascii=False),
+        )
+        current_quality = QualityReport(
+            chapter_version_id=current.id, score=60, passed=False,
+            report=json.dumps({"status": "FAIL", "score": 60, "passed": False, "dimensions": {"readability": 50}}, ensure_ascii=False),
+        )
+        task = GenerationTask(
+            book_id=book.id, task_type="revise_chapter", status="completed",
+            input_json=json.dumps(
+                {"chapter_number": 1, "source_version_id": source.id, "revision_brief_id": adjudicated_brief.id},
+                ensure_ascii=False,
+            ),
+            output_json=json.dumps({"version_id": current.id}, ensure_ascii=False),
+        )
+        session.add_all([source_quality, current_quality, task])
+        session.flush()
+        adjudicated_version_count_before = session.query(ChapterVersion).filter(ChapterVersion.chapter_id == chapter.id).count()
+        adjudicated_result = compare_and_restore_if_regressed(session, current_version=current, current_quality=current_quality)
+        adjudicated_version_count_after = session.query(ChapterVersion).filter(ChapterVersion.chapter_id == chapter.id).count()
+
     if result.status != "regressed":
         failures.append("comparison_did_not_detect_regression")
     if not restored or restored_status != "reviewed_pass" or not str(restored_source or "").startswith("revision_compare_restore:"):
@@ -322,6 +409,16 @@ def main() -> int:
         failures.append(f"unit_flow_protected_brief_not_reactivated:{unit_flow_brief_status}")
     if base_pass_result.status != "regressed" or not base_pass_result.restored_version_id:
         failures.append("base_quality_pass_regression_not_restored")
+    if readonly_result.status != "regressed_readonly" or readonly_result.restored_version_id is not None:
+        failures.append(f"readonly_qc_unexpected:{readonly_result.to_dict()}")
+    if version_count_after != version_count_before:
+        failures.append("readonly_qc_mutated_version_state")
+    if readonly_current_report.get("revision_comparison", {}).get("status") != "regressed_readonly":
+        failures.append("readonly_qc_missing_comparison_report")
+    if adjudicated_result.status != "regressed_protected" or adjudicated_result.restored_version_id is not None:
+        failures.append(f"user_adjudication_unexpected:{adjudicated_result.to_dict()}")
+    if adjudicated_version_count_after != adjudicated_version_count_before:
+        failures.append("user_adjudication_guard_mutated_version_state")
     print(
         json.dumps(
             {
@@ -331,6 +428,8 @@ def main() -> int:
                 "protected_result": protected_result.to_dict(),
                 "unit_flow_result": unit_flow_result.to_dict(),
                 "base_pass_result": base_pass_result.to_dict(),
+                "readonly_result": readonly_result.to_dict(),
+                "adjudicated_result": adjudicated_result.to_dict(),
             },
             ensure_ascii=False,
             indent=2,
