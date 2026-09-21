@@ -512,6 +512,11 @@ def main() -> None:
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
 
+    # 系统体检看板 (2026-09-21 人声攻坚元能力): 纯 SELECT 只读报告,
+    # 版本轨迹/慢性低分维度/失败分类, 零 LLM 调用, 对库零写入。
+    p = sub.add_parser("health-report")
+    p.add_argument("--book-id", type=int, required=True)
+
     p = sub.add_parser("revise-chapter")
     p.add_argument("--book-id", type=int, required=True)
     p.add_argument("--chapter-number", type=int, required=True)
@@ -1578,6 +1583,10 @@ def main() -> None:
                 version = approve_chapter(session, version_id=args.version_id, reviewer=args.reviewer)
                 print(f"version_id={version.id}")
                 print(f"status={version.status}")
+            elif args.cmd == "health-report":
+                from app.services.health_report import build_health_report, render_health_report_markdown
+
+                print(render_health_report_markdown(build_health_report(session, book_id=args.book_id)))
             elif args.cmd == "create-publish-job":
                 job = create_publish_job(session, version_id=args.version_id, platform=args.platform)
                 print(f"publish_job_id={job.id}")

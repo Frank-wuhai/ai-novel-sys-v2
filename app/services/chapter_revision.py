@@ -37,7 +37,7 @@ from app.services.chapter_units import split_chapter_units
 from app.services.reference_craft import build_reference_craft_block, evaluate_reference_craft
 from app.services.world_logic import evaluate_world_logic, game_world_meta_leak_reasons
 from app.services.paragraph_aesthetic import format_paragraph_aesthetic_contract
-from app.services.revision_success_boost import apply_revision_success_boost
+from app.services.revision_success_boost import BOOST_END_MARKER, BOOST_MARKER, apply_revision_success_boost
 from app.services.revision_contract_manager import normalize_active_revision_contract, prepare_new_revision_contract
 from app.services.writer_loop import build_writer_loop_plan, local_revision_brief_lines
 
@@ -252,9 +252,12 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     if local_patch_version:
         return local_patch_version
-    if _revision_specialty(revision_brief) == "unit_flow" and not rewrite_mode:
+    # 用户裁决简报不套专项硬守卫：专项路由已被跳过，兜底失败应允许整章定向
+    # 修订（v3 模板）承接，而不是把关键词误判升级成硬失败（2026-09-21 ch3 实测）。
+    adjudicated_brief = _brief_has_user_adjudication(revision_brief)
+    if _revision_specialty(revision_brief) == "unit_flow" and not rewrite_mode and not adjudicated_brief:
         raise ValueError("unit_flow revision failed; refusing full-chapter fallback")
-    if _revision_specialty(revision_brief) == "ending_hook" and not rewrite_mode:
+    if _revision_specialty(revision_brief) == "ending_hook" and not rewrite_mode and not adjudicated_brief:
         raise ValueError("ending_hook revision failed; refusing full-chapter fallback")
     if _brief_is_prose_targeted(revision_brief) and not forced_world_logic_rewrite:
         raise ValueError("prose-targeted revision requires narrow local patch; full rewrite fallback is blocked")
@@ -1209,6 +1212,23 @@ def _revision_is_local_patch(brief: ChapterBrief) -> bool:
     return _primary_revision_mode(text) == REVISION_MODE_LOCAL_PATCH
 
 
+def _brief_has_user_adjudication(brief: ChapterBrief) -> bool:
+    """简报是否含「用户裁决」指令（创意门禁终审标记，与 revision_comparison 同源）。
+
+    2026-09-21 ch3 v9 定向修订实测：专项分类器按关键词在全简报文本上路由，
+    会被两类噪声劫持——① success_boost 注入的模板套话（「动作后果」恒在）
+    把简报误判 unit_flow，而阅读评估类简报永远没有「第N单元」目标，必死在
+    missing_units_or_targets；② beats 里作为改进行列出的「章末钩子/章末压力」
+    把多点定向修订误判 ending_hook，路由到只换章末尾段的补丁（其 prompt 还
+    硬编码了另一本书的事实）。用户裁决简报的指令本身就是终审后的精确 mandate，
+    不再允许关键词分类器二次解释，一律走通用窄修订/整章定向路径。
+    """
+    from app.services.revision_comparison import USER_ADJUDICATION_MARKER
+
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    return USER_ADJUDICATION_MARKER in text
+
+
 def _revision_modes(text: str) -> set[str]:
     modes: set[str] = set()
     normalized = (text or "").replace("：", ":")
@@ -1340,7 +1360,10 @@ def _try_llm_local_patch_revision(
         )
         if paragraph_patch:
             return paragraph_patch
-    if specialty == "ending_hook":
+    # 用户裁决简报跳过专项补丁路由（见 _brief_has_user_adjudication）：裁决指令
+    # 是精确 mandate，ending_hook/unit_flow 关键词路由会把它窄化成错误目标。
+    adjudicated = _brief_has_user_adjudication(revision_brief)
+    if specialty == "ending_hook" and not adjudicated:
         return _try_ending_hook_patch_revision(
             session,
             book_id=book_id,
@@ -1349,7 +1372,7 @@ def _try_llm_local_patch_revision(
             revision_brief=revision_brief,
             dry_run=dry_run,
         )
-    if specialty == "unit_flow":
+    if specialty == "unit_flow" and not adjudicated:
         return _try_unit_flow_patch_revision(
             session,
             book_id=book_id,
@@ -1358,12 +1381,15 @@ def _try_llm_local_patch_revision(
             revision_brief=revision_brief,
             dry_run=dry_run,
         )
-    specialty_contract = _revision_specialty_contract(specialty)
+    # 裁决简报用 craft 通用边界：ending_hook 等专项合同硬编码了另一本书的
+    # 事实（陈松鹤/站桩/武馆收留），进 prompt 会污染正文（2026-09-21 实测误判）。
+    effective_specialty = "craft" if adjudicated else specialty
+    specialty_contract = _revision_specialty_contract(effective_specialty)
     if prose_targeted:
         prompt = f"""
 你是小说主笔，只做“表达层窄修订”，目标是降低 AI 味。不要重写整章，不要扩写剧情。
 
-专项修订类型：{specialty}
+专项修订类型：{effective_specialty}
 {specialty_contract}
 
 请严格输出 JSON：{{"title":"章节标题","content":"窄修订后的完整章节正文","patch_note":"说明删减/拆段/微调了哪里"}}
@@ -1391,7 +1417,7 @@ def _try_llm_local_patch_revision(
         prompt = f"""
 你是主笔，只做局部补丁，不重写整章。
 
-专项修订类型：{specialty}
+专项修订类型：{effective_specialty}
 {specialty_contract}
 
 请严格输出 JSON：{{"title":"章节标题","content":"局部补丁后的完整章节正文","patch_note":"说明改了哪里"}}
@@ -1977,7 +2003,18 @@ def _replace_chapter_units(content: str, replacements: dict[int, str]) -> str:
 
 
 def _revision_specialty(brief: ChapterBrief) -> str:
-    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""]).lower()
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    # 2026-09-21: 分类前剥掉 success_boost 注入块。boost 块是机器模板套话，
+    # 「落地方式」行恒含「动作后果」，focus 行可能含 chapter_unit_flow=NN——
+    # 任何被 boost 的简报都会被这些词劫持成 unit_flow 专项，而阅读评估类简报
+    # 没有「第N单元」目标，随后必死在 missing_units_or_targets（ch3 v9 实测）。
+    # 分类应只看 mandate 原文，不看注入的元指令。
+    text = re.sub(
+        rf"{re.escape(BOOST_MARKER)}.*?{re.escape(BOOST_END_MARKER)}",
+        " ",
+        text,
+        flags=re.S,
+    ).lower()
     if _revision_targets_fanqie_paragraph_gate(brief):
         return "prose_voice"
     if any(marker in text for marker in ("小单元", "chapter_unit", "unit_flow", "单元流", "动作后果", "信息增量")):
