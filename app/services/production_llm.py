@@ -123,16 +123,24 @@ def _empty_text_fallback(
     若当前本来就是非 thinking 版且也空,直接重发一次(可能是瞬时网络问题)。
     成功返回有效文本,失败返回 None。
     """
-    # 简单的 thinking → 非 thinking 切换映射
-    fallback_model = model
-    if model and model.endswith("-thinking"):
+    # 兜底模型解析优先级(2026-09-21 第4.5步验收腿修复):
+    # 1) 显式配置 LLM_FALLBACK_MODEL —— 指向一个非 thinking 模型;
+    # 2) 模型名带 -thinking 后缀 —— 去掉后缀换非 thinking 版;
+    # 3) 其余情况(如 kimi-k3 无后缀可剥)—— 同模型重发但必须抬高预算,
+    #    同预算重发对"推理烧光预算返回空"是注定的二次失败。
+    fallback_model = settings.llm_fallback_model or None
+    fallback_max_tokens = max_tokens
+    if not fallback_model and model and model.endswith("-thinking"):
         fallback_model = model[: -len("-thinking")]
-    if not fallback_model and settings.model_name and settings.model_name.endswith("-thinking"):
+    if not fallback_model and not model and settings.model_name and settings.model_name.endswith("-thinking"):
         fallback_model = settings.model_name[: -len("-thinking")]
+    if not fallback_model:
+        fallback_model = model
+        fallback_max_tokens = max(max_tokens * 2, 16000)
     try:
         resp = provider.generate(
             original_prompt,
-            max_tokens=max_tokens,
+            max_tokens=fallback_max_tokens,
             temperature=temperature,
             model=fallback_model,
             response_format={"type": "json_object"} if provider.name != "dry_run" else None,

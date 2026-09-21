@@ -76,9 +76,13 @@ class Settings:
     # 评审意图分 71 vs 33, 全是单发复核的随机性), 逐点多数票, 默认 3; 设 1 退化旧行为。
     intent_acceptance_samples: int = _int_env("INTENT_ACCEPTANCE_SAMPLES", 3)
     llm_draft_max_tokens: int = _int_env("LLM_DRAFT_MAX_TOKENS", 5000)
-    # 默认 9000: 修订调用要装下全章正文(~2500 Token)+thinking 推理(2000-4000),
-    # 5000 在 kimi-k3 真机上空响应/截断(2026-09-18 修订流实测)。
-    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 9000)
+    # 默认 16000: 修订调用要装下全章正文+质检报告(~10KB)+thinking 推理。
+    # 9000/8000 在 kimi-k3 真机上重写模式连败（2026-09-21 ch3 重建实测，
+    # 推理烧完预算返回空/纯思维链），16000 一次成功；与判卷修复同型。
+    llm_revision_max_tokens: int = _int_env("LLM_REVISION_MAX_TOKENS", 16000)
+    # 空文本兜底模型(2026-09-21): 指向非 thinking 模型名; 留空时按 -thinking 后缀
+    # 自动推导, 推导不出(如 kimi-k3)则同模型抬预算重发。见 production_llm._empty_text_fallback。
+    llm_fallback_model: str = os.getenv("LLM_FALLBACK_MODEL", "")
     llm_review_max_tokens: int = _int_env("LLM_REVIEW_MAX_TOKENS", 2200)
     # 成文判据判卷 (2026-09-10 第3步): prose_judgement_v1 要求温度 0、固定判卷 prompt、
     # 固定模型，产出缺口表 (无 verdict/score，不自动 FAIL)。

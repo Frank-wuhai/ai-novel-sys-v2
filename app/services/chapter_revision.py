@@ -302,39 +302,25 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             task_label="章节修订",
         )
     except StructuredOutputError as exc:
-        task = GenerationTask(
+        task = _record_revision_generation_failure(
+            session,
             book_id=book_id,
-            task_type="revise_chapter",
-            status="failed",
-            input_json=json.dumps(
-                {
-                    "chapter_number": chapter_number,
-                    "dry_run": dry_run,
-                    "prompt_template": f"{template.name}@{template.version}",
-                    "llm_parameters": llm_parameters,
-                    "source_version_id": source_version.id,
-                    "quality_report_id": quality.id if quality else None,
-                    "revision_brief_id": revision_brief.id,
-                    "rewrite_mode": rewrite_mode,
-                    "fresh_rewrite": fresh_rewrite,
-                    **packet.task_payload,
-                },
-                ensure_ascii=False,
-            ),
-            output_json=json.dumps(
-                {
-                    "provider": response.provider,
-                    "model": response.model,
-                    "llm_parameters": llm_parameters,
-                    "error": str(exc),
-                    "raw": response.text[:2000],
-                    **llm_usage_payload(response, prompt=prompt),
-                },
-                ensure_ascii=False,
-            ),
+            chapter_number=chapter_number,
+            source_version=source_version,
+            quality=quality,
+            revision_brief=revision_brief,
+            template_label=f"{template.name}@{template.version}",
+            llm_parameters=llm_parameters,
+            packet_payload=packet.task_payload,
+            response=response,
+            prompt=prompt,
+            error_category="structured_output",
+            error=str(exc),
+            extra={"raw": response.text[:2000]},
+            rewrite_mode=rewrite_mode,
+            fresh_rewrite=fresh_rewrite,
+            terminal=True,
         )
-        session.add(task)
-        session.flush()
         record_generation_llm_log(
             session,
             task=task,
@@ -344,6 +330,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             status="failed",
             error_category="structured_output",
         )
+        session.commit()
         raise
     min_chars = packet.blueprint.target_min_chars
     draft, length_repair = expand_short_draft_output(
@@ -405,6 +392,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 fresh_rewrite=fresh_rewrite,
                 min_chars=min_chars,
                 max_chars=packet.blueprint.target_max_chars,
+                terminal=True,
             )
             record_generation_llm_log(
                 session,
@@ -415,6 +403,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
                 status="failed",
                 error_category="game_world_meta_leakage",
             )
+            session.commit()
             raise StructuredOutputError(
                 "revision contains game-world meta leakage before persistence after repair: "
                 + "；".join(repaired_leak_reasons[:4])
@@ -501,6 +490,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             fresh_rewrite=fresh_rewrite,
             min_chars=min_chars,
             max_chars=max_chars,
+            terminal=True,
         )
         record_generation_llm_log(
             session,
@@ -511,6 +501,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             status="failed",
             error_category="overlong_revision_output",
         )
+        session.commit()
         raise ValueError(f"revision output exceeds max_chars before persistence: {draft_chars} > {max_chars}")
     anchor_rejection = _revision_author_sample_anchor_rejection(revision_brief, draft.title or "", draft.content or "")
     if anchor_rejection:
@@ -539,6 +530,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             fresh_rewrite=fresh_rewrite,
             min_chars=min_chars,
             max_chars=max_chars,
+            terminal=True,
         )
         record_generation_llm_log(
             session,
@@ -549,6 +541,7 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
             status="failed",
             error_category="author_sample_anchor_violation",
         )
+        session.commit()
         raise StructuredOutputError(f"revision violates author sample anchors before persistence: {anchor_rejection}")
     version = ChapterVersion(
         chapter_id=chapter.id,
@@ -675,7 +668,14 @@ def _record_revision_generation_failure(
     fresh_rewrite: bool,
     min_chars: int | None = None,
     max_chars: int | None = None,
+    terminal: bool = False,
 ) -> GenerationTask:
+    # 2026-09-21 第 4.5 步验收腿修复: 终态失败(记完即 raise)的记录原先挂在注定被
+    # session_scope 回滚的事务里——ch3 重建两连败在 DB 里零痕迹。terminal=True 时先
+    # 回滚清掉在途写入(与外层传播后回滚等效), 失败记录由调用方随后 commit 独立落库。
+    # 非终态调用点(记完继续流程, 如 duplicate_revision_output)保持原行为。
+    if terminal:
+        session.rollback()
     input_payload = {
         "chapter_number": chapter_number,
         "dry_run": response.provider == "dry_run",
