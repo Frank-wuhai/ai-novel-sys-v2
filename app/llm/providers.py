@@ -38,6 +38,7 @@ class BaseLLMProvider:
         temperature: float | None = None,
         response_format: dict | None = None,
         model: str | None = None,
+        extra_body: dict | None = None,
     ) -> LLMResponse:
         raise NotImplementedError
 
@@ -57,6 +58,7 @@ class DryRunProvider(BaseLLMProvider):
         temperature: float | None = None,
         response_format: dict | None = None,
         model: str | None = None,
+        extra_body: dict | None = None,
     ) -> LLMResponse:
         started = time.perf_counter()
         if "prose_judgement_json_schema" in prompt:
@@ -213,6 +215,7 @@ class ArkOpenAIProvider(BaseLLMProvider):
         temperature: float | None = None,
         response_format: dict | None = None,
         model: str | None = None,
+        extra_body: dict | None = None,
     ) -> LLMResponse:
         started = time.perf_counter()
         kwargs = {
@@ -227,6 +230,8 @@ class ArkOpenAIProvider(BaseLLMProvider):
             kwargs["temperature"] = temperature
         if response_format is not None:
             kwargs["response_format"] = response_format
+        if extra_body is not None:
+            kwargs["extra_body"] = extra_body
         try:
             result = self._create_completion(kwargs)
         except BadRequestError as exc:

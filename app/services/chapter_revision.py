@@ -252,9 +252,12 @@ def revise_chapter(session: Session, *, book_id: int, chapter_number: int, dry_r
     )
     if local_patch_version:
         return local_patch_version
-    # 用户裁决简报不套专项硬守卫：专项路由已被跳过，兜底失败应允许整章定向
-    # 修订（v3 模板）承接，而不是把关键词误判升级成硬失败（2026-09-21 ch3 实测）。
     adjudicated_brief = _brief_has_user_adjudication(revision_brief)
+    # 用户裁决简报禁止整章兜底：窄补丁未产出 = 诚实失败并报出原因。
+    fallback_ban = _adjudicated_fallback_ban_error(revision_brief, rewrite_mode=rewrite_mode)
+    if fallback_ban:
+        raise ValueError(fallback_ban)
+    # 非裁决简报的专项硬守卫规则不变：关键词误判不升级成硬失败。
     if _revision_specialty(revision_brief) == "unit_flow" and not rewrite_mode and not adjudicated_brief:
         raise ValueError("unit_flow revision failed; refusing full-chapter fallback")
     if _revision_specialty(revision_brief) == "ending_hook" and not rewrite_mode and not adjudicated_brief:
@@ -1229,6 +1232,188 @@ def _brief_has_user_adjudication(brief: ChapterBrief) -> bool:
     return USER_ADJUDICATION_MARKER in text
 
 
+# ---- 锚点式窄补丁（2026-09-22 治本重构）----
+# 病灶：旧接口让模型「全文进、全文出」（prompt 要求返回完整章节正文），
+# 每重打一句都是一次跑偏机会，裁决保护句/标题/开场全靠模型自觉；
+# 且输出 tokens 九成是照抄（v11 实测 response 7600 tokens）。
+# 新契约：模型只输出改动清单（anchor 逐字引用 + replacement），系统机械贴回，
+# edits 之外的文本逐字节不动——裁决内容由结构保证，不再依赖模型自觉。
+
+MIN_ANCHOR_CHARS = 6
+MAX_ANCHOR_EDITS = 60
+
+
+class AnchorPatchError(ValueError):
+    """锚点补丁校验失败（诚实失败，不猜测、不自动修补）。"""
+
+
+_LAST_PATCH_FAILURE_REASON = ""
+
+
+def _record_patch_failure(reason: str) -> None:
+    global _LAST_PATCH_FAILURE_REASON
+    _LAST_PATCH_FAILURE_REASON = reason
+
+
+def _last_patch_failure_reason() -> str:
+    return _LAST_PATCH_FAILURE_REASON
+
+
+def _apply_anchor_edits(source: str, edits: object) -> str:
+    """机械贴回锚点改动：edits 之外的文本逐字节保持。
+
+    每个 anchor 必须在原文逐字存在且仅出现一次（唯一性保证贴回位置无歧义），
+    锚点区间不得重叠；任一违反即抛 AnchorPatchError。
+    """
+    if not isinstance(edits, list):
+        raise AnchorPatchError("edits 必须是列表")
+    if len(edits) > MAX_ANCHOR_EDITS:
+        raise AnchorPatchError(f"edits 数量 {len(edits)} 超过上限 {MAX_ANCHOR_EDITS}")
+    spans: list[tuple[int, int, str]] = []
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            raise AnchorPatchError(f"edits[{index}] 不是对象")
+        anchor = str(edit.get("anchor") or "")
+        replacement = str(edit.get("replacement") or "")
+        if len(anchor) < MIN_ANCHOR_CHARS:
+            raise AnchorPatchError(f"edits[{index}] anchor 不足 {MIN_ANCHOR_CHARS} 字符")
+        occurrences = source.count(anchor)
+        if occurrences == 0:
+            raise AnchorPatchError(f"edits[{index}] anchor 在原文中不存在（非逐字引用）")
+        if occurrences > 1:
+            raise AnchorPatchError(f"edits[{index}] anchor 在原文出现 {occurrences} 次，无法唯一定位")
+        start = source.index(anchor)
+        spans.append((start, start + len(anchor), replacement))
+    spans.sort(key=lambda item: item[0])
+    for (_, prev_end, _), (next_start, _, _) in zip(spans, spans[1:]):
+        if next_start < prev_end:
+            raise AnchorPatchError("存在重叠锚点区间，拒绝猜测合并")
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, replacement in spans:
+        pieces.append(source[cursor:start])
+        pieces.append(replacement)
+        cursor = end
+    pieces.append(source[cursor:])
+    return "".join(pieces)
+
+
+def _extract_adjudicated_protected_strings(brief: ChapterBrief) -> list[str]:
+    """从裁决简报的【用户裁决】块提取「…」引用串，作为贴回后的机械保护清单。
+
+    只取裁决块内（标记行 + 其后的「- 」要点行及缩进续行）的引用串——块外的
+    「…」可能是反面示例（如「诡异/恐怖」级判断词是禁止项而非保护项），不能混进来。
+    散文描述的保护项（未加引号）无法逐字校验，不提取；它们由实验级检查覆盖。
+    """
+    text = "\n".join([brief.goal or "", brief.required_beats or "", brief.constraints or ""])
+    from app.services.revision_comparison import USER_ADJUDICATION_MARKER
+
+    marker_pos = text.find(f"【{USER_ADJUDICATION_MARKER}")
+    if marker_pos < 0:
+        return []
+    block_lines: list[str] = []
+    for line in text[marker_pos:].splitlines():
+        stripped = line.strip()
+        if not stripped:
+            break
+        if block_lines and not (stripped.startswith("-") or line[:1] in (" ", "　", "\t")):
+            break
+        block_lines.append(line)
+    seen: dict[str, None] = {}
+    for match in re.finditer(r"「([^」]{2,40})」", "\n".join(block_lines)):
+        seen[match.group(1)] = None
+    return list(seen)
+
+
+def _iter_balanced_json_objects(text: str):
+    """逐层扫描文本中 brace 平衡的 JSON 对象候选（字符串/转义感知）。"""
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    yield text[start : index + 1]
+                    start = -1
+
+
+def _parse_anchor_response(text: str) -> dict:
+    """锚点补丁响应的健壮解析：先标准解析，失败再逐个平衡候选兜底。
+
+    kimi-k3 会在 JSON 前输出推理文本，且推理里引用带花括号的 schema 示例——
+    朴素「首个 { 到末个 }」切片因此切出废片（2026-09-22 探针实录）。平衡扫描
+    逐个候选尝试，取第一个能解析且含 edits 列表的对象；schema 回声即使被误收，
+    其占位锚点也过不了下游逐字校验，失败保持诚实。
+    """
+    from app.services.production_llm import _parse_json_object
+
+    try:
+        data = _parse_json_object(text)
+        if isinstance(data.get("edits"), list):
+            return data
+    except Exception:
+        pass
+    best: dict | None = None
+    for candidate in _iter_balanced_json_objects(text):
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("edits"), list):
+            # 推理文本里引用的 schema 示例也含 edits 且能被解析——取最后一个候选，
+            # 真正的答案 JSON 在推理之后；schema 回声被误收时其占位锚点过不了
+            # 下游逐字校验，失败保持诚实。
+            best = data
+    if best is not None:
+        return best
+    raise ValueError("响应中找不到含 edits 列表的完整 JSON 对象")
+
+
+def _missing_protected_strings(brief: ChapterBrief, patched_content: str, *, source_content: str) -> list[str]:
+    """裁决简报的贴回后保护校验：任一保护串在产出中缺失即返回缺失清单。
+
+    只校验源文中逐字存在的保护串——裁决块里的概念名（如「引用回声式承接」）
+    并不逐字出现在正文里，强制要求会让所有补丁永远失败（2026-09-22 brief 18 实测）。
+    """
+    if not _brief_has_user_adjudication(brief):
+        return []
+    return [
+        item
+        for item in _extract_adjudicated_protected_strings(brief)
+        if item in source_content and item not in patched_content
+    ]
+
+
+def _adjudicated_fallback_ban_error(brief: ChapterBrief, *, rewrite_mode: bool) -> str | None:
+    """裁决简报的整章兜底禁令：窄补丁未产出时返回应抛出的错误信息，否则 None。
+
+    2026-09-22 ch3 v12 实测：整章重写无法逐字保住裁决元素（标题、引用回声式
+    开场、批准短句全被改写，靠预登记守卫才拦下）。窄补丁未产出 = 诚实失败，
+    不拿裁决内容去赌整章重生成的自觉。rewrite_mode 是简报自己要求重写，不在禁令内。
+    """
+    if not _brief_has_user_adjudication(brief) or rewrite_mode:
+        return None
+    reason = _last_patch_failure_reason() or "原因未记录"
+    return f"用户裁决简报窄修订失败（{reason}）；按裁决纪律拒绝整章兜底"
+
+
 def _revision_modes(text: str) -> set[str]:
     modes: set[str] = set()
     normalized = (text or "").replace("：", ":")
@@ -1331,7 +1516,9 @@ def _try_llm_local_patch_revision(
     dry_run: bool,
 ) -> ChapterVersion | None:
     source_content = source_version.content or ""
+    _record_patch_failure("")
     if chinese_chars(source_content) > 9000:
+        _record_patch_failure("原文超过 9000 字，窄补丁路不适用")
         return None
     provider = get_provider(dry_run)
     import os as _os
@@ -1385,6 +1572,24 @@ def _try_llm_local_patch_revision(
     # 事实（陈松鹤/站桩/武馆收留），进 prompt 会污染正文（2026-09-21 实测误判）。
     effective_specialty = "craft" if adjudicated else specialty
     specialty_contract = _revision_specialty_contract(effective_specialty)
+    # 锚点式输出契约：模型只产出改动清单，系统机械贴回（见文件顶部「锚点式窄补丁」）。
+    # max_tokens 6000：改动清单本身 ~1500 tokens 足够，但 kimi-k3 会先输出推理文本，
+    # 3000 档实测被推理吃光、JSON 没生成就截断（2026-09-22 探针实录），修复调用
+    # 再编出非逐字锚点。6000 给推理留头部空间，仍低于旧全文档 7600。
+    anchor_max_tokens = min(settings.llm_revision_max_tokens, 6000)
+    edits_json_spec = (
+        '{"patch_note":"一句话说明本轮改了什么","edits":'
+        '[{"anchor":"原文中需要修改的连续片段（从原章节逐字照抄，一字不差，含标点）",'
+        '"replacement":"修改后的文本","reason":"为什么改"}]}'
+    )
+    anchor_rules = """
+锚点硬性规则：
+- 直接输出 JSON，第一个字符就是 {，不要输出任何分析、思考或说明文字；
+- anchor 必须是原章节里逐字存在的连续片段，禁止凭记忆改写、省略或概括原文；
+- 每个 anchor 至少 6 个字符，且完整覆盖要改的句子或段落；
+- edits 之外的内容会被系统机械原样保留，一个字都不会动——绝对不要输出完整章节正文；
+- 不需要改的句子不要生成 edit；本轮没有可改之处就输出空 edits 列表；
+- 不输出 title，标题由系统保留原样。"""
     if prose_targeted:
         prompt = f"""
 你是小说主笔，只做“表达层窄修订”，目标是降低 AI 味。不要重写整章，不要扩写剧情。
@@ -1392,16 +1597,16 @@ def _try_llm_local_patch_revision(
 专项修订类型：{effective_specialty}
 {specialty_contract}
 
-请严格输出 JSON：{{"title":"章节标题","content":"窄修订后的完整章节正文","patch_note":"说明删减/拆段/微调了哪里"}}
+请严格输出 JSON：{edits_json_spec}
+{anchor_rules}
 
 硬性边界：
 - 不新增人物、地点、设定、任务、系统提示、现实钩子或章末新事件。
 - 不更换开场、主事件、场景顺序、章末事实。
 - 只允许做三类动作：删多余比喻/形容词；把长段拆短；把关键对白微调得更自然。
 - 可以补少量自然语气词、虚词和句间承接，但不能把对白写成解释设定的台词。
-- 总字数不得超过原文；如果必须补一句对白，必须在同段或相邻段删掉等量解释。
+- 替换文本总量不得超过被替换原文；如果必须补一句对白，必须在同段或相邻段删掉等量解释。
 - 段落密度要提升：优先把 3 行以上长段拆成 2-3 个短段，每段保留明确动作或反应。
-- content 必须是完整章节正文，不要输出说明、Markdown、修订清单或系统信息。
 
 本轮只处理修订单里的文风/对白/段落问题；修订单中任何“候选重建、重建、另起新章、增加新钩子”的字样都视为无效旧噪声。
 
@@ -1420,13 +1625,13 @@ def _try_llm_local_patch_revision(
 专项修订类型：{effective_specialty}
 {specialty_contract}
 
-请严格输出 JSON：{{"title":"章节标题","content":"局部补丁后的完整章节正文","patch_note":"说明改了哪里"}}
+请严格输出 JSON：{edits_json_spec}
+{anchor_rules}
 
 局部补丁要求：
 - 只能修订修订单命中的句子、词语、短段落或轻微承接问题。
 - 不得重排整章结构，不得改变章末事实，不得新增大设定。
-- 保留原文已经有效的场景、动作链、人物关系和信息顺序。
-- content 必须是完整章节正文，不要输出说明、Markdown 或系统信息。
+- 保留原文已经有效的场景、动作链、人物关系和信息顺序——不要为它们生成 edit。
 
 修订单：
 {revision_brief.goal}
@@ -1436,28 +1641,50 @@ def _try_llm_local_patch_revision(
 原章节：
 {source_content}
 """.strip()
+    # kimi-k3 是 reasoning 模型：不加抑制时先输出英文推理（可能吃光 max_tokens 使
+    # 正文 JSON 截断），response_format 约束不住（2026-09-22 三次 JSONDecodeError
+    # 实录 + 探针确认）。Ark 端点接受 thinking=disabled：干净 JSON 即出、耗时减半。
+    # 仅 Ark 传参——其他端点可能不认此参数（可安装包要接各家 LLM，不能写死）。
+    anchor_extra_body = {"thinking": {"type": "disabled"}} if provider.name == "ark_openai_compatible" else None
     try:
         response = provider.generate(
             prompt,
-            max_tokens=min(settings.llm_revision_max_tokens, 7600),
+            max_tokens=anchor_max_tokens,
             temperature=temperature,
             model=model,
             response_format={"type": "json_object"} if provider.name != "dry_run" else None,
+            extra_body=anchor_extra_body,
         )
-        data = parse_or_repair_json_object(
-            provider,
-            response_text=response.text,
-            original_prompt=prompt,
-            expected_schema='{"title":"章节标题","content":"局部补丁后的完整章节正文","patch_note":"说明改了哪里"}',
-            max_tokens=min(settings.llm_revision_max_tokens, 7600),
-            temperature=temperature,
-            model=model,
-            task_label="局部补丁修订",
-        )
-    except Exception:
+        try:
+            data = _parse_anchor_response(response.text)
+        except Exception:
+            data = parse_or_repair_json_object(
+                provider,
+                response_text=response.text,
+                original_prompt=prompt,
+                expected_schema='{"patch_note":"一句话说明","edits":[{"anchor":"原文逐字片段","replacement":"替换文本","reason":"原因"}]}',
+                max_tokens=anchor_max_tokens,
+                temperature=temperature,
+                model=model,
+                task_label="锚点式局部补丁修订",
+            )
+    except Exception as exc:
+        # 端点挂死/超时/解析失败在此汇聚：返回 None，由调用方按简报性质决定
+        # 整章兜底（非裁决简报）或诚实失败（裁决简报）。原因记录供上层报错；
+        # 注意任务行随整体回滚消失，DB 内仍无痕迹（观测缺口，已登记待修）。
+        _record_patch_failure(f"LLM 调用或解析失败：{type(exc).__name__}")
         return None
-    patched_content = str(data.get("content") or "").strip()
-    if not patched_content or patched_content == source_content:
+    try:
+        patched_content = _apply_anchor_edits(source_content, data.get("edits"))
+    except AnchorPatchError as exc:
+        _record_patch_failure(f"锚点校验失败：{exc}")
+        return None
+    if not patched_content.strip() or patched_content == source_content:
+        _record_patch_failure("补丁产出为空或与原文一致")
+        return None
+    missing_protected = _missing_protected_strings(revision_brief, patched_content, source_content=source_content)
+    if missing_protected:
+        _record_patch_failure(f"裁决保护串缺失：{'、'.join(missing_protected[:5])}")
         return None
     before_chars = chinese_chars(source_content)
     after_chars = chinese_chars(patched_content)
@@ -1466,8 +1693,10 @@ def _try_llm_local_patch_revision(
 
         max_after = min(REBUILD_MAX_CHARS, max(before_chars, int(before_chars * 1.03)))
         if after_chars < max(800, int(before_chars * 0.82)) or after_chars > max_after:
+            _record_patch_failure("贴回后字数越界")
             return None
     elif after_chars < max(800, int(before_chars * 0.75)) or after_chars > min(8000, int(max(before_chars, 1) * 1.18)):
+        _record_patch_failure("贴回后字数越界")
         return None
     version = _store_local_patch_version(
         session,
@@ -1476,9 +1705,10 @@ def _try_llm_local_patch_revision(
         source_version=source_version,
         revision_brief=revision_brief,
         patched_content=patched_content,
-        strategy="llm_local_patch",
+        strategy="llm_anchor_patch",
         output_extra={
             "patch_note": str(data.get("patch_note") or ""),
+            "edits_count": len(data.get("edits") or []),
             "revision_specialty": specialty,
             "provider": response.provider,
             "model": response.model,
@@ -1492,7 +1722,7 @@ def _try_llm_local_patch_revision(
             session,
             task=task,
             response=response,
-            prompt_template="local_patch@v1",
+            prompt_template="local_patch@v2",
             prompt=prompt,
             status="completed",
         )
