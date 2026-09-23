@@ -72,11 +72,22 @@ def run_prose_judgement(
     }
     response = None
     try:
+        # 2026-09-23 判卷同根因修复（用户批准）：kimi-k3 属 thinking 类模型，reasoning
+        # 会烧光 max_tokens 预算并把 schema 花括号写进推理文本，判卷 8/14=57% 失败、
+        # 签名 "no balanced object found"，与锚点补丁路三连 JSONDecodeError 同根因。
+        # 探针证实 Ark 端点接受 thinking=disabled（干净 JSON 即出）。仅 Ark 传参：
+        # 可安装包要接各家 LLM，未知参数可能被拒绝（同 chapter_revision 锚点路口径）。
+        judge_extra_body = (
+            {"thinking": {"type": "disabled"}}
+            if provider.name == "ark_openai_compatible"
+            else None
+        )
         response = provider.generate(
             prompt,
             max_tokens=settings.prose_judge_max_tokens,
             temperature=temperature,
             model=model,
+            extra_body=judge_extra_body,
         )
         judgement = parse_prose_judgement_output(response.text)
     except Exception as exc:  # noqa: BLE001 — 判卷失败不阻塞质检主流程
