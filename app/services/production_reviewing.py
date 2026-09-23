@@ -45,7 +45,14 @@ def review_chapter(
     chapter = session.scalar(select(Chapter).where(Chapter.book_id == book_id, Chapter.chapter_number == chapter_number))
     if not chapter:
         raise ValueError("chapter not found")
-    version = session.scalar(select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.id.desc()))
+    # 2026-09-23 选版口径对齐 revise（治本, 用户批准放行 ch3 时撞上）:
+    # 此前取全表最新 id, 链尾留 discarded 证据行会卡死 review
+    # (invalid transition: discarded --quality_fail--> needs_revision, 第 14.4 节实案)。
+    version = session.scalar(
+        select(ChapterVersion)
+        .where(ChapterVersion.chapter_id == chapter.id, ChapterVersion.status != "discarded")
+        .order_by(ChapterVersion.id.desc())
+    )
     if not version:
         raise ValueError("chapter version not found")
     was_approved = version.status == "approved"
