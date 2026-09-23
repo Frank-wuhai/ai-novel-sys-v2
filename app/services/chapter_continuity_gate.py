@@ -52,7 +52,15 @@ def evaluate_opening_continuity(previous_text: str, current_text: str) -> Chapte
     if repeated:
         issues.append(f"repeated_previous_scene:{repeated[:30]}")
 
-    if _has_unresolved_tail(previous_tail) and not _shares_tail_anchor(previous_tail, current_opening):
+    # 2026-09-23 R1 修复（尺子产品化第一刀，用户批准）：引用回声式承接豁免。
+    # 开场逐字引用上一章尾部语句（≥8 字）即算承接尾钩——网文最常见的合法承接方式,
+    # 此前被误判 opening_ignores_previous_tail_hook（ch3 开篇逐字引用 ch2 尾句实案,
+    # 三份同文报告一致误报, 见 ruler_calibration_list R1）。
+    if (
+        _has_unresolved_tail(previous_tail)
+        and not _shares_tail_anchor(previous_tail, current_opening)
+        and not _echoes_previous_tail(previous_text, current_opening)
+    ):
         issues.append("opening_ignores_previous_tail_hook")
 
     return ChapterContinuityReport(
@@ -87,6 +95,22 @@ def _repeated_opening_phrase(previous_text: str, current_opening: str) -> str:
         if len(phrase) >= 10 and phrase in (previous_text or "")[:-200]:
             return phrase
     return ""
+
+
+def _echoes_previous_tail(previous_text: str, current_opening: str) -> bool:
+    """开场是否逐字引用上一章尾部语句（引用回声式承接）。
+
+    只查上一章末尾 200 字, 与 _repeated_opening_phrase 的 [:-200] 区间互补,
+    不与 repeated_previous_scene 判定打架。
+    """
+    tail = (previous_text or "")[-200:]
+    if not tail:
+        return False
+    for clause in re.split(r"[。！？!?；;\n]+", current_opening or ""):
+        clause = clause.strip(" ，,。“”\"'：:")
+        if len(clause) >= 8 and clause in tail:
+            return True
+    return False
 
 
 def _has_unresolved_tail(tail: str) -> bool:
