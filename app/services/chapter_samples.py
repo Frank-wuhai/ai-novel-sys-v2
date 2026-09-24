@@ -85,7 +85,11 @@ def generate_chapter_samples(
         focus=focus,
     )
     max_tokens = min(max(settings.llm_draft_max_tokens // 2, 3200), 5200)
-    model = settings.llm_planning_model
+    # 2026-09-23 ch4 试金石卡点①（用户拍板换模型）：kimi-k3 thinking 把 JSON 吞进
+    # reasoning, sample lab 连败 json_repair_failed(char 0)——第三个受害路径。
+    # SAMPLE_LAB_MODEL 环境变量换范文生成模型（沿用 B_PIPELINE_MODEL 成例），默认不变。
+    import os as _os
+    model = _os.environ.get("SAMPLE_LAB_MODEL") or settings.llm_planning_model
     temperature = max(settings.llm_planning_temperature, 0.72)
     input_data = {
         "chapter_number": chapter_number,
