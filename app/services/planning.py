@@ -1103,6 +1103,7 @@ def _plan_one(
     budget_blocker = ""
     trend_blocker = ""
     should_generate_rebuild_candidates = False
+    revise_non_retryable_failure_pending = False
     reading_assessment_requires_revision = False
     protected_review_contract_passed = False
     feedback_marker_without_quality = False
@@ -1137,6 +1138,11 @@ def _plan_one(
                 chapter_id=chapter.id,
                 revision_brief=revision_brief,
                 latest_version=version,
+            )
+            revise_non_retryable_failure_pending = _revise_non_retryable_failure_pending(
+                session,
+                book_id=book_id,
+                chapter_number=chapter_number,
             )
             reading_assessment_requires_revision = bool(quality and _reading_assessment_requires_revision(quality))
             protected_review_contract_passed = bool(quality and quality.passed and _revision_brief_has_protected_review_marker(revision_brief))
@@ -1222,6 +1228,7 @@ def _plan_one(
             budget_blocker=budget_blocker,
             trend_blocker=trend_blocker,
             should_generate_rebuild_candidates=should_generate_rebuild_candidates,
+            revise_non_retryable_failure_pending=revise_non_retryable_failure_pending,
             reading_assessment_requires_revision=reading_assessment_requires_revision,
             protected_review_contract_passed=protected_review_contract_passed,
             feedback_marker_without_quality=feedback_marker_without_quality,
@@ -1828,6 +1835,42 @@ def _should_generate_rebuild_candidates(
         if assessment.get("action") == "auto_rebuild" or int(quality.score or 0) < 70:
             rebuild_failures += 1
     return rebuild_failures >= 3
+
+
+def _revise_non_retryable_failure_pending(session: Session, *, book_id: int, chapter_number: int) -> bool:
+    """卡点②修复（2026-09-26, 用户批准方案a）: 修订队列任务以 retryable=false 失败时
+    （实测: 非裁决 unit_flow 自动简报缺目标单元, 补丁器诚实跳过 + 兜底禁令拦截,
+    全程零 LLM 调用）, kernel 原样重排同一简报形成死循环; 检测到即改路
+    generate_rebuild_candidates。只看本章最新一条修订/重建队列任务:
+    重建或成功/进行中的修订排在其后, 信号自然失效; 修订失败↔重建交替空转由
+    既有 exhaustion 信号(≥2 批重建)兜底封顶。
+    """
+    tasks = session.scalars(
+        select(GenerationTask)
+        .where(
+            GenerationTask.book_id == book_id,
+            GenerationTask.task_type.in_([QUEUE_REVISE, QUEUE_REBUILD_CANDIDATES]),
+        )
+        .order_by(GenerationTask.id.desc())
+        .limit(12)
+    )
+    for task in tasks:
+        try:
+            input_data = json.loads(task.input_json or "{}")
+        except json.JSONDecodeError:
+            input_data = {}
+        if input_data.get("chapter_number") != chapter_number:
+            continue
+        if task.task_type == QUEUE_REBUILD_CANDIDATES:
+            return False
+        if task.status != "failed":
+            return False
+        try:
+            output_data = json.loads(task.output_json or "{}")
+        except json.JSONDecodeError:
+            output_data = {}
+        return output_data.get("retryable") is False
+    return False
 
 
 def _recent_budget_recovery_failed_revision_count(session: Session, *, chapter_id: int, limit: int) -> int:

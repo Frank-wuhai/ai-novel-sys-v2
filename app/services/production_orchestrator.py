@@ -77,6 +77,10 @@ class ProductionSituation:
     early_stop_best_version: int | None = None
     early_stop_best_score: int | None = None
     early_stop_triggered_rules: tuple[str, ...] = field(default_factory=tuple)
+    # 卡点②改路 (2026-09-26): 最新修订队列任务 retryable=false 失败（补丁路被
+    # 诚实拒绝的确定性失败）时置位, 由 planning.py 填充; 编排层据此抢在
+    # 「继续修订当选候选」等策略分支之前改路候选重建。
+    revise_non_retryable_failure_pending: bool = False
 
 
 def decide_production_route(situation: ProductionSituation) -> ProductionRouteDecision:
@@ -222,6 +226,19 @@ def _decide_revision_route(
                 f"early_stop_rules={','.join(s.early_stop_triggered_rules) or 'unknown'}",
                 f"best=v{s.early_stop_best_version}@{s.early_stop_best_score}",
             ),
+            protected_inputs=protected_inputs,
+        )
+    # 卡点②改路 (2026-09-26, 用户批准方案a): 修订任务 retryable=false 失败说明
+    # 修订路已被证伪（实测: 非裁决 unit_flow 自动简报缺目标单元, 补丁器诚实跳过
+    # + 兜底禁令, 零 LLM 调用确定性失败, ch4 task 76）。必须抢在
+    # continue_selected_rebuild_candidate 等策略分支之前, 否则 kernel 原样重排
+    # 同一简报形成死循环。early-stop 接受分支仍在上方——有合格稿直接收, 不重建。
+    if s.has_revision_brief and s.revise_non_retryable_failure_pending:
+        return ProductionRouteDecision(
+            intent="reroute_non_retryable_revise_failure",
+            action="generate_rebuild_candidates",
+            reason="修订任务以不可重试方式失败（补丁路被诚实拒绝），改用候选重建择优，停止原样重排同一简报。",
+            evidence=(*evidence, "revise_non_retryable_failure_pending=True"),
             protected_inputs=protected_inputs,
         )
     if s.strategy_action == "generate_rebuild_candidates" and s.strategy_intent == "escape_polluted_incumbent_restore":
